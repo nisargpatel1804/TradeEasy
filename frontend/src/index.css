@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 🎨 Define Theme Variables */
+@layer base {
+  :root {
+    --background: 0 0% 100%; /* White Background */
+    --foreground: 0 0% 10%; /* Dark Grey Text */
+    --card: 0 0% 98%; /* Light Greyish-White Cards */
+    --card-foreground: 0 0% 10%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 10%;
+    --primary: 0 0% 10%; /* Black Buttons */
+    --primary-foreground: 0 0% 98%; /* White Text */
+    --secondary: 0 0% 95%; /* Light Grey Background */
+    --secondary-foreground: 0 0% 10%;
+    --muted: 0 0% 92%; /* Subtle Grey */
+    --muted-foreground: 0 0% 30%;
+    --accent: 0 0% 90%;
+    --accent-foreground: 0 0% 10%;
+    --destructive: 0 84.2% 60.2%; /* Red (Sell/Loss) */
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 85%; /* Light Grey Borders */
+    --input: 0 0% 85%;
+    --ring: 0 0% 10%;
+    --radius: 0.5rem;
+  }
+
+  /* 🌙 Dark Mode (Black Background) */
+  .dark {
+    --background: 0 0% 10%; /* Black Background */
+    --foreground: 0 0% 98%; /* White Text */
+    --card: 0 0% 15%; /* Dark Grey Cards */
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 15%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%; /* White Buttons */
+    --primary-foreground: 0 0% 10%; /* Black Text */
+    --secondary: 0 0% 20%; /* Dark Grey Background */
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 30%;
+    --muted-foreground: 0 0% 70%;
+    --accent: 0 0% 25%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 40%;
+    --input: 0 0% 40%;
+    --ring: 0 0% 98%;
+  }
+}
+
+/* 📌 Apply Global Styles */
+@layer base {
+  * {
+    @apply border-border;
+  }
+  
+  body {
+    @apply bg-background text-foreground transition-colors duration-300;
+  }
+
+  /* 🎭 Smooth Theme Switching */
+  .dark body {
+    @apply transition-all duration-500 ease-in-out;
+  }
+}

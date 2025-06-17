@@ -1,0 +1,11 @@
+Flask
+Flask-SQLAlchemy
+Flask-Migrate
+Flask-Cors
+Flask-Login
+python-dotenv
+cryptography
+pycryptodome
+yfinance
+sqlalchemy
+requests

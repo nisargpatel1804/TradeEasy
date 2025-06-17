@@ -1,0 +1,64 @@
+tradeeasy/
+├── backend/
+│   ├── app/
+│   │   ├── __init__.py
+│   │   ├── models.py
+│   │   ├── routes/
+│   │   │   ├── auth.py
+│   │   │   ├── trade.py
+│   │   │   ├── watchlist.py
+│   │   │   ├── portfolio.py
+│   │   │   ├── performance.py
+│   │   │   ├── orders.py
+│   │   │   └── profile.py
+│   │   ├── utils/
+│   │   │   ├── aes_encryption.py
+│   │   │   ├── scraper.py
+│   │   │   └── otp_verification.py
+│   │   └── config.py
+│   ├── migrations/
+│   ├── requirements.txt
+│   ├── run.py
+│   └── .env
+├── frontend/
+│   ├── public/
+│   │   ├── index.html
+│   │   └── manifest.json
+│   ├── src/
+│   │   ├── @/
+│   │   │   ├── ui
+│   │   │   │   ├──...jsx(button,car,etc)
+│   │   ├── components/
+│   │   │   ├── Signup.jsx
+│   │   │   ├── Login.jsx
+│   │   │   ├── Dashboard.jsx
+│   │   │   ├── Watchlist.jsx
+│   │   │   ├── Portfolio.jsx
+│   │   │   ├── Performance.jsx
+│   │   │   ├── TradeForm.jsx
+│   │   │   ├── OrderBook.jsx
+│   │   │   ├── OrderDetail.jsx
+│   │   │   ├── Profile.jsx
+│   │   │   └── OTPVerification.jsx
+│   │   ├── pages/
+│   │   │   ├── Home.jsx
+│   │   │   ├── Trade.jsx
+│   │   │   ├── Orders.jsx
+│   │   │   └── ProfilePage.jsx
+│   │   ├── services/
+│   │   │   ├── api.js
+│   │   │   └── auth.js
+│   │   ├── App.jsx
+│   │   ├── main.jsx
+│   │   ├── index.css
+│   │   └── App.css
+│   ├── postcss.config.js
+│   ├── tailwind.config.js
+│   ├── vite.config.js
+│   ├── jsconfig.json
+│   ├── components.json
+│   ├── package.json
+│   ├── package-lock.json
+│   └── .env
+├── .gitignore
+└── README.md
