@@ -15,29 +15,109 @@ const apiClient = axios.create({
   withCredentials: true, // Enable credentials for session-based authentication
 });
 
+// Export the apiClient for direct use where needed
+export { apiClient as api };
+
+// Simplified request deduplication
+const pendingRequests = {};
+
 // Handle API errors & logout on session expiry
 apiClient.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    // Request completed, clear from pending requests
+    const requestKey = `${response.config.method}:${response.config.url}`;
+    delete pendingRequests[requestKey];
+    return response;
+  },
   async (error) => {
+    // Request failed, clear from pending requests
+    if (error.config) {
+      const requestKey = `${error.config.method}:${error.config.url}`;
+      delete pendingRequests[requestKey];
+    }
     await handleApiError(error);
     return Promise.reject(error);
   }
 );
 
 /**
- * Fetch data from the API.
+ * Fetch data from the API with deduplication of identical requests.
  * @param {string} endpoint - The API endpoint to fetch data from.
  * @param {object} options - Additional options for the request.
  * @returns {Promise<any>} - The fetched data or an error object.
  */
 const fetchData = async (endpoint, options = {}) => {
-  try {
-    const response = await apiClient.get(endpoint, options);
-    return response.data;
-  } catch (error) {
-    console.error(`Failed to fetch data from ${endpoint}:`, error);
-    return { error: error?.response?.data?.message || "Failed to fetch data" };
+  // Generate a request key
+  const requestKey = `get:${endpoint}${options.params ? JSON.stringify(options.params) : ''}`;
+  
+  // If we already have a pending request for this endpoint, return the existing promise
+  if (pendingRequests[requestKey]) {
+    return pendingRequests[requestKey];
   }
+  
+  // Create the request promise
+  const requestPromise = (async () => {
+    try {
+      const response = await apiClient.get(endpoint, options);
+      return response.data;
+    } catch (error) {
+      console.error(`Failed to fetch data from ${endpoint}:`, error);
+      return { error: error?.response?.data?.message || "Failed to fetch data" };
+    }
+  })();
+  
+  // Store the promise
+  pendingRequests[requestKey] = requestPromise;
+  
+  return requestPromise;
+};
+
+// -------------------------------------------------------------
+// Stock symbols for BSE and NSE
+// -------------------------------------------------------------
+
+// BSE 30 (SENSEX) symbols
+export const BSE30_SYMBOLS = [
+  "RELIANCE.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", "TCS.NS", "LT.NS",
+  "TATAMOTORS.NS", "BAJFINANCE.NS", "HINDUNILVR.NS", "ITC.NS", "SBIN.NS",
+  "AXISBANK.NS", "KOTAKBANK.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS",
+  "ULTRACEMCO.NS", "NESTLEIND.NS", "M&M.NS", "NTPC.NS", "WIPRO.NS",
+  "POWERGRID.NS", "TECHM.NS", "ASIANPAINT.NS", "BAJAJ-AUTO.NS", "ADANIPORTS.NS",
+  "HCLTECH.NS", "ONGC.NS", "HEROMOTOCO.NS", "TATASTEEL.NS",
+];
+
+// NSE 50 (NIFTY) symbols
+export const NSE50_SYMBOLS = [
+  "ADANIENT.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS", "AXISBANK.NS",
+  "BAJAJ-AUTO.NS", "BAJFINANCE.NS", "BAJAJFINSV.NS", "BHARTIARTL.NS", "BPCL.NS",
+  "BRITANNIA.NS", "CIPLA.NS", "COALINDIA.NS", "DIVISLAB.NS", "DRREDDY.NS",
+  "EICHERMOT.NS", "GRASIM.NS", "HCLTECH.NS", "HDFCBANK.NS", "HDFCLIFE.NS",
+  "HEROMOTOCO.NS", "HINDALCO.NS", "HINDUNILVR.NS", "ICICIBANK.NS", "INDUSINDBK.NS",
+  "INFY.NS", "ITC.NS", "JSWSTEEL.NS", "KOTAKBANK.NS", "LT.NS", "M&M.NS",
+  "MARUTI.NS", "NESTLEIND.NS", "NTPC.NS", "ONGC.NS", "POWERGRID.NS", "RELIANCE.NS",
+  "SBIN.NS", "SBILIFE.NS", "SHREECEM.NS", "SUNPHARMA.NS", "TATACONSUM.NS",
+  "TATAMOTORS.NS", "TATASTEEL.NS", "TECHM.NS", "TITAN.NS", "ULTRACEMCO.NS",
+  "UPL.NS", "WIPRO.NS",
+];
+
+/**
+ * Fetch stock data for a batch of symbols
+ * @param {Array} symbols - Array of stock symbols to fetch
+ * @returns {Promise<Object>} - Object with symbols as keys and stock data as values
+ */
+export const fetchBatchStockData = async (symbols) => {
+  // Disabled: previously fetched large batches via backend.
+  console.warn("fetchBatchStockData disabled – returning empty object");
+  return {};
+};
+
+/**
+ * Fetch data for both BSE 30 and NSE 50 stocks
+ * This combines both index stocks and removes duplicates
+ */
+export const fetchAllIndexStocks = async () => {
+  console.warn("fetchAllIndexStocks disabled – returning empty object");
+  return {};
 };
 
 /** Fetch Portfolio */
@@ -71,51 +151,82 @@ export const getStockOverview = async (symbol) => {
 /** Search Indian stocks (NSE/BSE) */
 export const searchStocks = async (query) => {
   if (!query.trim()) return [];
-  try {
-    const response = await apiClient.get("/stocks/search", { params: { query } });
-    return response.data;
-  } catch (error) {
-    console.error("Error searching stocks:", error);
-    return [];
+  
+  // Generate a request key
+  const requestKey = `get:/stocks/search?${query}`;
+  
+  // If we already have a pending request for this search query, return the existing promise
+  if (pendingRequests[requestKey]) {
+    return pendingRequests[requestKey];
   }
-};
-
-// Fetch watchlist data from the backend
-export const fetchWatchlist = async () => {
-  try {
-    const response = await apiClient.get("/watchlist");
-    if (response.data.success) {
-      return response.data; // Return the entire response object
-    } else {
-      throw new Error("Failed to fetch watchlist");
+  
+  // Create the request promise
+  const requestPromise = (async () => {
+    try {
+      const response = await apiClient.get("/stocks/search", { params: { query } });
+      return response.data;
+    } catch (error) {
+      console.error("Error searching stocks:", error);
+      return [];
     }
+  })();
+  
+  // Store the promise
+  pendingRequests[requestKey] = requestPromise;
+  
+  return requestPromise;
+};
+
+// --- Watchlist API Functions ---
+
+/** Fetches all of the user's watchlists. */
+export const fetchWatchlists = async () => {
+  return fetchData("/watchlists");
+};
+
+/** Creates a new watchlist. */
+export const createWatchlist = async (name) => {
+  try {
+    const response = await apiClient.post("/watchlists", { name });
+    return response.data;
   } catch (error) {
-    console.error("Error fetching watchlist:", error);
-    return { data: [] }; // Return an empty array in case of error
+    return { error: error.response?.data?.error || "Failed to create watchlist" };
   }
 };
 
-// Add a symbol to the watchlist
-export const addToWatchlist = async (symbol) => {
+/** Deletes a specific watchlist by its ID. */
+export const deleteWatchlist = async (watchlistId) => {
   try {
-    const response = await apiClient.post("/watchlist/add", { symbol });
+    const response = await apiClient.delete(`/watchlists/${watchlistId}`);
     return response.data;
   } catch (error) {
-    console.error("Error adding to watchlist:", error);
-    return { error: error.response?.data?.error || "Failed to add symbol" };
+    return { error: error.response?.data?.error || "Failed to delete watchlist" };
   }
 };
 
-// Remove a symbol from the watchlist
-export const removeFromWatchlist = async (symbol) => {
+/** Fetches all stocks within a specific watchlist. */
+export const fetchWatchlistStocks = async (watchlistId) => {
+  // Use our deduplication-enabled fetchData function
+  return fetchData(`/watchlists/${watchlistId}/stocks`);
+};
+
+/** Adds a stock to a specific watchlist. */
+export const addStockToWatchlist = async (watchlistId, symbol, name) => {
   try {
-    const response = await apiClient.delete("/watchlist/remove", {
-      data: { symbol }, // Send symbol in the request body
-    });
+    const response = await apiClient.post(`/watchlists/${watchlistId}/stocks`, { symbol, name });
     return response.data;
   } catch (error) {
-    console.error("Error removing from watchlist:", error);
-    return { error: error.response?.data?.error || "Failed to remove symbol" };
+    return { error: error.response?.data?.error || "Failed to add stock" };
+  }
+};
+
+/** Removes a stock from a specific watchlist. */
+export const removeStockFromWatchlist = async (watchlistId, symbol) => {
+  try {
+    const response = await apiClient.delete(`/watchlists/${watchlistId}/stocks/${symbol}`);
+    return response.data;
+  } catch (error) {
+    return { error: error.response?.data?.error || "Failed to remove stock" };
   }
 };
 
@@ -149,8 +260,18 @@ export const fetchPerformance = async () => {
 };
 
 /** Fetch Market Indices */
-export const fetchIndices = async () => {
-  return fetchData("/indices");
+export const fetchIndices = async (includeMovers = false, navbarOnly = false) => {
+  const options = { params: {} };
+  
+  if (includeMovers) {
+    options.params.include_movers = 'true';
+  }
+  
+  if (navbarOnly) {
+    options.params.navbar_only = 'true';
+  }
+  
+  return fetchData("/indices", options);
 };
 
 /** Update Market Indices */

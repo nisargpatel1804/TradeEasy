@@ -21,7 +21,11 @@ instance/
 backend/.coverage
 backend/pytest_cache/
 backend/htmlcov/
-backend/tev
+backend/tevenv/
+backend/flask_session/
+backend/migrations
+backend/check_flask_shell.py
+backend/insert_demo_user.py
 
 # Build artifacts
 *.egg-info/
@@ -64,3 +68,7 @@ Thumbs.db
 
 # Temporary folders
 npm-temp/
+
+# Project root environment files
+.env
+.env.*.local

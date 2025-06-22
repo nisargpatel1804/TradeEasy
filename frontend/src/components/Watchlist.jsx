@@ -1,270 +1,411 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState, useCallback } from "react";
 import {
-  fetchWatchlist,
-  addToWatchlist,
-  removeFromWatchlist,
+  createWatchlist,
+  deleteWatchlist,
+  fetchWatchlistStocks,
+  addStockToWatchlist,
+  removeStockFromWatchlist,
   searchStocks,
 } from "@/services/api";
+import { useDataContext } from "@/services/DataContext";
 import { Input } from "@/ui/input";
 import { Button } from "@/ui/button";
-import { Card, CardContent } from "@/ui/card";
 import { Skeleton } from "@/ui/skeleton";
 import { toast } from "react-hot-toast";
-import { Search } from "lucide-react";
-import { Trash2 } from "lucide-react";
+import { Search, Plus, Trash2, ArrowUpCircle, ArrowDownCircle, TrendingUp, TrendingDown } from "lucide-react";
 import debounce from "lodash.debounce";
-import TradeForm from "@/components/TradeForm";
+import { motion, AnimatePresence } from "framer-motion";
+import Navbar from "@/components/Navbar";
+import "../assets/css/watchlist.css";
 
 const Watchlist = () => {
-  const navigate = useNavigate();
-  const [watchlist, setWatchlist] = useState([]);
+  const [watchlists, setWatchlists] = useState([]);
+  const [activeWatchlist, setActiveWatchlist] = useState(null);
+  const [watchlistStocks, setWatchlistStocks] = useState([]);
+  const [gainers, setGainers] = useState([]);
+  const [losers, setLosers] = useState([]);
+  const [showMovers, setShowMovers] = useState(false);
+  const [moverType, setMoverType] = useState("gainers"); // "gainers" or "losers"
+  const [marketLoading, setMarketLoading] = useState(true);
+  const [showCreateInput, setShowCreateInput] = useState(false);
+  const [loading, setLoading] = useState({ lists: true, stocks: false });
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [actionLoading, setActionLoading] = useState({});
-  const [tradeModal, setTradeModal] = useState({
-    open: false,
-    symbol: null,
-    action: null // 'buy' or 'sell'
-  });
+  const [newWatchlistName, setNewWatchlistName] = useState("");
+  
+  // Get shared context data
+  const { getIndices, getWatchlists } = useDataContext();
 
+  // --- Layout helpers & page behaviour ---
+  // Always start the page scrolled to top to avoid the search bar being hidden beneath the navbar on first load / refresh.
   useEffect(() => {
-    fetchWatchlistData();
+    if (typeof window !== "undefined") {
+      window.scrollTo(0, 0);
+    }
   }, []);
 
-  const fetchWatchlistData = async () => {
-    setLoading(true);
-    setError("");
+  // Separate virtual index tabs (Nifty 50, Sensex) from user-created watchlists (e.g. Main, custom).
+  const indexWatchlists = watchlists.filter((w) => w.is_virtual);
+  const customWatchlists = watchlists.filter((w) => !w.is_virtual);
+
+  // Locate the default 'Main' watchlist (if present)
+  const mainWatchlist = watchlists.find((w) => w.name?.toLowerCase() === "main");
+
+  const loadWatchlists = useCallback(async () => {
+    setLoading(prev => ({ ...prev, lists: true }));
+    const res = await getWatchlists();
+    if (!res.error) {
+      // ensure default order Main > Nifty 50 > Sensex > others
+      const defaultOrder = ["Main", "Nifty 50", "Sensex"];
+      const sorted = [...res].sort((a,b)=>{
+        const normalise = (n) => (n === "Nifty50" ? "Nifty 50" : n);
+        const ai = defaultOrder.indexOf(normalise(a.name));
+        const bi = defaultOrder.indexOf(normalise(b.name));
+        if(ai === -1 && bi === -1) return 0;
+        if(ai === -1) return 1;
+        if(bi === -1) return -1;
+        return ai - bi;
+      });
+      // --- Ensure Nifty 50 and Sensex virtual tabs exist ---
+      const indexTabs = [
+        { id: "idx_nifty50", name: "Nifty 50", is_deletable: false, is_virtual: true },
+        { id: "idx_sensex", name: "Sensex", is_deletable: false, is_virtual: true },
+      ];
+      const existingNames = new Set(sorted.map(w=>w.name === "Nifty50" ? "Nifty 50" : w.name));
+      const merged = [...sorted];
+      indexTabs.forEach(tab => {
+        if(!existingNames.has(tab.name)) merged.push(tab);
+      });
+      // Re-sort with preferred order now that we've merged
+      const finalOrderedRaw = [...merged].sort((a,b)=>{
+         const nameA = a.name === "Nifty50" ? "Nifty 50" : a.name;
+         const nameB = b.name === "Nifty50" ? "Nifty 50" : b.name;
+         const ai = defaultOrder.indexOf(nameA);
+         const bi = defaultOrder.indexOf(nameB);
+         if(ai === -1 && bi === -1) return 0;
+         if(ai === -1) return 1;
+         if(bi === -1) return -1;
+         return ai - bi;
+      });
+
+      // Remove duplicates (same name, keep first occurrence)
+      const seenNames = new Set();
+      const finalOrdered = finalOrderedRaw.filter(w => {
+        const norm = w.name?.toLowerCase();
+        if (seenNames.has(norm)) return false;
+        seenNames.add(norm);
+        return true;
+      });
+      setWatchlists(finalOrdered);
+
+      // default active to Main if exists, otherwise first
+      const main = finalOrdered.find(w=>w.name === "Main");
+      const desired = main || finalOrdered[0] || null;
+
+      // update only if different to avoid unnecessary renders
+      if(desired && (!activeWatchlist || activeWatchlist.id !== desired.id)) {
+        setActiveWatchlist(desired);
+      }
+    } else {
+      toast.error("Could not load watchlists.");
+    }
+    setLoading(prev => ({ ...prev, lists: false }));
+  }, []);
+
+  const loadMarketMovers = useCallback(async () => {
+    // Keep the skeleton visible until either data arrives OR 8 s pass (whichever is first)
+    setMarketLoading(true);
+
+    let didFinish = false;
+
+    const timeoutId = setTimeout(() => {
+      if (!didFinish) {
+        // Timed-out – allow UI to show an empty state so user sees something
+        setMarketLoading(false);
+      }
+    }, 8000);
+
     try {
-      const response = await fetchWatchlist();
-      const validData = Array.isArray(response.data) ? response.data : [];
-      setWatchlist(validData);
-    } catch (err) {
-      console.error("Error fetching watchlist:", err);
-      setError("Failed to fetch watchlist data.");
+      const indices = await getIndices(false, true);
+
+      if (indices && !indices.error) {
+        // Extract Nifty50 gainers/losers; fall back gracefully if backend shape differs
+        const nifty = indices.find(i =>
+          i.name?.toLowerCase().includes("nifty") || i.symbol?.toLowerCase().includes("nifty")
+        );
+
+        setGainers(nifty?.gainers?.slice(0, 5) || []);
+        setLosers(nifty?.losers?.slice(0, 5) || []);
+      }
     } finally {
-      setLoading(false);
+      didFinish = true;
+      clearTimeout(timeoutId);
+      setMarketLoading(false);
     }
-  };
+  }, []);
 
-  const fetchStockSearch = async (query) => {
-    if (!query.trim()) {
-      setSearchResults([]);
-      return;
+  // Flag to prevent duplicate API calls in React's StrictMode
+  const [hasLoadedMarketMovers, setHasLoadedMarketMovers] = useState(false);
+  const [hasLoadedWatchlists, setHasLoadedWatchlists] = useState(false);
+
+  // Load market movers once when component mounts (no continuous polling).
+  useEffect(() => {
+    if (!hasLoadedMarketMovers) {
+      loadMarketMovers();
+      setHasLoadedMarketMovers(true);
     }
+  }, [loadMarketMovers, hasLoadedMarketMovers]);
 
-    try {
+  // Load user watchlists on initial render.
+  useEffect(() => {
+    if (!hasLoadedWatchlists) {
+      loadWatchlists();
+      setHasLoadedWatchlists(true);
+    }
+  }, [loadWatchlists, hasLoadedWatchlists]);
+
+  useEffect(() => {
+    const fetchStocks = async () => {
+      if (activeWatchlist && !activeWatchlist.is_virtual) {
+        // fetch real stocks
+        setLoading(prev => ({ ...prev, stocks: true }));
+        const res = await fetchWatchlistStocks(activeWatchlist.id);
+        if (!res.error) {
+          // The backend now returns full stock data
+          setWatchlistStocks(res.stocks || []);
+          
+          // Set gainers and losers for Sensex and Nifty 50
+          if (res.gainers && res.losers) {
+            setGainers(res.gainers);
+            setLosers(res.losers);
+          }
+        } else {
+          setWatchlistStocks([]);
+          setGainers([]);
+          setLosers([]);
+          toast.error(`Could not load stocks for ${activeWatchlist.name}`);
+        }
+        setLoading(prev => ({ ...prev, stocks: false }));
+      } else {
+        // Virtual index: clear detailed stock list (we rely on movers instead)
+        setWatchlistStocks([]);
+      }
+    };
+    fetchStocks();
+  }, [activeWatchlist]);
+  
+  const debouncedSearch = useCallback(
+    debounce(async (query) => {
+      if (!query.trim()) {
+        setSearchResults([]);
+        return;
+      }
       const results = await searchStocks(query);
-      setSearchResults(Array.isArray(results) ? results : []);
-    } catch (error) {
-      setSearchResults([]);
-    }
-  };
+      // Filter to NSE/BSE suffixes only, mimic Navbar logic
+      let filtered = [];
+      if (Array.isArray(results)) {
+        filtered = results.filter((s) => s["1. symbol"]?.match(/\.(NSE|BSE)$/));
+      } else if (results?.bestMatches) {
+        filtered = results.bestMatches.filter((s) => s["1. symbol"]?.match(/\.(NSE|BSE)$/));
+      }
+      // ---------------------------------------------
+      // Remove duplicates (prefer NSE over BSE) and
+      // exclude symbols already present in the current
+      // active watchlist to avoid 409 errors when
+      // attempting to add duplicates.
+      // ---------------------------------------------
+      const seen = new Set();
+      const currentSymbols = new Set(watchlistStocks.map((stk) => stk.symbol.toUpperCase()));
+      const deduped = [];
+      for (const s of filtered) {
+        const normalizeSymbol = (sym) => {
+          let s = (sym || "").toUpperCase();
+          if (s.endsWith(".NSE")) return s.replace(".NSE", ".NS");
+          if (s.endsWith(".BSE")) return s.replace(".BSE", ".BO");
+          return s;
+        };
 
-  const debouncedSearch = debounce(fetchStockSearch, 500);
+        const symbolNorm = normalizeSymbol(s["1. symbol"]);
+        if (seen.has(symbolNorm)) continue; // skip NSE/BSE duplicate
+        seen.add(symbolNorm);
+        if (currentSymbols.has(symbolNorm)) continue; // skip already-added stock
+        deduped.push(s);
+      }
+      setSearchResults(deduped);
+    }, 300),
+    [watchlistStocks]
+  );
 
   useEffect(() => {
     debouncedSearch(searchQuery);
-    return () => debouncedSearch.cancel();
-  }, [searchQuery]);
+  }, [searchQuery, debouncedSearch]);
 
-  const handleSelectStock = async (symbol) => {
+  const handleAddStock = async (stock) => {
+    if (!mainWatchlist) {
+      toast.error("Main watchlist not found.");
+      return;
+    }
+
+    // Prevent adding duplicates that already exist in Main
+    const mainSymbols = new Set(watchlistStocks.map((stk) => stk.symbol.toUpperCase()));
+    if (mainSymbols.has(stock["1. symbol"].toUpperCase())) {
+      toast.error("Stock already exists in Main.");
+      return;
+    }
+
     setSearchQuery("");
     setSearchResults([]);
 
-    try {
-      let formattedSymbol = symbol;
-      if (symbol.endsWith(".NSE")) {
-        formattedSymbol = symbol.replace(".NSE", ".NS");
-      } else if (symbol.endsWith(".BSE")) {
-        formattedSymbol = symbol.replace(".BSE", ".BO");
-      } else if (!symbol.endsWith(".NS") && !symbol.endsWith(".BO")) {
-        formattedSymbol = `${symbol}.NS`;
-      }
+    const res = await addStockToWatchlist(
+      mainWatchlist.id,
+      stock["1. symbol"],
+      stock["2. name"]
+    );
 
-      const response = await addToWatchlist(formattedSymbol);
+    if (!res.error) {
+      toast.success(`${stock["1. symbol"]} added.`);
 
-      if (!response.error) {
-        await fetchWatchlistData();
-        toast.success(`${formattedSymbol} added to watchlist!`);
-      } else {
-        setError(response.error);
-        toast.error(response.error);
-      }
-    } catch (err) {
-      console.error("Error adding symbol:", err);
-      setError("Failed to add symbol");
-      toast.error("Failed to add symbol");
+      // Optimistically update local state so UI reflects immediately
+      setWatchlistStocks((prev) => [
+        ...prev,
+        {
+          symbol: stock["1. symbol"],
+          name: stock["2. name"],
+          price: null,
+          change: null,
+          percent_change: null,
+        },
+      ]);
+
+      // Emit global event so other components (e.g. Navbar) refresh
+      window.dispatchEvent(
+        new CustomEvent("watchlist-stock-added", {
+          detail: {
+            watchlistId: mainWatchlist.id,
+            symbol: stock["1. symbol"],
+            name: stock["2. name"],
+          },
+        })
+      );
+
+      // Force refresh of DataContext cache
+      getWatchlists(true);
+    } else {
+      toast.error(res.error);
     }
   };
 
-  const handleRemoveSymbol = async (symbol) => {
-    setActionLoading((prev) => ({ ...prev, [symbol]: true }));
-    setError("");
-    try {
-      const response = await removeFromWatchlist(symbol);
+  const handleRemoveStock = async (symbol) => {
+    if (!activeWatchlist || activeWatchlist.is_virtual) return;
+    const res = await removeStockFromWatchlist(activeWatchlist.id, symbol);
+    if (!res.error) {
+      toast.success(`${symbol.toUpperCase()} removed.`);
 
-      if (!response.error) {
-        await fetchWatchlistData();
-        toast.success(`${symbol} removed from watchlist!`);
-      } else {
-        setError(response.error);
-        toast.error(response.error);
-      }
-    } catch (err) {
-      console.error("Error removing symbol:", err);
-      setError("Failed to remove symbol");
-      toast.error("Failed to remove symbol");
-    } finally {
-      setActionLoading((prev) => ({ ...prev, [symbol]: false }));
+      // Optimistically update local state
+      setWatchlistStocks((prev) =>
+        prev.filter((stk) => stk.symbol.toUpperCase() !== symbol.toUpperCase())
+      );
+
+      // Force refresh of DataContext cache so other components update
+      getWatchlists(true);
+    } else {
+      toast.error(res.error || "Failed to remove stock");
     }
   };
 
-  const handleStockClick = (symbol) => {
-    navigate(`/stock/overview/${symbol}`);
-  };
-
-  const openTradeModal = (symbol, action) => {
-    setTradeModal({
-      open: true,
-      symbol,
-      action
-    });
-  };
-
-  const closeTradeModal = () => {
-    setTradeModal({
-      open: false,
-      symbol: null,
-      action: null
-    });
-  };
+  /* ------------------------------------------------------------------
+   * RENDER
+   * ------------------------------------------------------------------ */
 
   return (
-    <div className="p-8 bg-background min-h-screen">
-      <h2 className="text-2xl font-semibold mb-6 text-center text-foreground">
-        Watchlist
-      </h2>
+    <>
+      <Navbar />
 
-      {error && <p className="text-yellow-600 mb-4 text-center">{error}</p>}
-
-      <Card className="p-6 bg-muted rounded-lg shadow-md">
-        <CardContent>
-          {/* Search Bar */}
-          <div className="relative mb-6">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
-            <Input
-              placeholder="Search NSE/BSE stocks..."
-              className="pl-10 bg-gray-50 border-gray-200"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-
-            {/* Search Results Dropdown */}
-            {searchResults.length > 0 && (
-              <div className="absolute left-0 right-0 mt-1 bg-white border rounded-lg shadow-lg z-10">
-                {searchResults.map((stock) => (
-                  <div
-                    key={stock["1. symbol"]}
-                    className="px-4 py-2 hover:bg-gray-100 cursor-pointer"
-                    onClick={() => handleSelectStock(stock["1. symbol"])}
-                  >
-                    {stock["1. symbol"]} - {stock["2. name"]}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Watchlist Table */}
-          {loading ? (
-            <Skeleton className="h-20 w-full" />
-          ) : watchlist.length === 0 ? (
-            <p className="text-muted-foreground text-center">
-              No symbols in watchlist.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="text-left border-b">
-                  <tr>
-                    <th className="pb-2">Symbol</th>
-                    <th className="pb-2">Price</th>
-                    <th className="pb-2">Change</th>
-                    <th className="pb-2">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {watchlist.map((item, index) => (
-                    <tr key={index} className="border-b hover:bg-gray-50">
-                      <td className="py-3">
-                        <span
-                          className="cursor-pointer hover:underline"
-                          onClick={() => handleStockClick(item.symbol)}
-                        >
-                          {item.symbol}
-                        </span>
-                      </td>
-                      <td className="py-3">₹{item.price.toFixed(2)}</td>
-                      <td className={`py-3 ${
-                        item.price_change >= 0 ? "text-green-600" : "text-red-600"
-                      }`}>
-                        ₹{item.price_change.toFixed(2)} (
-                        {item.percent_change.toFixed(2)}%)
-                      </td>
-                      <td className="py-3 flex items-center space-x-2">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleRemoveSymbol(item.symbol)}
-                          disabled={actionLoading[item.symbol]}
-                        >
-                          {actionLoading[item.symbol] ? (
-                            "Removing..."
-                          ) : (
-                            <Trash2 size={16} className="text-red-500" />
-                          )}
-                        </Button>
-                        <Button
-                          variant="outline"
-                          className="bg-green-100 text-green-700 hover:bg-green-200"
-                          onClick={() => openTradeModal(item.symbol, 'buy')}
-                        >
-                          Buy
-                        </Button>
-                        <Button
-                          variant="outline"
-                          className="bg-red-100 text-red-700 hover:bg-red-200"
-                          onClick={() => openTradeModal(item.symbol, 'sell')}
-                        >
-                          Sell
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Trade Form Modal */}
-      {tradeModal.open && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white p-8 rounded-lg max-w-md w-full">
-            <TradeForm 
-              symbol={tradeModal.symbol} 
-              defaultAction={tradeModal.action}
-              onClose={closeTradeModal} 
-            />
-          </div>
+      <div className="container mx-auto mt-24 p-4 max-w-5xl">
+        {/* Watchlist Tabs */}
+        <div className="flex flex-wrap gap-2 mb-6">
+          {watchlists.map((wl) => (
+            <Button
+              key={wl.id || wl.name}
+              variant={activeWatchlist?.id === wl.id ? "default" : "outline"}
+              size="sm"
+              onClick={() => setActiveWatchlist(wl)}
+            >
+              {wl.name}
+            </Button>
+          ))}
         </div>
-      )}
-    </div>
+
+        {/* Search bar */}
+        <div className="mb-6">
+          <Input
+            placeholder="Search NSE / BSE stocks…"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full"
+          />
+        </div>
+
+        {/* Search Results */}
+        {searchResults.length > 0 && (
+          <div className="mb-8 rounded-lg border border-gray-200 divide-y">
+            {searchResults.map((s) => (
+              <div
+                key={s["1. symbol"]}
+                className="flex items-center justify-between p-3 hover:bg-gray-50"
+              >
+                <div>
+                  <div className="font-medium">
+                    {s["2. name"]}
+                  </div>
+                  <div className="text-xs text-gray-500">
+                    {s["1. symbol"]}
+                  </div>
+                </div>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  onClick={() => handleAddStock(s)}
+                >
+                  <Plus className="h-4 w-4" />
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Stocks table */}
+        <div className="rounded-lg border border-gray-200 divide-y">
+          {loading.stocks ? (
+            <div className="p-6 text-center text-sm text-gray-500">Loading…</div>
+          ) : watchlistStocks.length === 0 ? (
+            <div className="p-6 text-center text-sm text-gray-500">No stocks to display.</div>
+          ) : (
+            watchlistStocks.map((stk) => (
+              <div
+                key={stk.symbol}
+                className="flex items-center justify-between p-3 hover:bg-gray-50"
+              >
+                <div>
+                  <div className="font-medium">{stk.name || stk.symbol}</div>
+                  <div className="text-xs text-gray-500">{stk.symbol}</div>
+                </div>
+                {!activeWatchlist?.is_virtual && (
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => handleRemoveStock(stk.symbol)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </>
   );
-};  
+};
 
 export default Watchlist;

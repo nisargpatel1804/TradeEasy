@@ -2,6 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App.jsx";
+import { DataProvider } from "./services/DataContext";
 import "./index.css";
 
 const rootElement = document.getElementById("root");
@@ -15,7 +16,9 @@ const root = createRoot(rootElement);
 root.render(
   <React.StrictMode>
     <BrowserRouter>
-      <App />
+      <DataProvider>
+        <App />
+      </DataProvider>
     </BrowserRouter>
   </React.StrictMode>
 );

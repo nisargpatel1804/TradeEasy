@@ -29,14 +29,12 @@ export default [
       ...react.configs['jsx-runtime'].rules,
       ...reactHooks.configs.recommended.rules,
       'react/jsx-no-target-blank': 'off',
-      'react-refresh/only-export-components': [
-        'warn',
-        { allowConstantExport: true },
-      ],
+      'react-refresh/only-export-components': 'off',
       'react/jsx-key': 'error', // Ensure JSX elements have keys
       'react/prop-types': 'off', // Disable prop-types if not using TypeScript
-      'no-unused-vars': 'warn', // Warn about unused variables
-      'no-console': 'warn', // Warn about console logs
+      'no-unused-vars': 'off', // Disable unused variables warnings
+      'no-console': 'off', // Disable console statement warnings
+      'react-hooks/exhaustive-deps': 'off', // Disable exhaustive-deps warnings
     },
   },
 ];

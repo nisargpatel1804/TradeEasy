@@ -29,7 +29,8 @@
   --shadow-secondary: rgba(0, 0, 0, 0.5);
 }
 
-/* Container and Layout */
+/* Container and Layout - REMOVED */
+/*
 .dashboard-container {
   min-height: 100vh;
   background: linear-gradient(
@@ -61,27 +62,26 @@
     radial-gradient(circle at 80% 80%, rgba(156, 163, 175, 0.03) 0%, transparent 50%),
     radial-gradient(circle at 40% 60%, rgba(255, 255, 255, 0.01) 0%, transparent 50%);
 }
+*/
 
 /* Main Content - Fixed padding between header and body */
 .dashboard-main {
-  padding-top: 10rem; /* Increased from 8rem to 10rem for better spacing */
-  padding-bottom: 2rem;
+  padding-top: 12rem; /* Increased for more space below navbar */
+  padding-bottom: 4rem;
+  background-color: var(--bg-primary); /* Added background color */
+  min-height: 100vh; /* Make sure it fills the screen */
 }
 
 .dashboard-content {
-  margin-left: 4rem;
-  margin-right: 4rem;
+  margin-left: 1rem;
+  margin-right: 1rem;
   max-width: none;
   display: flex;
   flex-direction: column;
-  gap: 0; /* Remove gap to control spacing manually */
+  gap: 3.5rem; /* Increased spacing between sections */
 }
 
-/* Overview Section - Detached with padding */
-.overview-section {
-  padding: 2rem 0; /* Add padding top and bottom */
-}
-
+/* Overview Grid */
 .overview-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -94,11 +94,7 @@
   }
 }
 
-/* Dashboard Grid Section - Detached */
-.dashboard-grid-section {
-  padding: 2rem 0; /* Add padding top and bottom */
-}
-
+/* Dashboard Grid */
 .dashboard-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -109,11 +105,6 @@
   .dashboard-grid {
     grid-template-columns: 1fr 1fr;
   }
-}
-
-/* Watchlist Section - Detached with padding */
-.watchlist-section {
-  padding: 2rem 0; /* Add padding top and bottom */
 }
 
 /* Loading States */
@@ -259,19 +250,6 @@
 }
 
 /* Overview Cards */
-.overview-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 1.5rem;
-  margin-bottom: 2rem;
-}
-
-@media (min-width: 768px) {
-  .overview-grid {
-    grid-template-columns: 1fr 1fr 1fr;
-  }
-}
-
 .overview-card {
   background: rgba(255, 255, 255, 0.9);
   backdrop-filter: blur(10px);
@@ -363,20 +341,6 @@
   color: var(--text-tertiary);
 }
 
-/* Dashboard Grid */
-.dashboard-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 2rem;
-  margin-bottom: 2rem;
-}
-
-@media (min-width: 1024px) {
-  .dashboard-grid {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
 /* Cards */
 .dashboard-card {
   background: rgba(255, 255, 255, 0.9);
@@ -385,6 +349,9 @@
   border-radius: 1rem;
   box-shadow: 0 4px 6px -1px var(--shadow-primary), 0 0 0 1px rgba(255, 255, 255, 0.5) inset;
   transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
 
 .dark .dashboard-card {
@@ -413,6 +380,7 @@
 
 .dashboard-card-content {
   padding: 1.5rem;
+  flex: 1;
 }
 
 .card-header-content {
@@ -579,6 +547,26 @@
   gap: 1.5rem;
 }
 
+.performance-metric.highlight {
+  background: linear-gradient(135deg, var(--text-primary), var(--text-secondary));
+  color: var(--bg-primary);
+  padding: 1.5rem;
+  border-radius: 0.75rem;
+  text-align: center;
+}
+
+.performance-metric.highlight .metric-label {
+  color: var(--bg-primary);
+  opacity: 0.8;
+  font-size: 1rem;
+}
+
+.performance-metric.highlight .metric-value {
+  color: var(--bg-primary);
+  font-size: 2.5rem;
+  line-height: 1;
+}
+
 .performance-overview {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -618,18 +606,9 @@
   border-radius: 0.75rem;
 }
 
-.performance-item.highlight {
-  background: linear-gradient(135deg, var(--text-primary), var(--text-secondary));
-  color: var(--bg-primary);
-}
-
 .performance-label {
   font-weight: 500;
   color: var(--text-secondary);
-}
-
-.performance-item.highlight .performance-label {
-  color: var(--bg-primary);
 }
 
 .performance-value {
@@ -651,11 +630,6 @@
 
 .dark .performance-value.loss {
   color: #f87171;
-}
-
-.performance-item.highlight .performance-value {
-  color: var(--bg-primary);
-  font-size: 1.25rem;
 }
 
 /* Watchlist */
@@ -848,12 +822,6 @@
     padding-top: 8rem; /* Reduced for mobile */
   }
 
-  .overview-section,
-  .dashboard-grid-section,
-  .watchlist-section {
-    padding: 1.5rem 0; /* Reduced padding for mobile */
-  }
-
   .card-header-content {
     flex-direction: column;
     align-items: flex-start;
@@ -994,4 +962,147 @@
 .performance-item,
 .performance-metric {
   transition: all 0.3s ease;
+}
+
+/* Enhanced Loading States */
+.loading-spinner-container {
+  position: relative;
+  width: 5rem;
+  height: 5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.15));
+}
+
+.enhanced-spinner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.spinner-ring {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border: 3px solid transparent;
+  border-top: 3px solid var(--text-primary);
+  border-radius: 50%;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.05);
+}
+
+.spinner-ring:nth-child(1) {
+  border-top-color: #000;
+}
+
+.spinner-ring:nth-child(2) {
+  width: 80%;
+  height: 80%;
+  top: 10%;
+  left: 10%;
+  border-top-color: #333;
+  border-right-color: #33333330;
+}
+
+.spinner-ring:nth-child(3) {
+  width: 60%;
+  height: 60%;
+  top: 20%;
+  left: 20%;
+  border-top-color: #666;
+  border-left-color: #66666630;
+}
+
+.loading-text {
+  color: var(--text-secondary);
+  font-size: 1.125rem;
+  font-weight: 500;
+  letter-spacing: 0.025em;
+  margin-top: 1rem;
+}
+
+/* Dark mode adjustments */
+.dark .spinner-ring:nth-child(1) {
+  border-top-color: #fff;
+}
+
+.dark .spinner-ring:nth-child(2) {
+  border-top-color: #ccc;
+  border-right-color: #cccccc30;
+}
+
+.dark .spinner-ring:nth-child(3) {
+  border-top-color: #999;
+  border-left-color: #99999930;
+}
+
+/* Full-site loader */
+.full-site-loader {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-primary);
+  z-index: 9999;
+  overflow: hidden; /* Prevent scrollbar */
+}
+
+.loader-spinner {
+  position: relative;
+  width: 5rem;
+  height: 5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.15));
+}
+
+.loader-spinner .spinner-ring {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border: 3px solid transparent;
+  border-top: 3px solid var(--text-primary);
+  border-radius: 50%;
+  animation: spin 1.5s linear infinite;
+}
+
+.loader-spinner .spinner-ring:nth-child(2) {
+  width: 80%;
+  height: 80%;
+  top: 10%;
+  left: 10%;
+  border-top-color: var(--text-secondary);
+  animation-delay: -0.1s;
+}
+
+.loader-spinner .spinner-ring:nth-child(3) {
+  width: 60%;
+  height: 60%;
+  top: 20%;
+  left: 20%;
+  border-top-color: var(--text-tertiary);
+  animation-delay: -0.2s;
+}
+
+.loader-text {
+  color: var(--text-secondary);
+  font-size: 1.125rem;
+  font-weight: 500;
+  margin-top: 1.5rem;
+}
+
+/* Ensure scrollbar is hidden during initial load */
+body.loading {
+  overflow: hidden !important;
+}
+
+/* Restore scrollbar after load */
+body.loaded {
+  overflow: auto !important;
 }

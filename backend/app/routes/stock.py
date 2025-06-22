@@ -1,5 +1,5 @@
 import yfinance as yf
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from functools import lru_cache
 import logging
 import requests
@@ -9,7 +9,7 @@ import random
 from urllib.parse import quote
 import re
 from fake_useragent import UserAgent
-import pandas as pd
+from app.utils.scraper import get_stock_price, fetch_historical_chart
 
 stock_bp = Blueprint('stock', __name__)
 logging.basicConfig(level=logging.INFO)
@@ -322,77 +322,37 @@ def scrape_ratios(symbol):
 
 @stock_bp.route("/stock/overview/<symbol>", methods=["GET"])
 def get_stock_overview(symbol):
+    """
+    Get stock overview and key metrics for a given symbol.
+    """
     try:
-        symbol = format_symbol(symbol)
+        # Basic price data
+        stock_price = get_stock_price(symbol)
+        
+        # Detailed data
         stock = get_stock_data(symbol)
-        info = stock.info
-
-        price_summary = {
-            "today_high": safe_get(info, "regularMarketDayHigh"),
-            "today_low": safe_get(info, "regularMarketDayLow"),
-            "52_week_high": safe_get(info, "fiftyTwoWeekHigh"),
-            "52_week_low": safe_get(info, "fiftyTwoWeekLow"),
-        }
-
-        company_essentials = {
-            "market_cap": safe_get(info, "marketCap"),
-            "enterprise_value": safe_get(info, "enterpriseValue"),
-            "pe_ratio": safe_get(info, "trailingPE"),
-            "pb_ratio": safe_get(info, "priceToBook"),
-            "dividend_yield": safe_get(info, "dividendYield"),
-            "eps": safe_get(info, "trailingEps"),
-        }
-
         ratios = calculate_ratios(stock)
-
-        history = stock.history(period="max")
-        if not history.empty:
-            history["50DMA"] = history["Close"].rolling(window=50).mean()
-            history["200DMA"] = history["Close"].rolling(window=200).mean()
-
-            historical_data = [
-                {
-                    "date": date.strftime("%Y-%m-%d"),
-                    "open": row["Open"],
-                    "high": row["High"],
-                    "low": row["Low"],
-                    "close": row["Close"],
-                    "volume": row["Volume"],
-                    "dma50": row["50DMA"] if not pd.isna(row["50DMA"]) else None,
-                    "dma200": row["200DMA"] if not pd.isna(row["200DMA"]) else None,
-                }
-                for date, row in history.iterrows()
-            ]
-        else:
-            historical_data = []
-
-
-        # Scrape all Screener.in data
-        balance_sheet = scrape_balance_sheet(symbol)
-        profit_loss = scrape_profit_loss(symbol)
-        quarters = scrape_quarters(symbol)
-        cash_flow = scrape_cash_flow(symbol)
-        shareholding = scrape_shareholding(symbol)
-        ratios_screener = scrape_ratios(symbol)
-        peers = scrape_peers(symbol)
-        analysis = scrape_analysis(symbol)
-
-        return jsonify({
-            "symbol": symbol,
-            "price_summary": price_summary,
-            "company_essentials": company_essentials,
+        
+        # Chart data for the past year
+        chart_data = fetch_historical_chart(stock, period="1y")
+        
+        # Combine all data
+        result = {
+            "price_data": stock_price,
             "ratios": ratios,
-            "historical_data": historical_data,
-            "balance_sheet": balance_sheet,
-            "profit_loss": profit_loss,
-            "quarters": quarters,
-            "cash_flow": cash_flow,
-            "shareholding": shareholding,
-            "ratios_screener": ratios_screener,
-            "peers": peers,
-            "analysis": analysis
-        })
-
+            "chart_data": chart_data
+        }
+        
+        return jsonify(result)
     except Exception as e:
-        logger.error(f"Error fetching stock data for {symbol}: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"Error fetching stock overview for {symbol}: {str(e)}")
+        return jsonify({"error": f"Failed to fetch stock data: {str(e)}"}), 500
+
+@stock_bp.route("/stocks/batch", methods=["GET"])
+def batch_stock_data():
+    """
+    Batch API disabled – previously fetched 80+ index constituents.
+    Now returns an empty dataset to avoid unnecessary load.
+    """
+    logger.info("/stocks/batch endpoint disabled – returning empty response")
+    return jsonify({"data": {}, "message": "Batch stock fetching disabled"})

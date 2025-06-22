@@ -18,6 +18,7 @@ import { isAuthenticated, logout } from '@/services/auth';
 import NotFound from '@/components/404';
 import Landing from '@/components/Landing';
 import Indices from "./components/Indices"; 
+import StockMarketView from "./components/StockMarketView";
 import { fetchIndices } from "./services/api";
 import StockOverview from "@/components/StockOverview"; // Import StockOverview
 
@@ -82,6 +83,9 @@ function App() {
 
           {/* Indices Route */}
           <Route path="/indices" element={isLoggedIn ? <Indices indices={indices} /> : <Navigate to="/login" replace />} />
+
+          {/* New Stock Market View Route */}
+          <Route path="/market" element={isLoggedIn ? <StockMarketView /> : <Navigate to="/login" replace />} />
 
           {/* New Stock Overview Route */}
           <Route

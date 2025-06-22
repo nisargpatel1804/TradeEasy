@@ -4,7 +4,8 @@ import random
 import string
 from flask_login import UserMixin
 from sqlalchemy.orm import relationship
-from sqlalchemy import Numeric, ForeignKey, Integer, String, DateTime, Boolean, Column, Index  # Explicit imports
+from sqlalchemy import Numeric, ForeignKey, Integer, String, DateTime, Boolean, Column, Index, Table  # Explicit imports
+from sqlalchemy import event
 
 from app import db  # ✅ Import `db` early
 
@@ -36,7 +37,7 @@ class User(db.Model, UserMixin):
     is_active = Column(Boolean, default=True, nullable=False)
 
     # Relationships
-    watchlist = relationship('Watchlist', backref='user', lazy=True)
+    watchlists = relationship('Watchlist', backref='user', lazy=True)
     transactions = relationship('Transaction', backref='user', lazy=True)
     holdings = relationship('Holding', backref='user', lazy=True)
 
@@ -60,18 +61,52 @@ class User(db.Model, UserMixin):
             raise ValueError("Invalid mobile number format")
 
 
+# Association table for the many-to-many relationship between Watchlist and Stock
+watchlist_stocks = Table(
+    'watchlist_stocks',
+    db.Model.metadata,
+    Column('watchlist_id', Integer, ForeignKey('watchlists.id'), primary_key=True),
+    Column('stock_symbol', String(20), ForeignKey('stocks.symbol'), primary_key=True)
+)
+
 # ✅ Watchlist Model
 class Watchlist(db.Model):
-    __tablename__ = 'watchlist'
+    __tablename__ = 'watchlists'
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
-    symbol = Column(String(20), nullable=False, index=True)
-    added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    __table_args__ = (Index('idx_watchlist_symbol', 'symbol'),)  # 🔹 Add Index for performance
+    name = Column(String(50), nullable=False)
+    is_deletable = Column(Boolean, default=True, nullable=False)
+    
+    # Many-to-many relationship with stock symbols
+    stocks = relationship('Stock', secondary=watchlist_stocks, lazy='dynamic',
+                          backref=db.backref('watchlists', lazy=True))
 
     def __repr__(self):
-        return f"<Watchlist UserID: {self.user_id} | Symbol: {self.symbol}>"
+        return f"<Watchlist {self.id}: {self.name} (User: {self.user_id})>"
+
+
+@event.listens_for(User, 'after_insert')
+def create_default_watchlists(mapper, connection, target):
+    """Create default watchlists for a new user."""
+    watchlist_table = Watchlist.__table__
+    
+    default_watchlists = [
+        {'user_id': target.id, 'name': 'Main', 'is_deletable': False},
+        {'user_id': target.id, 'name': 'Nifty50', 'is_deletable': False},
+        {'user_id': target.id, 'name': 'Sensex', 'is_deletable': False},
+    ]
+    
+    connection.execute(watchlist_table.insert().values(default_watchlists))
+
+
+class Stock(db.Model):
+    __tablename__ = 'stocks'
+    symbol = Column(String(20), primary_key=True)
+    name = Column(String(100))
+    # Add other relevant stock details here if needed in the future
+    
+    def __repr__(self):
+        return f"<Stock {self.symbol}>"
 
 
 class Transaction(db.Model):
@@ -131,3 +166,27 @@ class MarketIndex(db.Model):
 
     def __repr__(self):
         return f"<MarketIndex {self.name} | {self.price} ({self.percent_change}%)>"
+
+
+class GlobalMarketIndex(db.Model):
+    __tablename__ = 'global_market_data'
+
+    id = db.Column(db.Integer, primary_key=True)
+    category = db.Column(db.String(50), nullable=False, index=True)  # e.g., US MARKETS, COMMODITIES
+    name = db.Column(db.String(100), nullable=False)
+    symbol = db.Column(db.String(20), nullable=True, unique=True)
+    ltp = db.Column(db.Numeric(15, 4), nullable=True)
+    change = db.Column(db.Numeric(15, 4), nullable=True)
+    percent_change = db.Column(db.Numeric(8, 2), nullable=True)
+    high = db.Column(db.Numeric(15, 4), nullable=True)
+    low = db.Column(db.Numeric(15, 4), nullable=True)
+    open_price = db.Column(db.Numeric(15, 4), nullable=True)
+    prev_close = db.Column(db.Numeric(15, 4), nullable=True)
+    week_52_high = db.Column(db.Numeric(15, 4), nullable=True)
+    week_52_low = db.Column(db.Numeric(15, 4), nullable=True)
+    ytd_change = db.Column(db.Numeric(8, 2), nullable=True)
+    technical_rating = db.Column(db.String(20), nullable=True)
+    last_updated = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self):
+        return f"<GlobalMarketData {self.category} - {self.name}>"

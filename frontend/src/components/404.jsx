@@ -22,7 +22,7 @@ export default function NotFound() {
         >
           <h2 className="text-2xl font-semibold">Page Not Found</h2>
           <p className="text-gray-600 max-w-md mx-auto">
-            Oops! The page you're looking for seems to have vanished like profits in a bear market.
+            Oops! The page you&apos;re looking for seems to have vanished like profits in a bear market.
           </p>
         </motion.div>
 

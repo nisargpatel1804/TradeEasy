@@ -50,6 +50,22 @@ class Config:
 
     # 🚫 API Rate Limiting / Blocking
     API_BLOCKED = os.getenv('API_BLOCKED', 'False').lower() == 'true'  # Block API access if set to True
+    
+    # 📊 Market Data Configuration
+    USE_ALTERNATIVE_SOURCES = os.getenv('USE_ALTERNATIVE_SOURCES', 'True').lower() == 'true'  # Enable alternative sources
+    MAX_RETRIES = int(os.getenv('MAX_RETRIES', '5'))  # Increased maximum number of retries for API calls
+    CACHE_TIMEOUT = int(os.getenv('CACHE_TIMEOUT', '7200'))  # Increased timeout for cached data to 2 hours
+    REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '20'))  # Increased timeout for API requests in seconds
+    
+    # 🔄 Batch processing settings
+    BATCH_SIZE = int(os.getenv('BATCH_SIZE', '10'))  # Number of stocks to process in one batch
+    BATCH_DELAY = int(os.getenv('BATCH_DELAY', '5'))  # Delay between batches in seconds
+    MAX_CONCURRENT_REQUESTS = int(os.getenv('MAX_CONCURRENT_REQUESTS', '5'))  # Maximum concurrent requests
+    
+    # 🌐 Alternative data sources configuration
+    NSE_INDIA_URL = os.getenv('NSE_INDIA_URL', 'https://www.nseindia.com/api/quote-equity?symbol=')
+    MONEY_CONTROL_URL = os.getenv('MONEY_CONTROL_URL', 'https://www.moneycontrol.com/india/stockpricequote/')
+    INVESTING_URL = os.getenv('INVESTING_URL', 'https://in.investing.com/indices/')
 
 
 class DevelopmentConfig(Config):
@@ -59,6 +75,7 @@ class DevelopmentConfig(Config):
     SQLALCHEMY_ECHO = True  # Log SQL queries for debugging
     CORS_ORIGINS = ['*']  # Allow all origins in development
     CORS_SUPPORTS_CREDENTIALS = True
+    USE_ALTERNATIVE_SOURCES = True  # Always use alternative sources in development
 
 
 class ProductionConfig(Config):
@@ -68,6 +85,8 @@ class ProductionConfig(Config):
     SESSION_PERMANENT = True  # Ensure sessions persist
     SQLALCHEMY_ECHO = False  # Disable SQL query logging in production
     CORS_ORIGINS = os.getenv('CORS_ORIGINS', '').split(',')  # Strict origin control
+    # In production, rely on .env setting for alternative sources
+    USE_ALTERNATIVE_SOURCES = os.getenv('USE_ALTERNATIVE_SOURCES', 'True').lower() == 'true'
 
 
 # 🔁 Configuration selection based on environment
