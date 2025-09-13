@@ -1,9 +1,10 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useMemo, useCallback } from "react"
 import { useNavigate } from "react-router-dom"
-import { fetchPortfolio, fetchPerformance } from "@/services/api"
+import { fetchPortfolio, fetchPerformance, fetchWatchlistStocks } from "@/services/api"
 import { useDataContext } from "@/services/DataContext"
+import priceUpdateService from "@/services/priceUpdateService"
 import { Card, CardHeader, CardContent, CardTitle } from "@/ui/card"
 import { Button } from "@/ui/button"
 import { isAuthenticated, getProfile, getClientId } from "@/services/auth"
@@ -41,6 +42,13 @@ const Dashboard = () => {
   const [portfolio, setPortfolio] = useState(null)
   const [performance, setPerformance] = useState(null)
   const [watchlist, setWatchlist] = useState(null)
+  const [watchlistStocks, setWatchlistStocks] = useState([])
+  const [realTimePrices, setRealTimePrices] = useState({})
+  const [priceUpdateStatus, setPriceUpdateStatus] = useState({
+    isConnected: false,
+    lastUpdate: null,
+    updateCount: 0
+  })
   const [portfolioPage, setPortfolioPage] = useState(0)
   const [watchlistPage, setWatchlistPage] = useState(0)
   const [profile, setProfile] = useState({ name: "Client Name", clientId: "TR123456" })
@@ -160,9 +168,17 @@ const Dashboard = () => {
           })
 
         const watchlistPromise = getWatchlists()
-          .then((data) => {
+          .then(async (data) => {
             if (data && !data.error) {
-              setWatchlist(data);
+              // Find the 'Stocks' watchlist and fetch its stocks
+              const stocksWatchlist = data.find(w => w.name === "Stocks")
+              if (stocksWatchlist) {
+                const stocksData = await fetchWatchlistStocks(stocksWatchlist.id)
+                if (stocksData && !stocksData.error) {
+                  setWatchlistStocks(stocksData.stocks || [])
+                  setWatchlist({ data: stocksData.stocks || [] })
+                }
+              }
             }
             setComponentsLoaded((prev) => ({ ...prev, watchlist: true }))
             return data
@@ -198,7 +214,64 @@ const Dashboard = () => {
     fetchData()
   }, [navigate])
 
-  const formatCurrency = (amount) => {
+  // Price update subscription effect - optimized to prevent excessive re-renders
+  useEffect(() => {
+    let unsubscribe = null
+    
+    // Only subscribe if we have watchlist stocks
+    if (watchlistStocks.length > 0) {
+      unsubscribe = priceUpdateService.subscribe(({ allPrices, isConnected, isMarketHours, error }) => {
+        setPriceUpdateStatus(prev => ({
+          isConnected,
+          lastUpdate: isConnected ? new Date().toLocaleTimeString() : prev.lastUpdate,
+          updateCount: isConnected ? prev.updateCount + 1 : prev.updateCount
+        }))
+        
+        if (isConnected && allPrices && Object.keys(allPrices).length > 0) {
+          // Update watchlist stocks with new prices
+          setWatchlistStocks(prevStocks => {
+            const updatedStocks = prevStocks.map(stock => {
+              const newPriceData = allPrices[stock.symbol]
+              if (newPriceData) {
+                return {
+                  ...stock,
+                  price: newPriceData.ltp,
+                  change: newPriceData.change,
+                  percent_change: newPriceData.percent_change,
+                  last_updated: newPriceData.last_updated
+                }
+              }
+              return stock
+            })
+            
+            // Also update the watchlist.data state for display
+            setWatchlist(prev => ({
+              ...prev,
+              data: updatedStocks
+            }))
+            
+            return updatedStocks
+          })
+          
+          // Update real-time prices state
+          setRealTimePrices(allPrices)
+        }
+        
+        if (error && isMarketHours) {
+          console.warn('Dashboard: Price update service error:', error)
+        }
+      })
+    }
+
+    // Cleanup subscription on unmount or when stocks change
+    return () => {
+      if (unsubscribe) {
+        unsubscribe()
+      }
+    }
+  }, [watchlistStocks.length]) // Only depend on watchlist length, not the entire array
+
+  const formatCurrency = useCallback((amount) => {
     if (amount === null || amount === undefined) {
       return "₹0.00"
     }
@@ -207,33 +280,37 @@ const Dashboard = () => {
       currency: "INR",
       minimumFractionDigits: 2,
     })
-  }
+  }, [])
 
-  const handlePortfolioNext = () => {
+  const handlePortfolioNext = useCallback(() => {
     const maxPage = Math.ceil((portfolio?.holdings?.length || 0) / portfolioItemsPerPage) - 1
     setPortfolioPage((prev) => Math.min(prev + 1, maxPage))
-  }
+  }, [portfolio?.holdings?.length, portfolioItemsPerPage])
 
-  const handlePortfolioPrev = () => {
+  const handlePortfolioPrev = useCallback(() => {
     setPortfolioPage((prev) => Math.max(prev - 1, 0))
-  }
+  }, [])
 
-  const handleWatchlistNext = () => {
-    const maxPage = Math.ceil(watchlist?.data?.length || 0 / watchlistItemsPerPage) - 1
+  const handleWatchlistNext = useCallback(() => {
+    const maxPage = Math.ceil((watchlist?.data?.length || 0) / watchlistItemsPerPage) - 1
     setWatchlistPage((prev) => Math.min(prev + 1, maxPage))
-  }
+  }, [watchlist?.data?.length, watchlistItemsPerPage])
 
-  const handleWatchlistPrev = () => {
+  const handleWatchlistPrev = useCallback(() => {
     setWatchlistPage((prev) => Math.max(prev - 1, 0))
-  }
+  }, [])
 
-  const paginatedPortfolio =
+  // Memoized calculations to prevent unnecessary re-renders
+  const paginatedPortfolio = useMemo(() => 
     portfolio?.holdings?.slice(portfolioPage * portfolioItemsPerPage, (portfolioPage + 1) * portfolioItemsPerPage) || []
+  , [portfolio?.holdings, portfolioPage, portfolioItemsPerPage])
 
-  const paginatedWatchlist = watchlist?.data?.slice(
-    watchlistPage * watchlistItemsPerPage,
-    (watchlistPage + 1) * watchlistItemsPerPage,
-  ) || []
+  const paginatedWatchlist = useMemo(() => 
+    watchlist?.data?.slice(
+      watchlistPage * watchlistItemsPerPage,
+      (watchlistPage + 1) * watchlistItemsPerPage,
+    ) || []
+  , [watchlist?.data, watchlistPage, watchlistItemsPerPage])
 
   // Component Loading Skeleton
   const ComponentSkeleton = ({ title, rows = 3 }) => (
@@ -670,12 +747,14 @@ const Dashboard = () => {
                             <Star className="watchlist-star" />
                             <h3 className="watchlist-symbol">{cleanSymbol(stock.symbol)}</h3>
                           </div>
-                          <span className={`watchlist-change ${stock.percent_change >= 0 ? "profit" : "loss"}`}>
-                            {stock.percent_change >= 0 ? "+" : ""}
-                            {stock.percent_change}%
+                          <span className={`watchlist-change ${(stock.percent_change || 0) >= 0 ? "profit" : "loss"}`}>
+                            {(stock.percent_change === 0 || stock.percent_change === null || stock.percent_change === undefined) ? "-.--%" : 
+                             `${(stock.percent_change || 0) >= 0 ? "+" : ""}${isNaN(Number(stock.percent_change)) ? "-.--" : Number(stock.percent_change || 0).toFixed(2)}%`}
                           </span>
                         </div>
-                        <p className="watchlist-price">₹{stock.price ?? "0.00"}</p>
+                        <p className="watchlist-price">
+                          ₹{(stock.price === 0 || stock.price === null || stock.price === undefined || isNaN(Number(stock.price))) ? "-.--" : Number(stock.price || 0).toFixed(2)}
+                        </p>
                         <div className="watchlist-exchange">NSE</div>
                       </div>
                     ))}

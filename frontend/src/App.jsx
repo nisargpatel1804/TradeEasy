@@ -11,13 +11,15 @@ import Dashboard from '@/components/Dashboard';
 import Watchlist from '@/components/Watchlist';
 import Performance from '@/components/Performance';
 import Portfolio from '@/components/Portfolio';
-import "./App.css";
+import "./index.css";
 import { useNavigate } from 'react-router-dom';
 import React from 'react';
 import { isAuthenticated, logout } from '@/services/auth';
 import NotFound from '@/components/404';
 import Landing from '@/components/Landing';
 import Indices from "./components/Indices"; 
+import Market from "./components/Market"; // New Market component
+import Nifty50View from "./components/Nifty50View"; // New Nifty50 component
 import StockMarketView from "./components/StockMarketView";
 import { fetchIndices } from "./services/api";
 import StockOverview from "@/components/StockOverview"; // Import StockOverview
@@ -84,8 +86,14 @@ function App() {
           {/* Indices Route */}
           <Route path="/indices" element={isLoggedIn ? <Indices indices={indices} /> : <Navigate to="/login" replace />} />
 
-          {/* New Stock Market View Route */}
-          <Route path="/market" element={isLoggedIn ? <StockMarketView /> : <Navigate to="/login" replace />} />
+          {/* New Market Route - Shows Nifty 50 stocks */}
+          <Route path="/market" element={isLoggedIn ? <Nifty50View /> : <Navigate to="/login" replace />} />
+
+          {/* Original Market component (keeping for backward compatibility) */}
+          <Route path="/market-old" element={isLoggedIn ? <Market /> : <Navigate to="/login" replace />} />
+
+          {/* Original Stock Market View Route (keeping for backward compatibility) */}
+          <Route path="/market-legacy" element={isLoggedIn ? <StockMarketView /> : <Navigate to="/login" replace />} />
 
           {/* New Stock Overview Route */}
           <Route

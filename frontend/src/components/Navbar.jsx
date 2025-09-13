@@ -9,7 +9,7 @@ import { useDataContext } from "@/services/DataContext"
 import { Input } from "@/ui/input"
 import { Avatar, AvatarFallback } from "@/ui/avatar"
 import { Button } from "@/ui/button"
-import { Bell, Search, TrendingUp, LogOut, User, ChevronDown, BarChart3, Moon, Sun, Globe, Plus } from "lucide-react"
+import { Search, TrendingUp, LogOut, User, ChevronDown, BarChart3, Moon, Sun, Globe, Plus, Menu, Loader2 } from "lucide-react"
 import { getClientId, isAuthenticated, logout } from "@/services/auth"
 import debounce from "lodash.debounce"
 import { motion, AnimatePresence } from "framer-motion"
@@ -26,7 +26,7 @@ import { Star } from "lucide-react"
 import { toast } from "react-hot-toast"
 
 const Navbar = () => {
-  const [profile, setProfile] = useState({ name: "Client Name", clientId: "TR123456" })
+  const [profile, setProfile] = useState({ name: "Client Name", clientId: "TR123456", email: "" })
   const [indices, setIndices] = useState([])
   const [searchQuery, setSearchQuery] = useState("")
   const [searchResults, setSearchResults] = useState([])
@@ -34,6 +34,9 @@ const Navbar = () => {
   const [darkMode, setDarkMode] = useState(false)
   const [mainWatchlist, setMainWatchlist] = useState(null)
   const [allWatchlists, setAllWatchlists] = useState([])
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
+  const [isSearchExpanded, setIsSearchExpanded] = useState(false)
+  const [showSearchDropdown, setShowSearchDropdown] = useState(false)
   const navigate = useNavigate()
 
   // Initialize dark mode from localStorage
@@ -43,6 +46,52 @@ const Navbar = () => {
     if (savedDarkMode) {
       document.documentElement.classList.add("dark")
     }
+  }, [])
+
+  // Add click outside functionality to close search dropdowns
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      // Close search dropdown when clicking outside
+      if (!event.target.closest('.search-container') && !event.target.closest('[data-search-trigger]')) {
+        setSearchQuery("")
+        setSearchResults([])
+        setSearchLoading(false)
+        setIsSearchExpanded(false)
+        setShowSearchDropdown(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Close search dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      const searchContainer = event.target.closest('.search-container')
+      if (!searchContainer) {
+        setShowSearchDropdown(false)
+        setIsSearchExpanded(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [])
+
+  // Close search dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      const searchContainer = event.target.closest('.search-container')
+      if (!searchContainer) {
+        setShowSearchDropdown(false)
+      }
+    }
+
+    document.addEventListener('click', handleClickOutside)
+    return () => document.removeEventListener('click', handleClickOutside)
   }, [])
 
   // Toggle dark mode
@@ -71,8 +120,9 @@ const Navbar = () => {
       const profileData = await getProfile()
       if (profileData) {
         setProfile({
-          name: profileData.name || "Client Name",
+          name: profileData.email || "Client Name", // Use email as name
           clientId: getClientId() || "TR123456",
+          email: profileData.email || "",
         })
       }
 
@@ -111,35 +161,51 @@ const Navbar = () => {
       return
     }
 
+    // Show loader immediately for any search
     setSearchLoading(true)
+    
     try {
       const response = await searchStocks(query)
 
       if (Array.isArray(response)) {
+        // Accept stocks with exchange suffixes (.NS, .BO) or without suffixes
         const filteredResults = response
-          .filter((stock) => stock["1. symbol"]?.match(/\.(NSE|BSE)$/))
-          .map((st) => ({ ...st, canonical: normalizeSymbol(st["1. symbol"]) }))
-        // Remove duplicates by canonical symbol
+          .map((st) => ({ 
+            ...st, 
+            canonical: normalizeSymbol(st["1. symbol"]).replace(/\.(NS|BO)$/, "")
+          }))
+        
+        // Remove duplicates by canonical symbol (base symbol without exchange)
         const uniq = []
         const seen = new Set()
         for (const st of filteredResults) {
-          if (!seen.has(st.canonical)) { seen.add(st.canonical); uniq.push(st) }
+          if (!seen.has(st.canonical)) { 
+            seen.add(st.canonical); 
+            uniq.push(st) 
+          }
         }
         setSearchResults(uniq)
       } else if (response?.bestMatches) {
         const filteredResults = response.bestMatches
-          .filter((stock) => stock["1. symbol"]?.match(/\.(NSE|BSE)$/))
-          .map((st) => ({ ...st, canonical: normalizeSymbol(st["1. symbol"]) }))
+          .map((st) => ({ 
+            ...st, 
+            canonical: normalizeSymbol(st["1. symbol"]).replace(/\.(NS|BO)$/, "")
+          }))
+        
         const uniq = []
         const seen = new Set()
         for (const st of filteredResults) {
-          if (!seen.has(st.canonical)) { seen.add(st.canonical); uniq.push(st) }
+          if (!seen.has(st.canonical)) { 
+            seen.add(st.canonical); 
+            uniq.push(st) 
+          }
         }
         setSearchResults(uniq)
       } else {
         setSearchResults([])
       }
     } catch (error) {
+      console.warn('Search error:', error)
       setSearchResults([])
     } finally {
       setSearchLoading(false)
@@ -151,9 +217,16 @@ const Navbar = () => {
 
   useEffect(() => {
     if (searchQuery.trim()) {
+      // Show loader immediately when user starts typing
       setSearchLoading(true)
+      setShowSearchDropdown(true)
+      debouncedSearch(searchQuery)
+    } else {
+      setSearchResults([])
+      setSearchLoading(false)
+      setShowSearchDropdown(false)
+      debouncedSearch.cancel()
     }
-    debouncedSearch(searchQuery)
     return () => debouncedSearch.cancel()
   }, [searchQuery])
 
@@ -181,24 +254,42 @@ const Navbar = () => {
     return value !== undefined && !isNaN(value) ? Number.parseFloat(value).toFixed(decimalPlaces) : "N/A"
   }
 
-  // ---- Add to Main Watchlist (single) ----
+  // ---- Add to Stocks Watchlist (find Stocks watchlist specifically) ----
   const AddWatchlistDropdown = ({ stock }) => {
     const [isAdding, setIsAdding] = useState(false)
 
     const handleAdd = async (e) => {
       e.stopPropagation()
-      if (isAdding || !mainWatchlist) return
+      if (isAdding) return
+
+      // Find the "Stocks" watchlist instead of "Main"
+      const stocksWatchlist = allWatchlists.find(w => w.name?.toLowerCase() === "stocks")
+      if (!stocksWatchlist) {
+        toast.error("Stocks watchlist not found")
+        return
+      }
+
       setIsAdding(true)
 
       const symbolNorm = normalizeSymbol(stock["1. symbol"])
-      const res = await addStockToWatchlist(mainWatchlist.id, symbolNorm, stock["2. name"])
+      const res = await addStockToWatchlist(stocksWatchlist.id, symbolNorm, stock["2. name"])
 
       if (res?.error) {
         toast.error(res.error)
       } else {
-        window.dispatchEvent(new CustomEvent("watchlist-stock-added", { detail: { watchlistId: mainWatchlist.id, symbol: symbolNorm, name: stock["2. name"] } }))
+        const stockData = res.stock_data || {};
+        window.dispatchEvent(new CustomEvent("watchlist-stock-added", { 
+          detail: { 
+            watchlistId: stocksWatchlist.id, 
+            symbol: symbolNorm, 
+            name: stock["2. name"],
+            price: stockData.price || 0,
+            change: stockData.change || 0,
+            percent_change: stockData.percent_change || 0,
+          } 
+        }))
         getWatchlists(true)
-        toast.success(`${symbolNorm} added`)
+        toast.success(`${symbolNorm} added to watchlist`)
       }
 
       setIsAdding(false)
@@ -208,14 +299,12 @@ const Navbar = () => {
       <Button
         variant="ghost"
         size="icon"
-        className="bg-black text-white hover:bg-gray-800"
+        className="bg-black text-white hover:bg-gray-800 flex-shrink-0"
         onClick={handleAdd}
+        disabled={isAdding}
       >
         {isAdding ? (
-          <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4l3.536-3.536A8 8 0 1012 20v-4l-3.536 3.536A7.962 7.962 0 014 12z"></path>
-          </svg>
+          <Loader2 className="h-4 w-4 animate-spin" />
         ) : (
           <Plus className="h-4 w-4" />
         )}
@@ -312,10 +401,10 @@ const Navbar = () => {
           {/* Header Section */}
           <header className="px-6 py-4">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-8">
+              <div className="flex items-center gap-4 lg:gap-8 flex-1">
                 {/* Logo */}
                 <motion.div
-                  className="flex items-center gap-2"
+                  className="flex items-center gap-2 flex-shrink-0"
                   whileHover={{ scale: 1.05 }}
                   transition={{ type: "spring", stiffness: 400, damping: 17 }}
                 >
@@ -328,41 +417,41 @@ const Navbar = () => {
                 </motion.div>
 
                 {/* Navigation Links */}
-                <nav className="hidden lg:flex items-center gap-6">
+                <nav className="hidden xl:flex items-center gap-6 flex-shrink-0">
                   <a
                     onClick={() => navigate("/")}
-                    className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer"
+                    className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer whitespace-nowrap"
                   >
                     Dashboard
                   </a>
                   <a
                     onClick={() => navigate("/watchlist")}
-                    className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer"
+                    className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer whitespace-nowrap"
                   >
                     Watchlist
                   </a>
                   <a
                     onClick={() => navigate("/portfolio")}
-                    className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer"
+                    className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer whitespace-nowrap"
                   >
                     Portfolio
                   </a>
                   <a
                     onClick={() => navigate("/performance")}
-                    className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer"
+                    className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer whitespace-nowrap"
                   >
                     Performance
                   </a>
                   <a
                     onClick={() => navigate("/market")}
-                    className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer"
+                    className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer whitespace-nowrap"
                   >
-                    Market
+                    Markets
                   </a>
                 </nav>
 
-                {/* Search Bar */}
-                <div className="relative w-96">
+                {/* Search Bar - Desktop */}
+                <div className="hidden xl:block relative w-80 lg:w-64 min-w-0 search-container">
                   <motion.div
                     className="relative"
                     whileFocus={{ scale: 1.02 }}
@@ -374,17 +463,18 @@ const Navbar = () => {
                       className="pl-12 pr-4 py-3 bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-600 rounded-xl focus:bg-white dark:focus:bg-gray-700 focus:border-gray-400 dark:focus:border-gray-500 transition-all duration-200 text-gray-900 dark:text-gray-100"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
+                      onFocus={() => searchQuery.trim() && setShowSearchDropdown(true)}
                     />
                     {searchLoading && (
                       <div className="absolute right-4 top-1/2 transform -translate-y-1/2">
-                        <div className="animate-spin h-4 w-4 border-2 border-gray-300 dark:border-gray-600 border-t-black dark:border-t-white rounded-full"></div>
+                        <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
                       </div>
                     )}
                   </motion.div>
 
                   {/* Search Results Dropdown */}
                   <AnimatePresence>
-                    {searchResults.length > 0 && (
+                    {showSearchDropdown && (searchResults.length > 0 || (searchQuery.trim() && !searchLoading && searchResults.length === 0)) && (
                       <motion.div
                         className="absolute left-0 right-0 mt-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-xl shadow-xl z-20 overflow-hidden"
                         style={{ maxHeight: "26rem", overflowY: "auto" }}
@@ -393,69 +483,163 @@ const Navbar = () => {
                         exit={{ opacity: 0, y: -10, scale: 0.95 }}
                         transition={{ duration: 0.2 }}
                       >
-                        {searchResults.slice(0, 7).map((stock, index) => (
-                          <motion.div
-                            key={stock["1. symbol"]}
-                            className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b border-gray-100 dark:border-gray-700 last:border-b-0"
-                            initial={{ opacity: 0, x: -10 }}
-                            animate={{ opacity: 1, x: 0 }}
-                            transition={{ duration: 0.2, delay: index * 0.05 }}
-                            whileHover={{ backgroundColor: darkMode ? "#374151" : "#f9fafb", x: 4 }}
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="cursor-pointer" onClick={() => handleSelectStock(stock["1. symbol"])}>
-                                <div className="font-medium text-gray-900 dark:text-gray-100">{normalizeSymbol(stock["1. symbol"])}</div>
-                                <div className="text-sm text-gray-600 dark:text-gray-400">{stock["2. name"]}</div>
+                        {searchLoading ? (
+                          <div className="px-4 py-6 text-center">
+                            <Loader2 className="h-6 w-6 animate-spin mx-auto text-gray-400 mb-2" />
+                            <div className="text-sm text-gray-600 dark:text-gray-400">Searching...</div>
+                          </div>
+                        ) : searchResults.length > 0 ? (
+                          searchResults.slice(0, 7).map((stock, index) => (
+                            <motion.div
+                              key={stock["1. symbol"]}
+                              className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b border-gray-100 dark:border-gray-700 last:border-b-0"
+                              initial={{ opacity: 0, x: -10 }}
+                              animate={{ opacity: 1, x: 0 }}
+                              transition={{ duration: 0.2, delay: index * 0.05 }}
+                              whileHover={{ backgroundColor: darkMode ? "#374151" : "#f9fafb", x: 4 }}
+                            >
+                              <div className="flex items-center justify-between">
+                                <div 
+                                  className="cursor-pointer transition-colors hover:text-blue-600 dark:hover:text-blue-400 flex-1" 
+                                  onClick={() => handleSelectStock(stock["1. symbol"])}
+                                >
+                                  <div className="font-medium text-gray-900 dark:text-gray-100">{normalizeSymbol(stock["1. symbol"])}</div>
+                                  <div className="text-sm text-gray-600 dark:text-gray-400 truncate">{stock["2. name"]}</div>
+                                </div>
+                                <AddWatchlistDropdown stock={stock} />
                               </div>
-                              <AddWatchlistDropdown stock={stock} />
+                            </motion.div>
+                          ))
+                        ) : (
+                          <div className="px-4 py-6 text-center">
+                            <div className="text-gray-400 dark:text-gray-500 mb-2">
+                              <Search className="h-8 w-8 mx-auto" />
                             </div>
-                          </motion.div>
-                        ))}
+                            <div className="text-sm text-gray-600 dark:text-gray-400">
+                              No stocks found for &ldquo;{searchQuery}&rdquo;
+                            </div>
+                            <div className="text-xs text-gray-500 dark:text-gray-500 mt-1">
+                              Try searching with a different term
+                            </div>
+                          </div>
+                        )}
                       </motion.div>
                     )}
                   </AnimatePresence>
                 </div>
               </div>
 
-              {/* Profile & Notifications */}
-              <div className="flex items-center gap-4">
-                {/* Notification Bell */}
+              {/* Mobile Menu & Search */}
+              <div className="flex items-center gap-2 lg:hidden">
+                {/* Mobile Menu Button - replaces notification icon */}
                 <motion.button
                   type="button"
-                  className="relative p-2 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition-colors duration-200"
+                  className="p-2 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition-colors duration-200"
                   whileHover={{ scale: 1.05 }}
                   whileTap={{ scale: 0.95 }}
+                  onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
                 >
-                  <Bell className="h-5 w-5 text-gray-600 dark:text-gray-400" />
-                  <motion.div
-                    className="absolute -top-1 -right-1 w-3 h-3 bg-red-500 rounded-full"
-                    animate={{ scale: [1, 1.2, 1] }}
-                    transition={{ duration: 2, repeat: Number.POSITIVE_INFINITY }}
-                  />
+                  <Menu className="h-5 w-5 text-gray-600 dark:text-gray-400" />
                 </motion.button>
 
-                {/* Profile Dropdown with dark mode toggle */}
+                {/* Search Button for Mobile - converts to button on mobile */}
+                <motion.button
+                  type="button"
+                  className="p-2 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-xl transition-colors duration-200"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => setIsSearchExpanded(!isSearchExpanded)}
+                >
+                  <Search className="h-5 w-5 text-gray-600 dark:text-gray-400" />
+                </motion.button>
+              </div>
+
+              {/* Profile & Settings - Desktop */}
+              <div className="hidden lg:flex items-center gap-4 flex-shrink-0">
+                {/* Compact Profile Dropdown */}
                 <DropdownMenu modal={false}>
                   <DropdownMenuTrigger asChild>
                     <motion.div
-                      className="flex items-center gap-3 cursor-pointer p-2 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors duration-200 relative z-50"
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.98 }}
+                      className="cursor-pointer p-1 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors duration-200 relative z-50"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
                       onClick={(e) => e.stopPropagation()}
                     >
-                      <Avatar className="ring-2 ring-gray-200 dark:ring-gray-600">
+                      <Avatar className="ring-2 ring-gray-200 dark:ring-gray-600 w-9 h-9">
                         <AvatarFallback className="bg-gradient-to-r from-gray-100 to-gray-200 dark:from-gray-700 dark:to-gray-800 text-gray-700 dark:text-gray-300 font-semibold">
                           <User className="h-5 w-5" />
                         </AvatarFallback>
                       </Avatar>
-                      <div className="text-sm">
-                        <p className="font-semibold text-gray-900 dark:text-gray-100">{profile.name}</p>
-                        <p className="text-gray-500 dark:text-gray-400">ID: {profile.clientId}</p>
-                      </div>
-                      <ChevronDown className="h-4 w-4 text-gray-400 dark:text-gray-500" />
+                    </motion.div>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent className="w-64 bg-white/95 dark:bg-gray-800/95 backdrop-blur-lg border border-gray-200 dark:border-gray-600 rounded-xl shadow-xl z-[60]">
+                    <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-600">
+                      <p className="font-semibold text-gray-900 dark:text-gray-100 text-sm truncate">{profile.email || profile.name}</p>
+                      <p className="text-gray-500 dark:text-gray-400 text-xs">ID: {profile.clientId}</p>
+                    </div>
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        navigate("/profile")
+                      }}
+                      className="rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors duration-200"
+                    >
+                      <User className="mr-3 h-4 w-4 text-gray-600 dark:text-gray-400" />
+                      <span className="font-medium text-gray-900 dark:text-gray-100">Profile</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator className="bg-gray-200 dark:bg-gray-600" />
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        toggleDarkMode()
+                      }}
+                      className="rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors duration-200"
+                    >
+                      {darkMode ? (
+                        <Sun className="mr-3 h-4 w-4 text-gray-600 dark:text-gray-400" />
+                      ) : (
+                        <Moon className="mr-3 h-4 w-4 text-gray-600 dark:text-gray-400" />
+                      )}
+                      <span className="font-medium text-gray-900 dark:text-gray-100">
+                        {darkMode ? "Light Mode" : "Dark Mode"}
+                      </span>
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator className="bg-gray-200 dark:bg-gray-600" />
+                    <DropdownMenuItem
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleLogout()
+                      }}
+                      className="rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-700 dark:hover:text-red-400 transition-colors duration-200"
+                    >
+                      <LogOut className="mr-3 h-4 w-4" />
+                      <span className="font-medium">Logout</span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+
+              {/* Mobile Profile Icon */}
+              <div className="lg:hidden">
+                <DropdownMenu modal={false}>
+                  <DropdownMenuTrigger asChild>
+                    <motion.div
+                      className="cursor-pointer p-1 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors duration-200"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                    >
+                      <Avatar className="ring-2 ring-gray-200 dark:ring-gray-600 w-8 h-8">
+                        <AvatarFallback className="bg-gradient-to-r from-gray-100 to-gray-200 dark:from-gray-700 dark:to-gray-800 text-gray-700 dark:text-gray-300 font-semibold text-xs">
+                          <User className="h-4 w-4" />
+                        </AvatarFallback>
+                      </Avatar>
                     </motion.div>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent className="w-56 bg-white/95 dark:bg-gray-800/95 backdrop-blur-lg border border-gray-200 dark:border-gray-600 rounded-xl shadow-xl z-[60]">
+                    <div className="px-4 py-2 border-b border-gray-200 dark:border-gray-600">
+                      <p className="font-semibold text-gray-900 dark:text-gray-100 text-sm">{profile.email || profile.name}</p>
+                      <p className="text-gray-500 dark:text-gray-400 text-xs">ID: {profile.clientId}</p>
+                    </div>
                     <DropdownMenuItem
                       onClick={(e) => {
                         e.stopPropagation()
@@ -499,6 +683,150 @@ const Navbar = () => {
               </div>
             </div>
           </header>
+
+          {/* Mobile Search Expanded */}
+          <AnimatePresence>
+            {isSearchExpanded && (
+              <motion.div
+                className="lg:hidden px-6 pb-4 search-container"
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.2 }}
+              >
+                <div className="relative">
+                  <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400 dark:text-gray-500" />
+                  <Input
+                    placeholder="Search NSE/BSE stocks..."
+                    className="pl-12 pr-4 py-3 bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-600 rounded-xl focus:bg-white dark:focus:bg-gray-700 focus:border-gray-400 dark:focus:border-gray-500 transition-all duration-200 text-gray-900 dark:text-gray-100"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onFocus={() => searchQuery.trim() && setShowSearchDropdown(true)}
+                  />
+                  {searchLoading && (
+                    <div className="absolute right-4 top-1/2 transform -translate-y-1/2">
+                      <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
+                    </div>
+                  )}
+                </div>
+
+                {/* Mobile Search Results */}
+                <AnimatePresence>
+                  {showSearchDropdown && (searchResults.length > 0 || (searchQuery.trim() && !searchLoading && searchResults.length === 0)) && (
+                    <motion.div
+                      className="mt-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-600 rounded-xl shadow-xl overflow-hidden"
+                      style={{ maxHeight: "20rem", overflowY: "auto" }}
+                      initial={{ opacity: 0, y: -10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      transition={{ duration: 0.2 }}
+                    >
+                      {searchLoading ? (
+                        <div className="px-4 py-6 text-center">
+                          <Loader2 className="h-6 w-6 animate-spin mx-auto text-gray-400 mb-2" />
+                          <div className="text-sm text-gray-600 dark:text-gray-400">Searching...</div>
+                        </div>
+                      ) : searchResults.length > 0 ? (
+                        searchResults.slice(0, 5).map((stock, index) => (
+                          <motion.div
+                            key={stock["1. symbol"]}
+                            className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b border-gray-100 dark:border-gray-700 last:border-b-0"
+                            initial={{ opacity: 0, x: -10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ duration: 0.2, delay: index * 0.05 }}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div 
+                                className="cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition-colors flex-1" 
+                                onClick={() => {
+                                  handleSelectStock(stock["1. symbol"])
+                                  setIsSearchExpanded(false)
+                                }}
+                              >
+                                <div className="font-medium text-gray-900 dark:text-gray-100">{normalizeSymbol(stock["1. symbol"])}</div>
+                                <div className="text-sm text-gray-600 dark:text-gray-400 truncate">{stock["2. name"]}</div>
+                              </div>
+                              <AddWatchlistDropdown stock={stock} />
+                            </div>
+                          </motion.div>
+                        ))
+                      ) : (
+                        <div className="px-4 py-6 text-center">
+                          <div className="text-gray-400 dark:text-gray-500 mb-2">
+                            <Search className="h-6 w-6 mx-auto" />
+                          </div>
+                          <div className="text-sm text-gray-600 dark:text-gray-400">
+                            No stocks found for &ldquo;{searchQuery}&rdquo;
+                          </div>
+                        </div>
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          {/* Mobile Menu */}
+          <AnimatePresence>
+            {isMobileMenuOpen && (
+              <motion.div
+                className="lg:hidden border-t border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800"
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.2 }}
+              >
+                <div className="px-6 py-4 space-y-2">
+                  <a
+                    onClick={() => {
+                      navigate("/")
+                      setIsMobileMenuOpen(false)
+                    }}
+                    className="block py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer"
+                  >
+                    Dashboard
+                  </a>
+                  <a
+                    onClick={() => {
+                      navigate("/watchlist")
+                      setIsMobileMenuOpen(false)
+                    }}
+                    className="block py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer"
+                  >
+                    Watchlist
+                  </a>
+                  <a
+                    onClick={() => {
+                      navigate("/portfolio")
+                      setIsMobileMenuOpen(false)
+                    }}
+                    className="block py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer"
+                  >
+                    Portfolio
+                  </a>
+                  <a
+                    onClick={() => {
+                      navigate("/performance")
+                      setIsMobileMenuOpen(false)
+                    }}
+                    className="block py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer"
+                  >
+                    Performance
+                  </a>
+                  <a
+                    onClick={() => {
+                      navigate("/market")
+                      setIsMobileMenuOpen(false)
+                    }}
+                    className="block py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors cursor-pointer"
+                  >
+                    Markets
+                  </a>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
       </motion.div>
     </>

@@ -1,6 +1,6 @@
 from app import create_app
 import os
-from app.routes.order_processor import start_order_processor
+from backend.app.tasks.order_processor import start_order_processor
 
 app = create_app()
 
@@ -14,5 +14,8 @@ if __name__ == "__main__":
 
     # ✅ Use explicit debug mode
     debug_mode = app.config.get("DEBUG", False)
+    
+    print(f"🌐 Server starting on http://{host}:{port}")
+    print(f"🔧 Debug mode: {debug_mode}")
 
     app.run(host=host, port=port, debug=debug_mode, use_reloader=False)

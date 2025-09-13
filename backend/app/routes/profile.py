@@ -1,83 +1,54 @@
-from flask import Blueprint, request, jsonify, session
-from app.models import User, db
+from flask import Blueprint, request, jsonify
+from flask_login import login_required, current_user
+from app.models import User
 import logging
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize Flask Blueprint
 bp = Blueprint('profile', __name__)
 
 @bp.route('/profile', methods=['GET'])
+@login_required
 def get_profile():
-    """Fetch the authenticated user's profile."""
+    """Fetch the authenticated user's profile data securely."""
     try:
-        # Check if the user is authenticated
-        if 'user_id' not in session:
-            logger.warning("Unauthorized access attempt to /profile")
-            return jsonify({"error": "Unauthorized"}), 401
-
-        # Fetch the user from the database
-        user = User.query.get(session['user_id'])
-        if not user:
-            logger.error(f"User not found for session user_id: {session['user_id']}")
-            return jsonify({"error": "User not found"}), 404
-
-        # Return the user's profile data
-        logger.info(f"Profile fetched for user: {user.client_id}")
+        # current_user is the secure way to access the logged-in user object
         return jsonify({
-            "client_id": user.client_id,
-            "email": user.email,
-            "mobile": user.mobile,
-            "balance": user.balance
+            "client_id": current_user.client_id,
+            "username": current_user.username,
+            "email": current_user.email,
+            "mobile": current_user.mobile,
+            "balance": float(current_user.balance),
+            "created_at": current_user.created_at.isoformat()
         }), 200
-
     except Exception as e:
-        logger.error(f"Error fetching profile: {e}")
+        logger.error(f"Error fetching profile for user {current_user.client_id}: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
 @bp.route('/profile/update', methods=['PUT'])
+@login_required
 def update_profile():
-    """Update the authenticated user's profile."""
+    """Update the authenticated user's profile information."""
     try:
-        # Check if the user is authenticated
-        if 'user_id' not in session:
-            logger.warning("Unauthorized access attempt to /profile/update")
-            return jsonify({"error": "Unauthorized"}), 401
-
-        # Fetch the user from the database
-        user = User.query.get(session['user_id'])
-        if not user:
-            logger.error(f"User not found for session user_id: {session['user_id']}")
-            return jsonify({"error": "User not found"}), 404
-
-        # Validate and update profile data
         data = request.json
         if not data:
-            logger.warning("No data provided for profile update")
-            return jsonify({"error": "No data provided"}), 400
+            return jsonify({"error": "No data provided for update."}), 400
 
-        # Update email if provided
+        # Update fields if they exist in the request
         if 'email' in data:
-            if not isinstance(data['email'], str) or "@" not in data['email']:
-                logger.warning(f"Invalid email format: {data['email']}")
-                return jsonify({"error": "Invalid email format"}), 400
-            user.email = data['email']
-
-        # Update mobile if provided
+            current_user.email = data['email']
         if 'mobile' in data:
-            if not isinstance(data['mobile'], str) or not data['mobile'].isdigit():
-                logger.warning(f"Invalid mobile format: {data['mobile']}")
-                return jsonify({"error": "Invalid mobile format"}), 400
-            user.mobile = data['mobile']
+            current_user.mobile = data['mobile']
+        
+        # Add more updatable fields here as needed, e.g., username
+        if 'username' in data:
+            current_user.username = data['username']
 
-        # Commit changes to the database
-        db.session.commit()
-        logger.info(f"Profile updated for user: {user.client_id}")
-        return jsonify({"message": "Profile updated successfully"}), 200
+        current_user.save()
+        logger.info(f"Profile updated for user {current_user.client_id}")
+        return jsonify({"message": "Profile updated successfully."}), 200
 
     except Exception as e:
-        db.session.rollback()
-        logger.error(f"Error updating profile: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        logger.error(f"Error updating profile for user {current_user.client_id}: {e}")
+        return jsonify({"error": "Failed to update profile."}), 500

@@ -1,34 +1,20 @@
-from flask import Blueprint, request, jsonify, session, redirect, url_for
-from flask_login import LoginManager, login_user, logout_user, login_required, current_user
-from app.models import User, db
-from app.utils.aes_encryption import AES_Encryption
+from flask import Blueprint, request, jsonify, session
+from flask_login import login_user, logout_user, login_required, current_user
+from mongoengine.queryset.visitor import Q
+from app.models import User
+from app import bcrypt  # Import bcrypt from the main __init__.py
 import logging
-import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize Flask Blueprint and LoginManager
+# Initialize Flask Blueprint
 bp = Blueprint('auth', __name__)
-login_manager = LoginManager()
-login_manager.login_view = 'auth.login'  # Specify the login view
-
-# AES Encryption Instance
-aes_encryption = AES_Encryption()
-
-@login_manager.user_loader
-def load_user(user_id):
-    """Load user by ID for session management."""
-    try:
-        return User.query.get(int(user_id))
-    except (ValueError, TypeError) as e:
-        logger.error(f"Error loading user: {e}")
-        return None
 
 @bp.route('/signup', methods=['POST'])
 def signup():
-    """Handle user signup."""
+    """Handle new user registration with secure password hashing."""
     try:
         data = request.json
         email = data.get('email')
@@ -36,110 +22,94 @@ def signup():
         password = data.get('password')
         confirm_password = data.get('confirm_password')
 
-        # Validate input
+        # --- Input Validation ---
         if not all([email, mobile, password, confirm_password]):
             return jsonify({"error": "All fields are required"}), 400
         if password != confirm_password:
             return jsonify({"error": "Passwords do not match"}), 400
 
-        # Check if user already exists
-        existing_user = User.query.filter((User.email == email) | (User.mobile == mobile)).first()
-        if existing_user:
-            return jsonify({"error": "Email or mobile already in use"}), 400
+        # --- Check for Existing User ---
+        if User.objects(Q(email=email) | Q(mobile=mobile)).first():
+            return jsonify({"error": "An account with this email or mobile number already exists"}), 409
 
-        # Encrypt password
-        encrypted_password = aes_encryption.aes_encrypt(password)
-        if not encrypted_password:
-            return jsonify({"error": "Encryption failed"}), 500
+        # --- Secure Password Hashing ---
+        # Generate a hash of the user's password using bcrypt.
+        # This is a one-way process; the original password cannot be recovered.
+        hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
 
-        # Create new user
-        new_user = User(email=email, mobile=mobile, password=encrypted_password, username=email)
-        db.session.add(new_user)
-        db.session.commit()
+        # --- Create and Save New User ---
+        new_user = User(
+            email=email,
+            mobile=mobile,
+            password=hashed_password,
+            username=email  # Default username to email
+        )
+        new_user.save()
 
-        logger.info(f"New user created: {new_user.client_id}")
+        logger.info(f"New user account created successfully. Client ID: {new_user.client_id}")
         return jsonify({
-            "message": "Account created successfully",
+            "message": "Account created successfully. Please log in.",
             "client_id": new_user.client_id
         }), 201
 
     except Exception as e:
-        db.session.rollback()
-        logger.error(f"Signup Error: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        logger.error(f"An unexpected error occurred during signup: {e}")
+        return jsonify({"error": "Internal server error during signup"}), 500
 
 @bp.route('/login', methods=['POST'])
 def login():
-    """Handle user login."""
+    """Handle user login by verifying credentials against the stored hash."""
     try:
         data = request.json
         client_id = data.get('client_id')
         password = data.get('password')
 
-        # Validate input
         if not client_id or not password:
             return jsonify({"error": "Client ID and password are required"}), 400
 
-        # Find user by client_id
-        user = User.query.filter_by(client_id=client_id).first()
-        if not user:
+        # --- Find User and Verify Password ---
+        user = User.objects(client_id=client_id).first()
+
+        # Use bcrypt's check_password_hash to securely compare the provided password
+        # with the stored hash. This prevents timing attacks.
+        if not user or not bcrypt.check_password_hash(user.password, password):
             logger.warning(f"Failed login attempt for Client ID: {client_id}")
             return jsonify({"error": "Invalid client ID or password"}), 401
 
-        # Decrypt and verify password
-        decrypted_password = aes_encryption.aes_decrypt(user.password)
-        if not decrypted_password or decrypted_password != password:
-            logger.warning(f"Incorrect password for Client ID: {client_id}")
-            return jsonify({"error": "Invalid client ID or password"}), 401
-
-        # Log in user with Flask-Login
+        # --- Log In User and Create Session ---
         login_user(user)
-        session['user_id'] = user.id
-        logger.info(f"User logged in: {user.client_id}")
+        session['user_id'] = str(user.id) # Ensure user_id is stored in session
+        logger.info(f"User '{user.client_id}' logged in successfully.")
         return jsonify({
             "message": "Logged in successfully",
-            "client_id": user.client_id
+            "client_id": user.client_id,
+            "username": user.username
         }), 200
 
     except Exception as e:
-        logger.error(f"Login Error: {e}")
-        return jsonify({"error": "Internal server error"}), 500
-
-@bp.route('/dashboard')
-def dashboard():
-    """Redirect to dashboard if authenticated."""
-    if current_user.is_authenticated:
-        return redirect(url_for('main.dashboard'))  # Redirect to /dashboard
-    else:
-        return redirect(url_for('auth.login'))  # Redirect to /login if not authenticated
+        logger.error(f"An unexpected error occurred during login: {e}")
+        return jsonify({"error": "Internal server error during login"}), 500
 
 @bp.route('/logout', methods=['POST'])
 @login_required
 def logout():
-    """Handle user logout."""
+    """Handle user logout and clear the session."""
     try:
-        logout_user()  # Flask-Login logout
-        session.clear()  # Clear any remaining session data
-        logger.info(f"User logged out: {current_user.client_id}")
-        return jsonify({"message": "Logged out successfully"}), 200
+        user_client_id = current_user.client_id
+        logout_user()  # Clears user from Flask-Login session
+        session.clear()  # Ensures all session data is removed
+        logger.info(f"User '{user_client_id}' logged out successfully.")
+        return jsonify({"message": "You have been logged out successfully"}), 200
     except Exception as e:
-        logger.error(f"Logout Error: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        logger.error(f"An unexpected error occurred during logout: {e}")
+        return jsonify({"error": "Internal server error during logout"}), 500
 
 @bp.route('/check-auth', methods=['GET'])
 @login_required
 def check_auth():
-    """Check if user is authenticated."""
-    try:
-        return jsonify({
-            "message": "Authenticated",
-            "client_id": current_user.client_id
-        }), 200
-    except Exception as e:
-        logger.error(f"Check Auth Error: {e}")
-        return jsonify({"error": "Authentication failed"}), 401
-
-def init_app(app):
-    """Initialize the auth blueprint with the Flask app."""
-    login_manager.init_app(app)
-    app.register_blueprint(bp, url_prefix='/api')  # Specify the URL prefix
+    """An endpoint to verify if the current user's session is active."""
+    return jsonify({
+        "isAuthenticated": True,
+        "client_id": current_user.client_id,
+        "username": current_user.username
+    }), 200

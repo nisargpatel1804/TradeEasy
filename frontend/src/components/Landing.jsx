@@ -27,6 +27,7 @@ import {
 import "../assets/css/LandingCss.css"
 
 const words = ["stock", "investor", "analyst", "opportunity"]
+const MotionLink = motion(Link)
 
 export default function Landing() {
   const [wordIndex, setWordIndex] = useState(0)
@@ -122,26 +123,25 @@ export default function Landing() {
                 </div>
               ) : (
                 <div className="nav-desktop">
-                  <Button
-                    asChild
-                    variant="outline"
-                    className="signup-button"
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    transition={{ type: "spring", stiffness: 400, damping: 17 }}
-                    as={motion.button}
-                  >
-                    <Link to="/signup">Sign Up</Link>
+                  <Button asChild variant="outline" className="signup-button">
+                    <MotionLink
+                      to="/signup"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      transition={{ type: "spring", stiffness: 400, damping: 17 }}
+                    >
+                      Sign Up
+                    </MotionLink>
                   </Button>
-                  <Button
-                    asChild
-                    className="login-button"
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    transition={{ type: "spring", stiffness: 400, damping: 17 }}
-                    as={motion.button}
-                  >
-                    <Link to="/login">Login</Link>
+                  <Button asChild className="login-button">
+                    <MotionLink
+                      to="/login"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      transition={{ type: "spring", stiffness: 400, damping: 17 }}
+                    >
+                      Login
+                    </MotionLink>
                   </Button>
                 </div>
               )}
@@ -267,31 +267,29 @@ export default function Landing() {
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.8, delay: 0.6 }}
                   >
-                    <Button
-                      asChild
-                      className="hero-cta-button group"
-                      whileHover={{ scale: 1.05, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      transition={{ type: "spring", stiffness: 400, damping: 17 }}
-                      as={motion.button}
-                    >
-                      <Link to="/signup" className="flex items-center gap-3">
+                    <Button asChild className="hero-cta-button group">
+                      <MotionLink
+                        to="/signup"
+                        className="flex items-center gap-3"
+                        whileHover={{ scale: 1.05, y: -2 }}
+                        whileTap={{ scale: 0.98 }}
+                        transition={{ type: "spring", stiffness: 400, damping: 17 }}
+                      >
                         Get Started Free
                         <motion.div className="group-hover:translate-x-1 transition-transform duration-200">
                           <ArrowRight className="h-5 w-5" />
                         </motion.div>
-                      </Link>
+                      </MotionLink>
                     </Button>
-                    <Button
-                      asChild
-                      variant="outline"
-                      className="hero-signin-button"
-                      whileHover={{ scale: 1.05, y: -2 }}
-                      whileTap={{ scale: 0.98 }}
-                      transition={{ type: "spring", stiffness: 400, damping: 17 }}
-                      as={motion.button}
-                    >
-                      <Link to="/login">Sign In</Link>
+                    <Button asChild variant="outline" className="hero-signin-button">
+                      <MotionLink
+                        to="/login"
+                        whileHover={{ scale: 1.05, y: -2 }}
+                        whileTap={{ scale: 0.98 }}
+                        transition={{ type: "spring", stiffness: 400, damping: 17 }}
+                      >
+                        Sign In
+                      </MotionLink>
                     </Button>
                   </motion.div>
                 )}

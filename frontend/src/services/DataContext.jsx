@@ -170,7 +170,6 @@ export function DataProvider({ children }) {
 
   // Function to manually refresh stocks data (for Ctrl+Shift+R)
   const refreshStocksData = useCallback(async () => {
-    console.log("Manually refreshing stocks data...");
     return getStocksData(true);
   }, [getStocksData]);
 

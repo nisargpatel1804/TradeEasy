@@ -1,4 +1,7 @@
-/* Watchlist Page Styles */
+/* Watchlist Page Styles - Modern Typography like Groww/Zerodha */
+
+/* Font imports for modern look */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
 
 /* Inherits variables from DashboardCss.css for consistency */
 
@@ -8,6 +11,9 @@
   min-height: 100vh;
   background-color: var(--bg-primary);
   padding-top: 5rem; /* Space for Navbar */
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-weight: 400;
+  line-height: 1.5;
 }
 
 .watchlist-main {
@@ -22,16 +28,16 @@
 }
 
 .watchlist-card {
-  background: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(10px);
   border: 1px solid var(--border-primary);
-  border-radius: 1rem;
+  border-radius: 12px;
   box-shadow: 0 4px 6px -1px var(--shadow-primary);
   transition: all 0.2s ease;
 }
 
 .dark .watchlist-card {
-  background: rgba(31, 41, 55, 0.9);
+  background: rgba(31, 41, 55, 0.95);
 }
 
 .watchlist-card-header {
@@ -43,6 +49,8 @@
   font-size: 1.75rem;
   font-weight: 700;
   color: var(--text-primary);
+  font-family: 'Inter', sans-serif;
+  letter-spacing: -0.025em;
 }
 
 .watchlist-card-content {
@@ -100,10 +108,11 @@
   background-color: var(--bg-tertiary);
 }
 
-/* Watchlist Table */
+/* Watchlist Table - Modern Typography */
 .watchlist-table {
   width: 100%;
   border-collapse: collapse;
+  font-family: 'Inter', sans-serif;
 }
 
 .watchlist-table th,
@@ -112,6 +121,7 @@
   text-align: left;
   border-bottom: 1px solid var(--border-secondary);
   color: var(--text-primary);
+  font-weight: 400;
 }
 
 .watchlist-table th {
@@ -119,22 +129,32 @@
   color: var(--text-secondary);
   font-size: 0.875rem;
   text-transform: uppercase;
+  letter-spacing: 0.025em;
+  font-family: 'Inter', sans-serif;
 }
 
 .watchlist-symbol {
   cursor: pointer;
   font-weight: 600;
   color: var(--text-link);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.95rem;
+  transition: all 0.2s ease;
 }
 .watchlist-symbol:hover {
-  text-decoration: underline;
+  color: var(--text-primary);
+  transform: scale(1.02);
 }
 
 .change-profit {
   color: #10b981;
+  font-weight: 600;
+  font-family: 'Inter', sans-serif;
 }
 .change-loss {
   color: #f87171;
+  font-weight: 600;
+  font-family: 'Inter', sans-serif;
 }
 
 .action-buttons {
@@ -325,11 +345,61 @@
   flex-grow: 1;
 }
 
-/* Stock List within Sidebar */
+/* Stock List within Sidebar - Modern Typography */
 .stock-list {
   flex-grow: 1;
   overflow-y: auto;
   padding-right: 0.5rem; /* for scrollbar */
+  font-family: 'Inter', sans-serif;
+}
+
+/* Modern Stock Price Typography */
+.stock-price {
+  font-family: 'Inter', 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+  font-weight: 600;
+  font-size: 0.95rem;
+  letter-spacing: -0.01em;
+}
+
+.stock-change {
+  font-family: 'Inter', 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+  font-weight: 600;
+  font-size: 0.875rem;
+  letter-spacing: -0.01em;
+}
+
+.stock-symbol {
+  font-family: 'Inter', sans-serif;
+  font-weight: 600;
+  font-size: 0.95rem;
+  letter-spacing: -0.025em;
+}
+
+.stock-name {
+  font-family: 'Inter', sans-serif;
+  font-weight: 400;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+}
+
+.stock-percentage {
+  font-family: 'Inter', 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+  font-weight: 600;
+  font-size: 0.875rem;
+  letter-spacing: -0.01em;
+}
+
+/* Modern price colors */
+.price-positive {
+  color: #00b386 !important; /* Groww green */
+}
+
+.price-negative {
+  color: #eb5757 !important; /* Groww red */
+}
+
+.price-neutral {
+  color: var(--text-primary) !important;
 }
 .stock-item {
   display: flex;

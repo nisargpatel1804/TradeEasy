@@ -190,7 +190,6 @@ const StockOverview = () => {
         activeTabClass="border-b-2 border-blue-500 font-medium text-blue-600"
         disabledTabClass="text-gray-400 cursor-not-allowed"
         contentClass="p-2 md:p-4"
-        onChange={(index) => console.log(`Switched to tab: ${tabs[index].label}`)}
       />
     </div>
   );

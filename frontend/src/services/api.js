@@ -46,7 +46,7 @@ apiClient.interceptors.response.use(
  * @param {object} options - Additional options for the request.
  * @returns {Promise<any>} - The fetched data or an error object.
  */
-const fetchData = async (endpoint, options = {}) => {
+export const fetchData = async (endpoint, options = {}) => {
   // Generate a request key
   const requestKey = `get:${endpoint}${options.params ? JSON.stringify(options.params) : ''}`;
   
@@ -107,7 +107,6 @@ export const NSE50_SYMBOLS = [
  */
 export const fetchBatchStockData = async (symbols) => {
   // Disabled: previously fetched large batches via backend.
-  console.warn("fetchBatchStockData disabled – returning empty object");
   return {};
 };
 
@@ -116,7 +115,7 @@ export const fetchBatchStockData = async (symbols) => {
  * This combines both index stocks and removes duplicates
  */
 export const fetchAllIndexStocks = async () => {
-  console.warn("fetchAllIndexStocks disabled – returning empty object");
+  // Disabled to improve performance
   return {};
 };
 
@@ -125,15 +124,12 @@ export const fetchPortfolio = async () => {
   return fetchData("/portfolio");
 };
 
-export const fetchStockData = async (symbol) => {
-  console.log("Fetching stock data for:", symbol);
+export const getStockData = async (symbol) => {
   try {
-    const formattedSymbol = symbol.replace(/\.(NS|NSE|BO|BSE)$/i, '');
-    const response = await fetchData(`/stock/overview/${encodeURIComponent(formattedSymbol)}`);
-    return response.data;
+    return await fetchData(`/stocks/${symbol}`);
   } catch (error) {
     console.error("Error fetching stock data:", error);
-    throw error;
+    return { error: error.message };
   }
 };
 
@@ -415,6 +411,53 @@ export const getTradeHistory = async () => {
     console.error('Failed to fetch trade history:', error);
     return { 
       error: error?.response?.data?.message || 'Failed to fetch trade history' 
+    };
+  }
+};
+
+// --- Market Data API Functions ---
+
+/**
+ * Get Nifty 50 stocks data with gainers and losers
+ */
+export const getNifty50Stocks = async () => {
+  try {
+    const response = await apiClient.get('/markets/nifty50');
+    return response.data;
+  } catch (error) {
+    console.error('Failed to fetch Nifty 50 data:', error);
+    return {
+      error: error?.response?.data?.error || 'Failed to fetch market data'
+    };
+  }
+};
+
+/**
+ * Get top gainers from Nifty 50
+ */
+export const getTopGainers = async () => {
+  try {
+    const response = await apiClient.get('/markets/gainers');
+    return response.data;
+  } catch (error) {
+    console.error('Failed to fetch gainers:', error);
+    return {
+      error: error?.response?.data?.error || 'Failed to fetch gainers'
+    };
+  }
+};
+
+/**
+ * Get top losers from Nifty 50
+ */
+export const getTopLosers = async () => {
+  try {
+    const response = await apiClient.get('/markets/losers');
+    return response.data;
+  } catch (error) {
+    console.error('Failed to fetch losers:', error);
+    return {
+      error: error?.response?.data?.error || 'Failed to fetch losers'
     };
   }
 };
