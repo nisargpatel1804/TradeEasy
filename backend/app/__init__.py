@@ -10,8 +10,6 @@ from dotenv import load_dotenv
 from flask_socketio import SocketIO, emit
 from bson import ObjectId
 
-from . import db_scrips_populate
-
 # Load environment variables from .env file
 load_dotenv()
 
@@ -95,6 +93,9 @@ def create_app():
     app.register_blueprint(profile.bp, url_prefix='/api')
     app.register_blueprint(markets.markets_bp, url_prefix='/api')
     app.register_blueprint(watchlist.bp, url_prefix='/api')
+    
+    # Import db_scrips_populate here to avoid circular imports
+    from . import db_scrips_populate
     app.register_blueprint(db_scrips_populate.data_management_bp, url_prefix='/api/data')
 
     # --- Root Route for Health Check ---

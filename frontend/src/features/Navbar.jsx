@@ -68,7 +68,7 @@ const Navbar = () => {
   useEffect(() => {
     if (indicesData && Array.isArray(indicesData)) {
       const navbarIndices = indicesData.filter(index =>
-        ["Nifty 50", "Sensex"].includes(index.name)
+        ["Nifty 50", "SENSEX"].includes(index.name)
       );
       setIndices(navbarIndices);
     }
@@ -117,7 +117,9 @@ const Navbar = () => {
     setSearchLoading(true);
     try {
       const response = await searchStocks(query);
-      setSearchResults(response?.bestMatches || []);
+      // Handle both direct array response and object with bestMatches property
+      const results = response?.bestMatches || response || [];
+      setSearchResults(results);
     } catch (error) {
       console.warn('Search error:', error);
       setSearchResults([]);
@@ -198,11 +200,11 @@ const Navbar = () => {
     <>
       <motion.div
         className="fixed top-0 left-0 right-0 h-10 bg-gradient-to-b from-white to-transparent dark:from-gray-900 dark:to-transparent z-40 pointer-events-none"
-        initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+        initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.3 }}
       />
       <motion.div
         className="fixed top-4 left-4 right-4 lg:left-16 lg:right-16 z-50"
-        initial={{ y: -120 }} animate={{ y: 0 }} transition={{ duration: 0.6, ease: "easeOut" }}
+        initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.4, ease: "easeOut" }}
       >
         <div className="bg-white/95 dark:bg-gray-900/95 backdrop-blur-lg border border-gray-200 dark:border-gray-700 rounded-2xl shadow-xl">
           {/* Market Indices Ticker */}
@@ -222,11 +224,15 @@ const Navbar = () => {
                           ₹{formatNumber(index.price)}
                         </span>
                         <motion.span
-                          className={`text-sm font-semibold px-2 py-1 rounded-full ${Number.parseFloat(index.change) >= 0 ? "text-green-700 bg-green-100 dark:text-green-400 dark:bg-green-900/30" : "text-red-700 bg-red-100 dark:text-red-400 dark:bg-red-900/30"}`}
+                          className={`text-sm font-semibold px-2 py-1 rounded-full ${
+                            Number.parseFloat(index.change_intraday || index.change_daily || index.change) >= 0 
+                              ? "text-green-700 bg-green-100 dark:text-green-400 dark:bg-green-900/30" 
+                              : "text-red-700 bg-red-100 dark:text-red-400 dark:bg-red-900/30"
+                          }`}
                           whileHover={{ scale: 1.05 }}
                         >
-                          {Number.parseFloat(index.change) >= 0 ? "+" : ""}
-                          {formatNumber(index.change)} ({formatNumber(index.percent_change)}%)
+                          {Number.parseFloat(index.change_intraday || index.change_daily || index.change) >= 0 ? "+" : ""}
+                          {formatNumber(index.change_intraday || index.change_daily || index.change)} ({formatNumber(index.percent_change_intraday || index.percent_change_daily || index.percent_change)}%)
                         </motion.span>
                       </motion.div>
                     ))
