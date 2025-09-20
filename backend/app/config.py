@@ -15,15 +15,19 @@ class Config:
 
     # ⚙️ SESSION CONFIGURATION
     SESSION_PROTECTION = 'strong'
-    SESSION_TYPE = 'filesystem'
+    SESSION_TYPE = 'filesystem'  # Use filesystem for development
     SESSION_FILE_DIR = os.path.join(os.getcwd(), 'flask_session')
-    os.makedirs(SESSION_FILE_DIR, exist_ok=True)
     SESSION_PERMANENT = True
-    PERMANENT_SESSION_LIFETIME = timedelta(minutes=int(os.getenv("SESSION_LIFETIME", 60)))
+    PERMANENT_SESSION_LIFETIME = timedelta(minutes=int(os.getenv("SESSION_LIFETIME", 120)))  # Extended to 2 hours
     SESSION_USE_SIGNER = True
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', 'False').lower() == 'true'
     SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
+    # Add session refresh configuration
+    SESSION_REFRESH_EACH_REQUEST = True
+    # Add cookie domain and path configuration
+    SESSION_COOKIE_DOMAIN = None  # Allow cookies to work on localhost
+    SESSION_COOKIE_PATH = '/'
 
     # 🍃 MONGODB CONFIGURATION
     MONGODB_SETTINGS = {
@@ -43,8 +47,9 @@ class Config:
     USER_ID = os.getenv("USER_ID")
     PASSWORD = os.getenv("PASSWORD")
     TWO_FA = os.getenv("TWO_FA")
+    TOTP_SECRET = os.getenv("TOTP_SECRET")
 
-    if not all([API_KEY, USER_ID, PASSWORD, TWO_FA]):
+    if not all([API_KEY, USER_ID, PASSWORD, TWO_FA, TOTP_SECRET]):
         print("⚠️ WARNING: Motilal Oswal API credentials are not fully set in the .env file.")
 
 class DevelopmentConfig(Config):
@@ -60,14 +65,10 @@ class ProductionConfig(Config):
     if Config.SECRET_KEY == 'your-default-secret-key-here':
          raise ValueError("❌ FATAL ERROR: Do not use the default SECRET_KEY in production.")
 
-# 🔁 Select configuration based on FLASK_ENV or FLASK_DEBUG environment variables
-FLASK_ENV = os.getenv('FLASK_ENV', 'development')
+# 🔁 Select configuration based on FLASK_DEBUG environment variable
+FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
 
-if FLASK_ENV == 'production':
-    AppConfig = ProductionConfig
+if FLASK_DEBUG:
+    AppConfig = DevelopmentConfig
 else:
-    AppConfig = DevelopmentConfig
-
-# Also check FLASK_DEBUG for convenience during development startup
-if os.getenv('FLASK_DEBUG', 'False').lower() == 'true':
-    AppConfig = DevelopmentConfig
+    AppConfig = ProductionConfig

@@ -8,6 +8,15 @@ stock_bp = Blueprint('stock', __name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- Global MO API Instance ---
+_mo_api_instance = None
+
+def get_mo_api():
+    global _mo_api_instance
+    if _mo_api_instance is None:
+        _mo_api_instance = MotilalOswalAPI()
+    return _mo_api_instance
+
 def format_symbol(symbol):
     """Cleans and standardizes the stock symbol."""
     symbol = symbol.strip().upper()
@@ -24,7 +33,7 @@ def get_stock_data_from_api(symbol):
     """
     clean_symbol = format_symbol(symbol)
     try:
-        mo_api = MotilalOswalAPI()
+        mo_api = get_mo_api()
         if not mo_api.auth_token and not mo_api.login():
             raise ConnectionError("MO API login failed")
         

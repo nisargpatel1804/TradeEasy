@@ -1,6 +1,6 @@
 from app import create_app
 import os
-from backend.app.tasks.order_processor import start_order_processor
+from app.tasks.order_processor import start_order_processor
 
 app = create_app()
 

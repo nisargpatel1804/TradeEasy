@@ -1,24 +1,31 @@
-import React from "react";
-import { createRoot } from "react-dom/client";
-import { BrowserRouter } from "react-router-dom";
-import App from "./App.jsx";
-import { DataProvider } from "./services/DataContext";
-import "./index.css";
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { BrowserRouter as Router } from 'react-router-dom';
+import App from '@/App.jsx';
+import { AuthProvider } from '@/context/AuthContext.jsx';
+import { DataProvider } from '@/context/DataContext.jsx';
+import { SocketProvider } from '@/context/SocketContext.jsx';
+import '@/index.css';
 
-const rootElement = document.getElementById("root");
-
-if (!rootElement) {
-  throw new Error("Root element not found. Make sure there is a div with id='root' in index.html");
-}
-
-const root = createRoot(rootElement);
-
-root.render(
-  <React.StrictMode>
-    <BrowserRouter>
-      <DataProvider>
-        <App />
-      </DataProvider>
-    </BrowserRouter>
-  </React.StrictMode>
+/**
+ * The root of the React application.
+ *
+ * We wrap the entire App component with three essential providers:
+ * 1. <Router>: Enables client-side routing for the entire application.
+ * 2. <AuthProvider>: Manages and provides global authentication state (e.g., isLoggedIn).
+ * It must be inside the Router because its hooks might use navigation.
+ * 3. <DataProvider>: Manages and provides global application data (e.g., profile, watchlists).
+ * It is placed inside AuthProvider so it can access authentication state if needed.
+ */
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <Router>
+    <SocketProvider>
+      <AuthProvider>
+        <DataProvider>
+          <App />
+        </DataProvider>
+      </AuthProvider>
+    </SocketProvider>
+  </Router>
 );
+

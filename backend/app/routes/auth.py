@@ -1,64 +1,73 @@
 from flask import Blueprint, request, jsonify, session
 from flask_login import login_user, logout_user, login_required, current_user
 from mongoengine.queryset.visitor import Q
-from app.models import User
-from app import bcrypt  # Import bcrypt from the main __init__.py
+from app.models import User, Watchlist
+from app import bcrypt
 import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging for this blueprint
 logger = logging.getLogger(__name__)
 
-# Initialize Flask Blueprint
 bp = Blueprint('auth', __name__)
+
 
 @bp.route('/signup', methods=['POST'])
 def signup():
-    """Handle new user registration with secure password hashing."""
+    """
+    Handles new user registration.
+    Validates input, checks for existing users, and securely hashes the password.
+    """
     try:
         data = request.json
         email = data.get('email')
         mobile = data.get('mobile')
         password = data.get('password')
+        # Standardize on snake_case for API consistency
         confirm_password = data.get('confirm_password')
 
-        # --- Input Validation ---
         if not all([email, mobile, password, confirm_password]):
             return jsonify({"error": "All fields are required"}), 400
         if password != confirm_password:
             return jsonify({"error": "Passwords do not match"}), 400
 
-        # --- Check for Existing User ---
+        # Check if a user with the same email or mobile already exists
         if User.objects(Q(email=email) | Q(mobile=mobile)).first():
-            return jsonify({"error": "An account with this email or mobile number already exists"}), 409
+            return jsonify({"error": "An account with this email or mobile already exists"}), 409
 
-        # --- Secure Password Hashing ---
-        # Generate a hash of the user's password using bcrypt.
-        # This is a one-way process; the original password cannot be recovered.
+        # Hash the password securely using bcrypt before storing
         hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
 
-        # --- Create and Save New User ---
         new_user = User(
             email=email,
             mobile=mobile,
             password=hashed_password,
-            username=email  # Default username to email
+            username=email  # Default username to email for simplicity
         )
+        
+        # Create a default, non-deletable watchlist for a better user experience
+        default_watchlist = Watchlist(name="Main", is_deletable=False, stocks=[])
+        new_user.watchlists = [default_watchlist]
+        
         new_user.save()
 
-        logger.info(f"New user account created successfully. Client ID: {new_user.client_id}")
+        logger.info(f"New user account created. Client ID: {new_user.client_id}")
         return jsonify({
-            "message": "Account created successfully. Please log in.",
+            "success": True,
+            "message": "Account created successfully. Please log in with your Client ID.",
             "client_id": new_user.client_id
         }), 201
 
     except Exception as e:
-        logger.error(f"An unexpected error occurred during signup: {e}")
-        return jsonify({"error": "Internal server error during signup"}), 500
+        logger.error(f"Error during signup: {e}", exc_info=True)
+        return jsonify({"error": "An internal server error occurred"}), 500
+
 
 @bp.route('/login', methods=['POST'])
 def login():
-    """Handle user login by verifying credentials against the stored hash."""
+    """
+    Handles user login.
+    Verifies credentials against the stored hash and creates a session.
+    """
     try:
         data = request.json
         client_id = data.get('client_id')
@@ -67,47 +76,60 @@ def login():
         if not client_id or not password:
             return jsonify({"error": "Client ID and password are required"}), 400
 
-        # --- Find User and Verify Password ---
         user = User.objects(client_id=client_id).first()
 
-        # Use bcrypt's check_password_hash to securely compare the provided password
-        # with the stored hash. This prevents timing attacks.
+        # Securely check the provided password against the stored hash
         if not user or not bcrypt.check_password_hash(user.password, password):
-            logger.warning(f"Failed login attempt for Client ID: {client_id}")
             return jsonify({"error": "Invalid client ID or password"}), 401
 
-        # --- Log In User and Create Session ---
-        login_user(user)
-        session['user_id'] = str(user.id) # Ensure user_id is stored in session
-        logger.info(f"User '{user.client_id}' logged in successfully.")
+        # Log the user in, creating a secure session
+        login_user(user, remember=True)
+        
         return jsonify({
+            "success": True,
             "message": "Logged in successfully",
             "client_id": user.client_id,
             "username": user.username
         }), 200
 
     except Exception as e:
-        logger.error(f"An unexpected error occurred during login: {e}")
-        return jsonify({"error": "Internal server error during login"}), 500
+        logger.error(f"Error during login: {e}", exc_info=True)
+        return jsonify({"error": "An internal server error occurred"}), 500
+
 
 @bp.route('/logout', methods=['POST'])
-@login_required
 def logout():
-    """Handle user logout and clear the session."""
+    """
+    Handles user logout.
+    Securely invalidates the current user's session.
+    Note: This endpoint doesn't require authentication to allow logout even with expired sessions.
+    """
     try:
-        user_client_id = current_user.client_id
-        logout_user()  # Clears user from Flask-Login session
-        session.clear()  # Ensures all session data is removed
-        logger.info(f"User '{user_client_id}' logged out successfully.")
-        return jsonify({"message": "You have been logged out successfully"}), 200
+        # Check if user is authenticated before trying to get their info
+        if current_user.is_authenticated:
+            user_client_id = current_user.client_id
+            logout_user()  # Invalidates the Flask-Login session
+            logger.info(f"User '{user_client_id}' logged out successfully.")
+        else:
+            logger.info("Logout called with no active session (possibly expired).")
+        
+        session.clear()  # Ensures any session data is removed regardless
+        return jsonify({"success": True, "message": "You have been logged out"}), 200
+        
     except Exception as e:
-        logger.error(f"An unexpected error occurred during logout: {e}")
-        return jsonify({"error": "Internal server error during logout"}), 500
+        logger.error(f"Error during logout: {e}", exc_info=True)
+        return jsonify({"error": "An internal server error occurred"}), 500
+
 
 @bp.route('/check-auth', methods=['GET'])
 @login_required
 def check_auth():
-    """An endpoint to verify if the current user's session is active."""
+    """
+    Verifies if the current user has an active, authenticated session.
+    The @login_required decorator handles the verification. If the user is not
+    authenticated, it will automatically return a 401 Unauthorized response.
+    """
+    logger.info(f"Auth check for user: {current_user.client_id}")
     return jsonify({
         "isAuthenticated": True,
         "client_id": current_user.client_id,

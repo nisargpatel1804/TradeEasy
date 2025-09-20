@@ -59,7 +59,11 @@ class User(Document, UserMixin):
     is_active = BooleanField(default=True, required=True)
     watchlists = ListField(EmbeddedDocumentField(Watchlist))
 
-    meta = {'collection': 'users'}
+    meta = {'collection': 'TE_User'}
+
+    def get_id(self):
+        """Override Flask-Login's get_id to return string representation of ObjectId"""
+        return str(self.id)
 
     def __repr__(self):
         return f"<User {self.username} | ClientID: {self.client_id}>"
@@ -135,3 +139,53 @@ class GlobalMarketIndex(Document):
 
     def __repr__(self):
         return f"<GlobalMarketData {self.category} - {self.name}>"
+
+class AQScrip(Document):
+    """
+    Model to store all scrip data from Motilal Oswal API for different exchanges.
+    This includes stocks, indices, derivatives, etc.
+    """
+    exchange = IntField(required=True)  # Exchange code (2 for NSEFO, etc.)
+    exchangename = StringField(max_length=20, required=True)  # NSE, BSE, NSEFO, etc.
+    scripcode = IntField(required=True)  # Unique scrip code from MO API
+    scripname = StringField(max_length=200, required=True)  # Full scrip name
+    scripshortname = StringField(max_length=50)  # Short name
+    scripfullname = StringField(max_length=200)  # Full name
+    marketlot = IntField(default=1)  # Market lot size
+    issuspended = StringField(max_length=1, default="N")  # Y/N
+    instrumentname = StringField(max_length=20)  # EQUITY, OPTIDX, FUTIDX, etc.
+    expirydate = IntField()  # Unix timestamp for derivatives
+    strikeprice = DecimalField(precision=2, default=0)  # Strike price for options
+    optiontype = StringField(max_length=2)  # CE/PE for options
+    markettype = StringField(max_length=10)  # Market type
+    foexposurepercent = DecimalField(precision=2, default=0)  # F&O exposure %
+    lowercircuitprice = DecimalField(precision=4, default=0)  # Lower circuit limit
+    uppercircuitprice = DecimalField(precision=4, default=0)  # Upper circuit limit
+    ticksize = DecimalField(precision=4, default=0.05)  # Minimum tick size
+    scripisinno = StringField(max_length=20)  # ISIN number
+    indicesidentifier = IntField(default=0)  # Index identifier
+    isbanscrip = StringField(max_length=1, default="N")  # Y/N for banned scrips
+    facevalue = DecimalField(precision=2, default=0)  # Face value
+    calevel = IntField(default=0)  # Capital adequacy level
+    maxqtyperorder = IntField(default=0)  # Maximum quantity per order
+    algoid = IntField(default=0)  # Algorithm ID
+    ultoken = StringField(max_length=20)  # Underlying token
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        'collection': 'AQ_scrips',
+        'indexes': [
+            'exchangename',
+            'scripcode',
+            'instrumentname',
+            'issuspended',
+            'isbanscrip',
+            ('exchangename', 'scripcode'),
+            ('exchangename', 'instrumentname'),
+            ('scripcode', 'exchangename')
+        ]
+    }
+
+    def __repr__(self):
+        return f"<AQScrip {self.exchangename}:{self.scripcode} - {self.scripname}>"

@@ -1,19 +1,24 @@
 import os
 import logging
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_mongoengine import MongoEngine
 from flask_cors import CORS
 from flask_login import LoginManager
 from flask_session import Session
 from flask_bcrypt import Bcrypt
 from dotenv import load_dotenv
+from flask_socketio import SocketIO, emit
+from bson import ObjectId
+
+from . import db_scrips_populate
 
 # Load environment variables from .env file
 load_dotenv()
 
 # --- Configure Logging ---
 logging.basicConfig(level=logging.INFO)
-logging.getLogger('werkzeug').setLevel(logging.WARNING)  # Quiets the default request logger
+# Quiets the default request logger for a cleaner console
+logging.getLogger('werkzeug').setLevel(logging.WARNING) 
 logger = logging.getLogger(__name__)
 
 # --- Initialize Flask Extensions ---
@@ -22,11 +27,13 @@ db = MongoEngine()
 login_manager = LoginManager()
 session_manager = Session()
 bcrypt = Bcrypt()
+# Initialize SocketIO for real-time communication
+socketio = SocketIO()
 
 def create_app():
     """
     Factory function to create and configure the Flask application.
-    This pattern allows for multiple app instances and is great for testing.
+    This pattern allows for multiple app instances and is ideal for testing.
     """
     app = Flask(__name__)
 
@@ -40,16 +47,21 @@ def create_app():
     session_manager.init_app(app)
     bcrypt.init_app(app)
 
-    # Set the view to redirect to for routes requiring login
-    login_manager.login_view = '/api/login'
-
     # --- CORS Configuration ---
-    # This is the single source of truth for CORS policy.
+    frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+    
+    # SocketIO requires its own CORS configuration
+    socketio.init_app(
+        app, 
+        cors_allowed_origins=[frontend_url, "http://127.0.0.1:5173"]
+    )
+
+    # Configure CORS for standard HTTP requests
     CORS(
         app,
         resources={
             r"/api/*": {
-                "origins": os.getenv('FRONTEND_URL', 'http://localhost:5173'),
+                "origins": [frontend_url, "http://127.0.0.1:5173"],
                 "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
                 "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
                 "supports_credentials": True,
@@ -57,28 +69,39 @@ def create_app():
         }
     )
 
+    # --- Start the WebSocket Manager ---
+    # This must be done only once. It starts the background thread that
+    # connects to the Motilal Oswal API and listens for real-time data.
+    with app.app_context():
+        from app.socket_manager import MO_WebSocket_Manager
+        # Pass the socketio server instance to the manager so it can emit messages
+        socket_manager = MO_WebSocket_Manager(socketio_server=socketio)
+        socket_manager.start()
+
+    # Set the view to redirect to for routes requiring login
+    login_manager.login_view = '/api/auth/login'
+
     # --- Import and Register Blueprints ---
-    # Imports are now cleaned up to reflect the merged files.
-    from .routes import (
-        auth, trade, portfolio, orders, profile, search, markets
-    )
-    # Assuming `watchlist`, `status`, and `motilal_oswal` routes exist as per your previous structure.
-    from .routes import watchlist, status
+    from .routes import auth, trade, portfolio, orders, profile, search, markets, watchlist
     from .routes.stock import stock_bp
-    from .routes.motilal_oswal import mo_bp
 
     # Register all blueprints with a consistent '/api' prefix
-    app.register_blueprint(auth.bp, url_prefix='/api')
+    app.register_blueprint(auth.bp, url_prefix='/api/auth')
     app.register_blueprint(stock_bp, url_prefix='/api')
     app.register_blueprint(search.search_bp, url_prefix='/api')
     app.register_blueprint(trade.bp, url_prefix='/api')
-    app.register_blueprint(watchlist.bp, url_prefix='/api')
     app.register_blueprint(portfolio.bp, url_prefix='/api')
     app.register_blueprint(orders.bp, url_prefix='/api')
     app.register_blueprint(profile.bp, url_prefix='/api')
-    app.register_blueprint(status.status_bp, url_prefix='/api')
-    app.register_blueprint(markets.markets_bp, url_prefix='/api') # Standardized prefix
-    app.register_blueprint(mo_bp, url_prefix='/api/mo')
+    app.register_blueprint(markets.markets_bp, url_prefix='/api')
+    app.register_blueprint(watchlist.bp, url_prefix='/api')
+    app.register_blueprint(db_scrips_populate.data_management_bp, url_prefix='/api/data')
+
+    # --- Root Route for Health Check ---
+    @app.route('/')
+    def health_check():
+        """Simple health check endpoint."""
+        return jsonify({"status": "healthy", "message": "TradeEasy API is running"}), 200
 
     # --- Define Login Manager Handlers ---
     @login_manager.user_loader
@@ -86,9 +109,9 @@ def create_app():
         """Load user by ID for session management."""
         from .models import User
         try:
-            return User.objects(id=user_id).first()
-        except (ValueError, TypeError):
-            # Handles cases where user_id might be invalid
+            return User.objects(id=ObjectId(user_id)).first()
+        except Exception as e:
+            logger.warning(f"Failed to load user with ID {user_id}: {e}")
             return None
 
     @login_manager.unauthorized_handler
@@ -96,6 +119,25 @@ def create_app():
         """Handle unauthorized access attempts for @login_required routes."""
         return jsonify({"error": "Unauthorized access. Please log in."}), 401
 
+    # --- Define SocketIO Event Handlers ---
+    @socketio.on('connect')
+    def handle_connect():
+        """
+        Handles a new client connection. It immediately sends the latest
+        cached data to populate the client's UI.
+        """
+        logger.info("Client connected")
+        # Get the existing socket manager instance (don't create a new one)
+        socket_manager = MO_WebSocket_Manager(socketio_server=socketio)
+        latest_data = socket_manager.get_latest_data()
+        if latest_data:
+            # Emit to the specific client that just connected
+            emit('initial_indices', latest_data, room=request.sid)
+
+    @socketio.on('disconnect')
+    def handle_disconnect():
+        """Handles a client disconnection."""
+        logger.info("Client disconnected")
+
     logger.info(f"Flask app created with '{AppConfig.__name__}' configuration.")
     return app
-

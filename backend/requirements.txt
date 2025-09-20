@@ -4,6 +4,7 @@ Flask-Login
 Flask-Session
 Flask-Bcrypt
 Flask-WTF==1.2.1
+flask-socketio
 python-dotenv==1.0.1
 cryptography
 pycryptodome

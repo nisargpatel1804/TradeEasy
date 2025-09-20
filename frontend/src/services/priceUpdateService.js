@@ -1,270 +1,102 @@
 /**
- * Real-time price update service for frontend
- * Fetches live prices during market hours and cached data otherwise
- * Optimized to reduce unnecessary API calls and improve performance
+ * Price Update Service
+ * Handles real-time price updates for stocks via WebSocket
+ * This is a placeholder implementation that can be expanded
  */
-
-import { api } from './api'
-import marketHours from '../utils/marketHours'
 
 class PriceUpdateService {
   constructor() {
-    this.isRunning = false
-    this.intervalId = null
-    this.updateInterval = 1000 // 1 second during market hours
-    this.offMarketInterval = 300000 // 5 minutes when market is closed
-    this.subscribers = new Set()
-    this.lastPrices = {}
-    this.retryCount = 0
-    this.maxRetries = 3
-    this.lastFetchTime = null
-    this.isMarketHours = false
-    this.lastMarketStatusCheck = null
-    this.marketStatusCacheMs = 30000 // Cache market status for 30 seconds
+    this.subscribers = [];
+    this.isConnected = false;
+    this.allPrices = {};
+    this.marketHours = false;
   }
 
   /**
    * Subscribe to price updates
-   * @param {Function} callback - Function to call when prices are updated
-   * @returns {Function} - Unsubscribe function
+   * @param {function} callback - Function to call when price data is received
+   * @returns {function} - Unsubscribe function
    */
   subscribe(callback) {
-    this.subscribers.add(callback)
-    
-    // Start service if not already running
-    if (!this.isRunning) {
-      this.start()
-    }
-    
+    this.subscribers.push(callback);
+
     // Return unsubscribe function
     return () => {
-      this.subscribers.delete(callback)
-      
-      // Stop service if no more subscribers
-      if (this.subscribers.size === 0) {
-        this.stop()
+      const index = this.subscribers.indexOf(callback);
+      if (index > -1) {
+        this.subscribers.splice(index, 1);
       }
-    }
+    };
   }
 
   /**
-   * Start the price update service
-   */
-  start() {
-    if (this.isRunning) {
-      return
-    }
-
-    this.isRunning = true
-    this.retryCount = 0
-    this.updateMarketStatus()
-    
-    // Set appropriate interval based on market hours
-    const interval = this.isMarketHours ? this.updateInterval : this.offMarketInterval
-    
-    this.intervalId = setInterval(() => {
-      this.updateMarketStatus()
-      this.fetchPrices()
-    }, interval)
-  }
-
-  /**
-   * Update market status and adjust fetch frequency
-   * Uses caching to reduce frequent market status checks
-   */
-  updateMarketStatus() {
-    const now = Date.now()
-    
-    // Use cached market status if checked recently
-    if (this.lastMarketStatusCheck && (now - this.lastMarketStatusCheck) < this.marketStatusCacheMs) {
-      return
-    }
-    
-    const marketStatus = marketHours.getMarketStatus()
-    const wasMarketHours = this.isMarketHours
-    this.isMarketHours = marketStatus.isOpen
-    this.lastMarketStatusCheck = now
-
-    // If market status changed, restart with new interval
-    if (wasMarketHours !== this.isMarketHours && this.intervalId) {
-      clearInterval(this.intervalId)
-      const interval = this.isMarketHours ? this.updateInterval : this.offMarketInterval
-      
-      this.intervalId = setInterval(() => {
-        this.updateMarketStatus()
-        this.fetchPrices()
-      }, interval)
-      
-      // If market just closed, do one final fetch to get closing prices
-      if (!this.isMarketHours && wasMarketHours) {
-        setTimeout(() => this.fetchPrices(), 1000)
-      }
-    }
-  }
-
-  /**
-   * Stop the price update service
-   */
-  stop() {
-    if (!this.isRunning) {
-      return
-    }
-
-    this.isRunning = false
-    
-    if (this.intervalId) {
-      clearInterval(this.intervalId)
-      this.intervalId = null
-    }
-  }
-
-  /**
-   * Fetch latest prices from backend
-   * Optimized to reduce API calls when market is closed
-   */
-  async fetchPrices() {
-    try {
-      // Skip fetching if market is closed and we've fetched recently
-      if (!this.isMarketHours && this.lastFetchTime) {
-        const timeSinceLastFetch = Date.now() - this.lastFetchTime.getTime()
-        const minInterval = 60000 // Minimum 1 minute between off-market fetches
-        
-        if (timeSinceLastFetch < minInterval) {
-          return
-        }
-      }
-      
-      // During market hours, fetch real-time prices; otherwise, fetch cached data
-      const endpoint = this.isMarketHours ? 
-        '/watchlists/prices/realtime' : 
-        '/watchlists/prices/cached'
-      
-      const response = await api.get(endpoint)
-      
-      if (response.data && response.data.prices) {
-        const newPrices = response.data.prices
-        
-        // Check for price changes only during market hours
-        const changedPrices = {}
-        if (this.isMarketHours) {
-          for (const [symbol, priceData] of Object.entries(newPrices)) {
-            const lastPrice = this.lastPrices[symbol]
-            if (!lastPrice || lastPrice.ltp !== priceData.ltp) {
-              changedPrices[symbol] = {
-                ...priceData,
-                previousPrice: lastPrice ? lastPrice.ltp : null,
-                priceDirection: lastPrice ? 
-                  (priceData.ltp > lastPrice.ltp ? 'up' : 
-                   priceData.ltp < lastPrice.ltp ? 'down' : 'same') : 'same'
-              }
-            }
-          }
-        }
-        
-        // Update stored prices
-        this.lastPrices = { ...newPrices }
-        this.lastFetchTime = new Date()
-        
-        // Notify subscribers
-        this.notifySubscribers({
-          allPrices: newPrices,
-          changedPrices,
-          timestamp: new Date().toISOString(),
-          isConnected: true,
-          isMarketHours: this.isMarketHours
-        })
-        
-        // Reset retry count on success
-        this.retryCount = 0
-      }
-    } catch (error) {
-      // Only log errors during market hours to reduce noise
-      if (this.isMarketHours) {
-        console.error('Failed to fetch real-time prices:', error)
-      }
-      
-      // Notify subscribers of connection issues
-      this.notifySubscribers({
-        allPrices: {},
-        changedPrices: {},
-        timestamp: new Date().toISOString(),
-        isConnected: false,
-        isMarketHours: this.isMarketHours,
-        error: error.message
-      })
-      
-      this.retryCount++
-      
-      // If too many retries, stop the service temporarily
-      if (this.retryCount >= this.maxRetries) {
-        this.stop()
-        
-        // Restart after delay (longer delay if market is closed)
-        const retryDelay = this.isMarketHours ? 30000 : 300000 // 30s or 5min
-        setTimeout(() => {
-          if (this.subscribers.size > 0) {
-            this.start()
-          }
-        }, retryDelay)
-      }
-    }
-  }
-
-  /**
-   * Notify all subscribers of price updates
-   * @param {Object} priceData - The price update data
+   * Notify all subscribers with price data
+   * @param {object} priceData - The price data to send
    */
   notifySubscribers(priceData) {
     this.subscribers.forEach(callback => {
       try {
-        callback(priceData)
+        callback(priceData);
       } catch (error) {
-        console.error('Error in price update callback:', error)
+        console.error('Error in price update subscriber:', error);
       }
-    })
+    });
   }
 
   /**
-   * Get the last known price for a symbol
-   * @param {string} symbol - The stock symbol
-   * @returns {Object|null} - The price data or null if not found
+   * Update connection status
+   * @param {boolean} connected - Whether connected to price feed
    */
-  getLastPrice(symbol) {
-    return this.lastPrices[symbol] || null
+  setConnected(connected) {
+    this.isConnected = connected;
+    this.notifySubscribers({
+      allPrices: this.allPrices,
+      changedPrices: {},
+      isConnected: this.isConnected,
+      isMarketHours: this.marketHours,
+      error: null
+    });
   }
 
   /**
-   * Check if the service is currently running
-   * @returns {boolean}
+   * Update market hours status
+   * @param {boolean} marketHours - Whether market is open
    */
-  isServiceRunning() {
-    return this.isRunning
+  setMarketHours(marketHours) {
+    this.marketHours = marketHours;
   }
 
   /**
-   * Get the number of active subscribers
-   * @returns {number}
+   * Update prices
+   * @param {object} prices - Object with symbol keys and price data values
    */
-  getSubscriberCount() {
-    return this.subscribers.size
+  updatePrices(prices) {
+    this.allPrices = { ...this.allPrices, ...prices };
+    this.notifySubscribers({
+      allPrices: this.allPrices,
+      changedPrices: prices,
+      isConnected: this.isConnected,
+      isMarketHours: this.marketHours,
+      error: null
+    });
   }
 
   /**
-   * Get market status information
-   * @returns {Object}
+   * Set error state
+   * @param {string} error - Error message
    */
-  getMarketStatus() {
-    return {
-      isMarketHours: this.isMarketHours,
-      lastFetchTime: this.lastFetchTime,
-      isRunning: this.isRunning,
-      subscriberCount: this.subscribers.size,
-      marketInfo: marketHours.getMarketStatus()
-    }
+  setError(error) {
+    this.notifySubscribers({
+      allPrices: this.allPrices,
+      changedPrices: {},
+      isConnected: this.isConnected,
+      isMarketHours: this.marketHours,
+      error: error
+    });
   }
 }
 
 // Create singleton instance
-const priceUpdateService = new PriceUpdateService()
+const priceUpdateService = new PriceUpdateService();
 
-export default priceUpdateService
+export default priceUpdateService;
