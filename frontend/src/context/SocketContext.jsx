@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
+import priceUpdateService from '@/services/priceUpdateService'; // Import the service
 
 // 1. Create the context to hold the socket instance
 const SocketContext = createContext(null);
@@ -16,6 +17,7 @@ export const useSocketContext = () => {
 /**
  * The provider component that establishes the WebSocket connection
  * and makes the socket instance available to all its children.
+ * It is also responsible for initializing the real-time price update service.
  */
 export const SocketProvider = ({ children }) => {
   const [socket, setSocket] = useState(null);
@@ -30,7 +32,7 @@ export const SocketProvider = ({ children }) => {
     
     const newSocket = io(socketIoUrl, {
       // `withCredentials: true` is important for sending session cookies,
-      // which can be used for authenticating socket connections in the future.
+      // which can be used for authenticating socket connections.
       withCredentials: true,
     });
 
@@ -41,7 +43,11 @@ export const SocketProvider = ({ children }) => {
     // 3. Set the created socket instance into state
     setSocket(newSocket);
     
-    console.log("Socket connection established.");
+    // --- NEW: Initialize the price update service with the new socket instance ---
+    // This activates the real-time price listeners for the entire application.
+    priceUpdateService.init(newSocket);
+    
+    console.log("Socket connection established and price service initialized.");
 
     // 4. Define a cleanup function to run when the component unmounts
     // This is crucial for preventing memory leaks and orphaned connections.

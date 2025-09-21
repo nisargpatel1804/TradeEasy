@@ -5,6 +5,8 @@ import { useNavigate } from "react-router-dom"
 import { fetchPortfolio, fetchPerformance, fetchWatchlistStocks } from "@/services/api"
 import { useDataContext } from "@/context/DataContext"
 import priceUpdateService from "@/services/priceUpdateService"
+import { useSocketContext } from "@/context/SocketContext"
+import { fetchBatchStockData } from "@/services/api"
 import { Card, CardHeader, CardContent, CardTitle } from "@/assets/ui/card"
 import { Button } from "@/assets/ui/button"
 import { isAuthenticatedSync as isAuthenticated, getClientId } from "@/services/auth"
@@ -54,6 +56,7 @@ const Dashboard = () => {
   const [profile, setProfile] = useState({ name: "Client Name", clientId: "TR123456" })
   const [indices, setIndices] = useState([])
   const navigate = useNavigate()
+  const { isConnected } = useSocketContext()
   
   // Get shared context data
   const { getProfile, getIndices, getWatchlists } = useDataContext()
@@ -173,10 +176,17 @@ const Dashboard = () => {
               // Find the 'Stocks' watchlist and fetch its stocks
               const stocksWatchlist = data.find(w => w.name === "Stocks")
               if (stocksWatchlist) {
-                const stocksData = await fetchWatchlistStocks(stocksWatchlist.id)
+                const stocksData = await fetchWatchlistStocks(stocksWatchlist.name)
                 if (stocksData && !stocksData.error) {
-                  setWatchlistStocks(stocksData.stocks || [])
-                  setWatchlist({ data: stocksData.stocks || [] })
+                  const normalized = (stocksData.stocks || []).map(s => ({
+                    symbol: s.symbol,
+                    name: s.name,
+                    price: s.current_price ?? s.price ?? 0,
+                    change: s.change ?? 0,
+                    percent_change: s.percent_change ?? 0,
+                  }))
+                  setWatchlistStocks(normalized)
+                  setWatchlist({ data: normalized })
                 }
               }
             }
@@ -270,6 +280,56 @@ const Dashboard = () => {
       }
     }
   }, [watchlistStocks.length]) // Only depend on watchlist length, not the entire array
+
+  // Batch polling to update prices based on socket connection (market hours proxy)
+  useEffect(() => {
+    if (watchlistStocks.length === 0) return
+    let timer = null
+    const poll = async () => {
+      try {
+        const symbols = Array.from(new Set(watchlistStocks.map(s => (s.symbol || "").split(".")[0]).filter(Boolean)))
+        if (symbols.length === 0) return
+        const res = await fetchBatchStockData(symbols)
+        const data = res?.data || {}
+        // Update state
+        setWatchlistStocks(prev => prev.map(stk => {
+          const base = (stk.symbol || "").split(".")[0]
+          const nd = data[base]
+          if (nd && !nd.error) {
+            return {
+              ...stk,
+              price: nd.ltp ?? stk.price,
+              change: nd.change ?? stk.change,
+              percent_change: (nd.p_change ?? stk.percent_change),
+              last_updated: new Date().toISOString()
+            }
+          }
+          return stk
+        }))
+        // Notify service for other listeners
+        const priceMap = {}
+        Object.keys(data).forEach(base => {
+          const nd = data[base]
+          if (!nd || nd.error) return
+          // Find full symbol key used in UI (prefer .NS)
+          const full = (watchlistStocks.find(s => s.symbol.split(".")[0] === base)?.symbol) || base
+          priceMap[full] = { ltp: nd.ltp, change: nd.change, percent_change: nd.p_change, last_updated: new Date().toISOString() }
+        })
+        if (Object.keys(priceMap).length > 0) {
+          priceUpdateService.updatePrices(priceMap)
+        }
+        priceUpdateService.setConnected(!!isConnected)
+        priceUpdateService.setMarketHours(!!isConnected)
+      } catch (e) {
+        // ignore transient errors
+      }
+    }
+    // Start immediately, then interval
+    poll()
+    const intervalMs = isConnected ? 4000 : 30000
+    timer = setInterval(poll, intervalMs)
+    return () => { if (timer) clearInterval(timer) }
+  }, [watchlistStocks.map(s => s.symbol).join(','), isConnected])
 
   const formatCurrency = useCallback((amount) => {
     if (amount === null || amount === undefined) {

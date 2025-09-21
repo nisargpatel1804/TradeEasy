@@ -1,102 +1,131 @@
 /**
  * Price Update Service
- * Handles real-time price updates for stocks via WebSocket
- * This is a placeholder implementation that can be expanded
+ * Manages real-time price updates by listening to the main application socket.
+ * This service should be initialized once with a connected Socket.IO client.
  */
 
 class PriceUpdateService {
   constructor() {
     this.subscribers = [];
-    this.isConnected = false;
+    this.socket = null;
     this.allPrices = {};
-    this.marketHours = false;
+    this.isConnected = false;
+    this.isMarketOpen = false; // Tracks market open/close status
   }
 
   /**
-   * Subscribe to price updates
-   * @param {function} callback - Function to call when price data is received
-   * @returns {function} - Unsubscribe function
+   * Initializes the service with the Socket.IO client instance.
+   * This should be called once when the application starts (e.g., in SocketProvider.jsx).
+   * @param {object} socketInstance - The connected socket.io-client instance.
+   */
+  init(socketInstance) {
+    if (this.socket) {
+      console.warn("PriceUpdateService is already initialized.");
+      return;
+    }
+    
+    this.socket = socketInstance;
+    console.log("PriceUpdateService initialized with socket.");
+
+    // Listen for standard connection events to update status
+    this.socket.on('connect', () => {
+      this.isConnected = true;
+      console.log("Price feed connected.");
+      this.notifySubscribers();
+    });
+
+    this.socket.on('disconnect', () => {
+      this.isConnected = false;
+      console.warn("Price feed disconnected.");
+      this.notifySubscribers();
+    });
+
+    // Listen for the specific 'stock_update' event from the backend
+    this.socket.on('stock_update', (priceData) => {
+      const { symbol, ltp, change, percent_change, last_updated } = priceData;
+
+      if (!symbol) return;
+
+      const newPrice = {
+        ltp,
+        change,
+        percent_change,
+        last_updated,
+      };
+
+      // Update the central price map
+      this.allPrices[symbol] = { ...this.allPrices[symbol], ...newPrice };
+
+      // Notify subscribers with the complete map and the specific change
+      this.notifySubscribers({ changedPrices: { [symbol]: newPrice } });
+    });
+
+    // Listen for market status updates from the backend
+    this.socket.on('market_status', (status) => {
+        this.isMarketOpen = status.isOpen;
+        this.notifySubscribers();
+    });
+  }
+
+  /**
+   * Subscribes a component to receive updates.
+   * @param {function} callback - The function to call with new data.
+   * @returns {function} A function to unsubscribe.
    */
   subscribe(callback) {
     this.subscribers.push(callback);
-
-    // Return unsubscribe function
+    // Immediately notify the new subscriber with the current state
+    this.notifySubscribers({}, callback);
+    
     return () => {
-      const index = this.subscribers.indexOf(callback);
-      if (index > -1) {
-        this.subscribers.splice(index, 1);
-      }
+      this.subscribers = this.subscribers.filter(cb => cb !== callback);
     };
   }
 
   /**
-   * Notify all subscribers with price data
-   * @param {object} priceData - The price data to send
+   * Notifies all subscribed components with the latest data.
+   * @param {object} data - Optional data containing specific changes.
+   * @param {function} [singleCallback] - Optional callback to notify only one subscriber.
    */
-  notifySubscribers(priceData) {
-    this.subscribers.forEach(callback => {
+  notifySubscribers(data = {}, singleCallback = null) {
+    const payload = {
+      allPrices: this.allPrices,
+      changedPrices: data.changedPrices || {},
+      isConnected: this.isConnected,
+      isMarketOpen: this.isMarketOpen,
+      error: data.error || null,
+    };
+    
+    const callbacksToNotify = singleCallback ? [singleCallback] : this.subscribers;
+
+    callbacksToNotify.forEach(callback => {
       try {
-        callback(priceData);
+        callback(payload);
       } catch (error) {
         console.error('Error in price update subscriber:', error);
       }
     });
   }
-
+  
   /**
-   * Update connection status
-   * @param {boolean} connected - Whether connected to price feed
-   */
-  setConnected(connected) {
-    this.isConnected = connected;
-    this.notifySubscribers({
-      allPrices: this.allPrices,
-      changedPrices: {},
-      isConnected: this.isConnected,
-      isMarketHours: this.marketHours,
-      error: null
-    });
-  }
-
-  /**
-   * Update market hours status
-   * @param {boolean} marketHours - Whether market is open
-   */
-  setMarketHours(marketHours) {
-    this.marketHours = marketHours;
-  }
-
-  /**
-   * Update prices
-   * @param {object} prices - Object with symbol keys and price data values
-   */
-  updatePrices(prices) {
-    this.allPrices = { ...this.allPrices, ...prices };
-    this.notifySubscribers({
-      allPrices: this.allPrices,
-      changedPrices: prices,
-      isConnected: this.isConnected,
-      isMarketHours: this.marketHours,
-      error: null
-    });
-  }
-
-  /**
-   * Set error state
-   * @param {string} error - Error message
+   * Allows external parts of the app to set an error state.
+   * @param {string} error - The error message to broadcast.
    */
   setError(error) {
-    this.notifySubscribers({
-      allPrices: this.allPrices,
-      changedPrices: {},
-      isConnected: this.isConnected,
-      isMarketHours: this.marketHours,
-      error: error
-    });
+    this.notifySubscribers({ error });
+  }
+
+  /**
+   * Manually injects or updates a batch of prices into the service.
+   * Useful for loading initial data from a REST API before WebSocket takes over.
+   * @param {object} initialPrices - An object where keys are symbols and values are price data.
+   */
+  loadInitialPrices(initialPrices) {
+    this.allPrices = { ...this.allPrices, ...initialPrices };
+    this.notifySubscribers({ changedPrices: initialPrices });
   }
 }
 
-// Create singleton instance
+// Create and export a singleton instance
 const priceUpdateService = new PriceUpdateService();
-
 export default priceUpdateService;

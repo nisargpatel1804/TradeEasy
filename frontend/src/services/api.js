@@ -149,24 +149,35 @@ export const createWatchlist = (name) => {
   return apiClient.post("/watchlists", { name }).then(res => res.data);
 };
 
-/** Deletes a watchlist by its ID. */
-export const deleteWatchlist = (watchlistId) => {
-  return apiClient.delete(`/watchlists/${watchlistId}`).then(res => res.data);
+/** Deletes a watchlist by its name. */
+export const deleteWatchlist = (watchlistName) => {
+  return apiClient.delete(`/watchlists/${encodeURIComponent(watchlistName)}`).then(res => res.data);
 };
 
-/** Adds a stock to a specific watchlist. */
-export const addStockToWatchlist = (watchlistId, symbol, name) => {
-  return apiClient.post(`/watchlists/${watchlistId}/stocks`, { symbol, name }).then(res => res.data);
+// --- THIS FUNCTION IS UPDATED ---
+/** * Adds a stock to a specific watchlist (by name).
+ * Includes the scripcode, which is essential for the backend to trigger
+ * a real-time WebSocket subscription for the newly added stock.
+ */
+export const addStockToWatchlist = (watchlistName, symbol, name, scripcode) => {
+  return apiClient.post(`/watchlists/${encodeURIComponent(watchlistName)}/stocks`, { symbol, name, scripcode }).then(res => res.data);
 };
 
-/** Removes a stock from a specific watchlist. */
-export const removeStockFromWatchlist = (watchlistId, symbol) => {
-  return apiClient.delete(`/watchlists/${watchlistId}/stocks/${symbol}`).then(res => res.data);
+/** Removes a stock from a specific watchlist (by name). */
+export const removeStockFromWatchlist = (watchlistName, symbol) => {
+  return apiClient.delete(`/watchlists/${encodeURIComponent(watchlistName)}/stocks/${encodeURIComponent(symbol)}`).then(res => res.data);
 };
 
-/** Fetches stocks in a specific watchlist. */
-export const fetchWatchlistStocks = (watchlistId) => {
-  return fetchData(`/watchlists/${watchlistId}/stocks`);
+/** Fetches stocks in a specific watchlist (by name). */
+export const fetchWatchlistStocks = (watchlistName) => {
+  return fetchData(`/watchlists/${encodeURIComponent(watchlistName)}/stocks`);
+};
+
+// --- Batch Stock Data ---
+/** Fetches batch LTP data for multiple symbols. Symbols may include .NS/.NSE suffixes. */
+export const fetchBatchStockData = (symbols = []) => {
+  if (!Array.isArray(symbols) || symbols.length === 0) return Promise.resolve({ data: {} });
+  return fetchData(`/stocks/batch`, { params: { symbols: symbols.join(',') } });
 };
 
 

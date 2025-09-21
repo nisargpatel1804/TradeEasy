@@ -179,7 +179,7 @@ const Navbar = () => {
       }
       setIsAdding(true);
       const symbolNorm = stock["1. symbol"];
-      const res = await addStockToWatchlist(stocksWatchlist.id, symbolNorm, stock["2. name"]);
+      const res = await addStockToWatchlist(stocksWatchlist.name || "Stocks", symbolNorm, stock["2. name"]);
       if (res?.error) {
         toast.error(res.error);
       } else {

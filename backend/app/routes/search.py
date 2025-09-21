@@ -10,57 +10,60 @@ logger = logging.getLogger(__name__)
 @search_bp.route("/stocks/search", methods=["GET"])
 def search_stocks():
     """
-    Searches for EQ stocks from AQScrip collection by scripname or scripfullname.
-    Only returns stocks with 'EQ' in scripname and displays them in full company name format.
+    Searches for NSE equity stocks from the AQScrip collection.
+
+    This endpoint searches by company name, symbol (short name), or full scrip name.
+    It returns a clean JSON array with the data needed by the frontend, including
+    the critical 'scripcode' for enabling real-time subscriptions.
     """
     query = request.args.get("query", "").strip()
     if len(query) < 1:
-        return jsonify({"error": "A search query with at least 1 character is required."}), 400
+        # Return an empty list for short queries, as this is expected by the frontend.
+        return jsonify([])
 
     try:
-        # Build a query that searches across relevant fields and filters for EQ stocks
-        # 'icontains' provides a case-insensitive substring search
-        # Allow searching by scripshortname (e.g., "TATAMOTORS") and scripfullname (e.g., "TATA MOTORS LIMITED-TATAMOTORS EQ")
+        # Build a query that searches across relevant fields using case-insensitive matching.
         search_query = (
             Q(scripname__icontains=query) |
             Q(scripfullname__icontains=query) |
             Q(scripshortname__icontains=query)
         )
         
-        # Filter only for equity stocks (scripname contains 'EQ') and active stocks
-        eq_stocks_query = Q(scripname__icontains="EQ") & Q(issuspended="N") & Q(isbanscrip="N")
+        # Filter for active, non-suspended, non-banned equity stocks on the NSE exchange.
+        filters = (
+            Q(scripname__icontains="EQ") & 
+            Q(issuspended="N") & 
+            Q(isbanscrip="N") &
+            Q(exchangename="NSE")
+        )
         
-        # Filter for NSE exchange only (you can modify this if needed)
-        exchange_query = Q(exchangename="NSE")
+        # Combine all queries and limit results for performance.
+        results = AQScrip.objects(filters & search_query).limit(10)
 
-        # Combine queries and limit results for performance
-        results = AQScrip.objects(eq_stocks_query & exchange_query & search_query).limit(20)
-
-        # Format results into the structure expected by the frontend
-        # Extract company name from scripfullname (format: "TATA CONSULTANCY SERV LT-TCS EQ")
+        # --- UPDATED RESPONSE FORMAT ---
+        # Format results into a clean structure expected by the frontend.
         formatted_results = []
         for scrip in results:
-            # Extract the company name part before the hyphen
+            # Extract the company name part before the hyphen for better readability.
+            # e.g., "TATA CONSULTANCY SERV LT-TCS EQ" -> "TATA CONSULTANCY SERV LT"
             company_name = scrip.scripfullname
             if '-' in company_name:
                 company_name = company_name.split('-')[0].strip()
             
-            # Use scripshortname for symbol (e.g., "TCS")
+            # Determine the symbol, preferring the short name (e.g., "TCS").
             symbol = scrip.scripshortname or scrip.scripname.replace(' EQ', '')
             
             formatted_results.append({
-                "1. symbol": f"{symbol}.NS",  # Add .NS suffix for NSE
-                "2. name": company_name,
-                "3. type": "Equity",
-                "4. region": f"India ({scrip.exchangename})",
-                "5. marketOpen": "09:15",
-                "6. marketClose": "15:30",
-                "7. timezone": "Asia/Kolkata",
-                "8. currency": "INR",
-                "9. matchScore": "1.0000"
+                # Clean keys for easier frontend access (e.g., stock.symbol)
+                "symbol": f"{symbol}.NS",
+                "name": company_name,
+                "exchange": scrip.exchangename,
+                # **CRITICAL**: Include the scripcode for real-time subscription
+                "scripcode": scrip.scripcode
             })
         
-        return jsonify({"bestMatches": formatted_results})
+        # The frontend expects a simple array of results.
+        return jsonify(formatted_results)
 
     except Exception as e:
         logger.error(f"An error occurred during stock search for query '{query}': {e}")

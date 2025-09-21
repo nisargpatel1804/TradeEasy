@@ -45,7 +45,7 @@ def signup():
         )
         
         # Create a default, non-deletable watchlist for a better user experience
-        default_watchlist = Watchlist(name="Main", is_deletable=False, stocks=[])
+        default_watchlist = Watchlist(name="Stocks", is_deletable=False, stocks=[])
         new_user.watchlists = [default_watchlist]
         
         new_user.save()
