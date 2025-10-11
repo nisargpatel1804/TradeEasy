@@ -61,7 +61,7 @@ class OrderProcessor:
                 continue
 
             try:
-                current_price = Decimal(str(response['data'].get('ltp', 0)))
+                current_price = Decimal(str(response['data'].get('ltp', 0))) / 100
             except (KeyError, InvalidOperation):
                 logger.error(f"Invalid price format received from API for {order.symbol}. Skipping order {order.id}.")
                 continue

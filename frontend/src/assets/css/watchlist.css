@@ -233,6 +233,41 @@
   gap: 1rem;
 }
 
+/* Collapsible behavior for mobile */
+.watchlist-sidebar.collapsed {
+  width: 0;
+  min-width: 0;
+  padding: 0;
+  border-right: none;
+  overflow: hidden;
+}
+
+.watchlist-toggle-btn {
+  position: fixed;
+  left: 0.75rem;
+  bottom: 1rem;
+  z-index: 30;
+}
+
+@media (max-width: 1024px) {
+  .watchlist-body {
+    padding-top: 8rem;
+  }
+  .watchlist-sidebar {
+    position: fixed;
+    top: 5rem;
+    left: 0;
+    height: calc(100vh - 5rem);
+    background: var(--bg-primary);
+    box-shadow: 4px 0 12px rgba(0,0,0,0.08);
+    transition: transform 0.25s ease;
+    transform: translateX(0);
+  }
+  .watchlist-sidebar.collapsed {
+    transform: translateX(-100%);
+  }
+}
+
 .search-add-box {
   position: relative;
 }

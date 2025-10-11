@@ -59,9 +59,23 @@ def get_market_indices_efficiently():
                 price_data = bulk_price_map.get(index_code)
 
                 if price_data:
-                    current_price = float(price_data.get("ltp", 0) or price_data.get("close", 0))
-                    previous_close = float(price_data.get("close", 0))
-                    open_price = float(price_data.get("open", 0))
+                    # Indices are points per business requirement; treat numeric values as points
+                    # If backend returns paisa for indices in the future, remove division-free logic accordingly.
+                    raw_ltp = price_data.get("ltp", 0) or price_data.get("close", 0)
+                    raw_close = price_data.get("close", 0)
+                    raw_open = price_data.get("open", 0)
+
+                    # If values appear very large (e.g., > 1e6), assume they are in paisa and convert once.
+                    def to_points(v):
+                        try:
+                            fv = float(v or 0)
+                            return fv / 100.0 if fv > 100000 else fv
+                        except Exception:
+                            return 0.0
+
+                    current_price = to_points(raw_ltp)
+                    previous_close = to_points(raw_close)
+                    open_price = to_points(raw_open)
 
                     # --- Standardized Calculations ---
                     # 1. Daily Change (from previous close)
@@ -75,8 +89,8 @@ def get_market_indices_efficiently():
                     formatted_index = {
                         "symbol": f"{exchange}:{index_code}", "name": index_name,
                         "exchange": exchange, "price": current_price,
-                        "open": open_price, "high": float(price_data.get("high", 0)),
-                        "low": float(price_data.get("low", 0)), "close": previous_close, "ltp": current_price,
+                        "open": open_price, "high": to_points(price_data.get("high", 0)),
+                        "low": to_points(price_data.get("low", 0)), "close": previous_close, "ltp": current_price,
                         
                         # Deprecated fields (for backward compatibility if needed)
                         "change": round(change_daily, 2),
@@ -93,7 +107,7 @@ def get_market_indices_efficiently():
                     }
                     all_indices.append(formatted_index)
                 else:
-                    logger.warning(f"Price data for index {index_code} ({index_name}) not found in bulk response.")
+                    logger.debug(f"Price data for index {index_code} ({index_name}) not found in bulk response.")
 
         logger.info(f"Successfully fetched {len(all_indices)} indices using efficient bulk method.")
         

@@ -25,12 +25,12 @@ class PriceUpdateService {
     }
     
     this.socket = socketInstance;
-    console.log("PriceUpdateService initialized with socket.");
+    // Silenced noisy init log
 
     // Listen for standard connection events to update status
     this.socket.on('connect', () => {
       this.isConnected = true;
-      console.log("Price feed connected.");
+      // Silenced noisy connection log
       this.notifySubscribers();
     });
 
@@ -42,14 +42,21 @@ class PriceUpdateService {
 
     // Listen for the specific 'stock_update' event from the backend
     this.socket.on('stock_update', (priceData) => {
-      const { symbol, ltp, change, percent_change, last_updated } = priceData;
+      const { symbol, ltp, change, percent_change, last_updated, data_type } = priceData;
 
       if (!symbol) return;
 
+      // Log the source of the price update
+      const updateSource = data_type === 'LIVE_STOCK' ? 'TICK-BY-TICK (WebSocket)' : 
+                          data_type === 'POLL_STOCK' ? 'MANUAL POLL (15s fallback)' : 
+                          'UNKNOWN';
+      console.log(`📈 Price update for ${symbol}: ₹${ltp} (${updateSource})`);
+
+      // Normalize incoming values from backend (already in rupees)
       const newPrice = {
-        ltp,
-        change,
-        percent_change,
+        ltp: ltp,
+        change: change,
+        percent_change, // already a percentage value
         last_updated,
       };
 
@@ -121,8 +128,55 @@ class PriceUpdateService {
    * @param {object} initialPrices - An object where keys are symbols and values are price data.
    */
   loadInitialPrices(initialPrices) {
-    this.allPrices = { ...this.allPrices, ...initialPrices };
-    this.notifySubscribers({ changedPrices: initialPrices });
+    // Prices are already in rupees from backend
+    const normalized = Object.fromEntries(
+      Object.entries(initialPrices || {}).map(([sym, data]) => [
+        sym,
+        {
+          ...data,
+          ltp: data?.ltp,
+          change: data?.change,
+        },
+      ])
+    );
+    this.allPrices = { ...this.allPrices, ...normalized };
+    this.notifySubscribers({ changedPrices: normalized });
+  }
+
+  /**
+   * Update multiple prices at once (used by polling fallbacks or batch updates)
+   * @param {object} priceMap - { SYMBOL: { ltp, change, percent_change, last_updated } }
+   */
+  updatePrices(priceMap = {}) {
+    // Prices are already in rupees from backend
+    const normalized = Object.fromEntries(
+      Object.entries(priceMap).map(([sym, data]) => [
+        sym,
+        {
+          ...data,
+          ltp: data?.ltp,
+          change: data?.change,
+        },
+      ])
+    );
+    this.allPrices = { ...this.allPrices, ...normalized };
+    this.notifySubscribers({ changedPrices: normalized });
+  }
+
+  /**
+   * Set connection status and notify subscribers
+   */
+  setConnected(flag) {
+    this.isConnected = !!flag;
+    this.notifySubscribers();
+  }
+
+  /**
+   * Set market open/close status and notify subscribers
+   */
+  setMarketHours(flag) {
+    this.isMarketOpen = !!flag;
+    this.notifySubscribers();
   }
 }
 

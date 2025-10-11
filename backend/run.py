@@ -1,4 +1,4 @@
-from app import create_app
+from app import create_app, socketio
 import os
 from app.tasks.order_processor import start_order_processor
 
@@ -17,5 +17,5 @@ if __name__ == "__main__":
     
     print(f"🌐 Server starting on http://{host}:{port}")
     print(f"🔧 Debug mode: {debug_mode}")
-
-    app.run(host=host, port=port, debug=debug_mode, use_reloader=False)
+    # Run via SocketIO to ensure WebSocket transports and background thread emits work reliably
+    socketio.run(app, host=host, port=port, debug=debug_mode, use_reloader=False, allow_unsafe_werkzeug=True)

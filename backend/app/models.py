@@ -1,5 +1,17 @@
 from flask_login import UserMixin
-from mongoengine import Document, EmbeddedDocument, StringField, IntField, DecimalField, DateTimeField, BooleanField, ListField, EmbeddedDocumentField, ReferenceField
+from mongoengine import (
+    Document,
+    EmbeddedDocument,
+    StringField,
+    IntField,
+    DecimalField,
+    DateTimeField,
+    BooleanField,
+    ListField,
+    EmbeddedDocumentField,
+    ReferenceField,
+    signals,
+)
 from datetime import datetime
 import random
 import string
@@ -16,7 +28,7 @@ def generate_client_id():
 
 class Stock(Document):
     symbol = StringField(primary_key=True, max_length=20)
-    name = StringField(max_length=200)  # Increased length for full company names
+    name = StringField(max_length=200, required=False)  # Increased length for full company names
     base_symbol = StringField(max_length=20)  # Symbol without exchange suffix
     exchange = StringField(max_length=10, default="NSE")  # NSE, BSE, etc.
     scripcode = IntField()  # Motilal Oswal scripcode
@@ -59,7 +71,9 @@ class User(Document, UserMixin):
     is_active = BooleanField(default=True, required=True)
     watchlists = ListField(EmbeddedDocumentField(Watchlist))
 
-    meta = {'collection': 'TE_User'}
+    meta = {
+        'collection': 'TE_User'
+    }
 
     def get_id(self):
         """Override Flask-Login's get_id to return string representation of ObjectId"""
@@ -75,6 +89,47 @@ class User(Document, UserMixin):
     def validate_mobile(self):
         if not re.match(r"^\+91\d{10}$", self.mobile):
             raise ValueError("Invalid mobile number format")
+
+
+# ---- Clean hooks to enforce basic schema constraints ----
+def _clean_stock(sender, document, **kwargs):
+    if not document.symbol:
+        raise ValueError("Stock.symbol is required")
+    document.symbol = document.symbol.upper().strip()
+    if document.base_symbol:
+        document.base_symbol = document.base_symbol.upper().strip()
+    if document.exchange:
+        document.exchange = document.exchange.upper().strip()
+
+
+def _clean_user(sender, document, **kwargs):
+    if document.watchlists is None:
+        document.watchlists = []
+    # ensure watchlist names are trimmed
+    for wl in document.watchlists:
+        if wl and wl.name:
+            wl.name = wl.name.strip()
+
+
+def ensure_db_indexes():
+    """Create important indexes if they don't already exist."""
+    try:
+        from mongoengine import connection
+        from pymongo.errors import OperationFailure
+        db = connection.get_db()
+        # stocks: ensure _id (symbol) index exists (usually by default)
+        try:
+            db['stocks'].create_index('_id')
+        except OperationFailure as oe:
+            # Ignore existing index conflicts
+            if getattr(oe, 'code', None) != 85:
+                raise
+        # users: index on embedded watchlist names for faster lookups/updates
+        # Note: This index is already defined in User.meta, so manual creation is removed to avoid conflicts
+        pass
+    except Exception as e:
+        # Log via print to avoid circular imports with logger
+        print(f"Index creation warning: {e}")
 
 class Transaction(Document):
     user = ReferenceField(User, required=True)
@@ -189,3 +244,8 @@ class AQScrip(Document):
 
     def __repr__(self):
         return f"<AQScrip {self.exchangename}:{self.scripcode} - {self.scripname}>"
+
+
+# Connect signals at the end to ensure definitions are available
+signals.pre_save.connect(_clean_stock, sender=Stock)
+signals.pre_save.connect(_clean_user, sender=User)

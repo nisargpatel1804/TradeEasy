@@ -22,6 +22,7 @@ export const useSocketContext = () => {
 export const SocketProvider = ({ children }) => {
   const [socket, setSocket] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
 
   // This effect runs only once when the application mounts
   useEffect(() => {
@@ -29,37 +30,51 @@ export const SocketProvider = ({ children }) => {
     // It reads the server URL from environment variables for flexibility between
     // development and production environments.
     const socketIoUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
-    
+
     const newSocket = io(socketIoUrl, {
       // `withCredentials: true` is important for sending session cookies,
       // which can be used for authenticating socket connections.
       withCredentials: true,
+      // Enable robust auto-reconnection on flaky networks
+      reconnection: true,
+      reconnectionAttempts: 20,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 10000,
     });
 
     // Listen to connection events
-    newSocket.on('connect', () => setIsConnected(true));
-    newSocket.on('disconnect', () => setIsConnected(false));
+    newSocket.on('connect', () => {
+      setIsConnected(true);
+      setReconnectAttempts(0);
+    });
+    newSocket.on('disconnect', () => {
+      setIsConnected(false);
+    });
+    newSocket.on('reconnect_attempt', (attempt) => setReconnectAttempts(attempt || 0));
+    newSocket.on('reconnect_error', (err) => {
+      console.warn('Socket reconnect error:', err?.message || err);
+    });
+    newSocket.on('reconnect_failed', () => {
+      console.warn('Socket reconnection failed after max attempts.');
+    });
 
     // 3. Set the created socket instance into state
     setSocket(newSocket);
     
     // --- NEW: Initialize the price update service with the new socket instance ---
     // This activates the real-time price listeners for the entire application.
-    priceUpdateService.init(newSocket);
-    
-    console.log("Socket connection established and price service initialized.");
+  priceUpdateService.init(newSocket);
 
     // 4. Define a cleanup function to run when the component unmounts
     // This is crucial for preventing memory leaks and orphaned connections.
     return () => {
       newSocket.close();
-      console.log("Socket connection closed.");
     };
   }, []); // The empty dependency array ensures this effect runs only once
 
   // 5. Provide the socket instance and connection status to all child components
   return (
-    <SocketContext.Provider value={{ socket, isConnected }}>
+    <SocketContext.Provider value={{ socket, isConnected, reconnectAttempts, reconnect: () => socket?.connect?.() }}>
       {children}
     </SocketContext.Provider>
   );

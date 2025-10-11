@@ -72,6 +72,12 @@ def create_app():
     # connects to the Motilal Oswal API and listens for real-time data.
     with app.app_context():
         from app.socket_manager import MO_WebSocket_Manager
+        # Ensure indexes exist (idempotent)
+        try:
+            from app.models import ensure_db_indexes
+            ensure_db_indexes()
+        except Exception as e:
+            logger.warning(f"Failed to ensure DB indexes: {e}")
         # Pass the socketio server instance to the manager so it can emit messages
         socket_manager = MO_WebSocket_Manager(socketio_server=socketio)
         socket_manager.start()
@@ -134,6 +140,15 @@ def create_app():
         if latest_data:
             # Emit to the specific client that just connected
             emit('initial_indices', latest_data, room=request.sid)
+        # Emit current market status (open/closed) so client can adjust expectations
+        try:
+            is_open = False
+            # Prefer the MO market hours helper if available
+            if hasattr(socket_manager, 'mo_api') and hasattr(socket_manager.mo_api, 'market_hours'):
+                is_open = bool(socket_manager.mo_api.market_hours.is_market_open())
+            emit('market_status', {"isOpen": is_open, "source": "connect"}, room=request.sid)
+        except Exception:
+            pass
 
     @socketio.on('disconnect')
     def handle_disconnect():

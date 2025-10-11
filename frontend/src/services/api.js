@@ -33,14 +33,35 @@ const handleApiError = (error) => {
   // If session has expired (401), notify the application to handle logout
   // BUT: Don't trigger unauthorized event for logout, login, and signup endpoint failures
   if (error.response?.status === 401) {
-    const isAuthRequest = error.config?.url?.includes('/auth/login') || 
+    const isAuthRequest = error.config?.url?.includes('/auth/login') ||
                          error.config?.url?.includes('/auth/signup') ||
                          error.config?.url?.includes('/auth/logout');
-    
+
     if (!isAuthRequest) {
+      const eventDetail = {
+        reason: 'SESSION_EXPIRED',
+        endpoint: error.config?.url ?? null,
+      };
+
+      const unauthorizedEvent = typeof window.CustomEvent === 'function'
+        ? new CustomEvent('unauthorized', { detail: eventDetail })
+        : (() => {
+            const fallbackEvent = new Event('unauthorized');
+            fallbackEvent.detail = eventDetail;
+            return fallbackEvent;
+          })();
+
       // Only dispatch unauthorized event for non-auth 401 errors
-      window.dispatchEvent(new Event('unauthorized'));
-      return Promise.reject(new Error("Session expired. Please log in again."));
+      window.dispatchEvent(unauthorizedEvent);
+
+      const sessionError = new Error("You're signed out. Please log in to continue.");
+      sessionError.code = 'SESSION_EXPIRED';
+      sessionError.status = 401;
+      if (error.config?.url) {
+        sessionError.endpoint = error.config.url;
+      }
+
+      return Promise.reject(sessionError);
     }
     // For auth requests, fall through to return the backend error message
   }
@@ -51,7 +72,11 @@ const handleApiError = (error) => {
     error.response?.data?.message ||
     "An unexpected error occurred.";
 
-  return Promise.reject(new Error(errorMessage));
+  const apiError = new Error(errorMessage);
+  apiError.status = error.response?.status ?? null;
+  apiError.code = error.response?.data?.code ?? error.response?.status ?? 'API_ERROR';
+
+  return Promise.reject(apiError);
 };
 
 // Attach the centralized error handler as an interceptor

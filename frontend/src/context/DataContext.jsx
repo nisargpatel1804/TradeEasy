@@ -10,6 +10,8 @@ export function DataProvider({ children }) {
   const [indicesData, setIndicesData] = useState([]);
   const [isLoadingIndices, setIsLoadingIndices] = useState(true);
   const [hasReceivedInitialData, setHasReceivedInitialData] = useState(false);
+  const [lastWatchlistsFetch, setLastWatchlistsFetch] = useState(0);
+  const [lastProfileFetch, setLastProfileFetch] = useState(0);
   
   // --- New state for handling user-facing errors ---
   const [indicesError, setIndicesError] = useState(null);
@@ -63,9 +65,15 @@ export function DataProvider({ children }) {
         setIndicesError(null); // Clear error on success
       }
     } catch (error) {
-      console.error("Failed to fetch initial indices via HTTP:", error);
-      // --- Set a user-friendly error message ---
-      setIndicesError("Could not connect to market data service. Please check your connection and try again.");
+      if (error?.code === 'SESSION_EXPIRED') {
+        console.info('[DataContext] Skipping HTTP indices fallback because the session is inactive.');
+        // No need to show a user-facing error when the user is simply logged out.
+        setIndicesError(null);
+      } else {
+        console.error('Failed to fetch initial indices via HTTP:', error);
+        // --- Set a user-friendly error message ---
+        setIndicesError('Could not connect to market data service. Please check your connection and try again.');
+      }
     } finally {
         setIsLoadingIndices(false);
     }
@@ -78,28 +86,40 @@ export function DataProvider({ children }) {
   }, [getInitialIndices, indicesData.length, hasReceivedInitialData]);
 
   const getProfile = useCallback(async (forceRefresh = false) => {
+    const now = Date.now();
+    if (!forceRefresh && profileData && now - lastProfileFetch < 15000) {
+      return profileData;
+    }
     const data = await fetchProfile();
     setProfileData(data);
+    setLastProfileFetch(now);
     return data;
-  }, []);
+  }, [profileData, lastProfileFetch]);
 
   const getWatchlists = useCallback(async (forceRefresh = false) => {
+    const now = Date.now();
+    if (!forceRefresh && watchlistsData && now - lastWatchlistsFetch < 10000) {
+      return watchlistsData;
+    }
     const data = await fetchWatchlists();
     setWatchlistsData(data);
+    setLastWatchlistsFetch(now);
     return data;
-  }, []);
+  }, [watchlistsData, lastWatchlistsFetch]);
+
+  const contextValue = React.useMemo(() => ({
+    profileData,
+    indicesData,
+    watchlistsData,
+    isLoadingIndices,
+    indicesError,
+    getProfile,
+    getWatchlists,
+    getInitialIndices,
+  }), [profileData, indicesData, watchlistsData, isLoadingIndices, indicesError, getProfile, getWatchlists, getInitialIndices]);
 
   return (
-    <DataContext.Provider value={{ 
-      profileData, 
-      indicesData, 
-      watchlistsData,
-      isLoadingIndices,
-      indicesError, // --- Expose error state ---
-      getProfile,
-      getWatchlists,
-      getInitialIndices, // --- Expose retry function ---
-    }}>
+    <DataContext.Provider value={contextValue}>
       {children}
     </DataContext.Provider>
   );

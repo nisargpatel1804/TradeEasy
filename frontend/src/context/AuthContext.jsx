@@ -41,8 +41,12 @@ export const AuthProvider = ({ children }) => {
     };
 
     // This handler listens for 401 Unauthorized errors from our apiService
-    const handleUnauthorized = () => {
-      console.warn("Unauthorized event caught by AuthContext. Logging out.");
+    const handleUnauthorized = (event) => {
+      const reason = event?.detail?.reason === 'SESSION_EXPIRED'
+        ? 'Session expired. Redirecting to login.'
+        : 'Authentication issue detected. Refreshing session.';
+
+      console.info(`[AuthContext] ${reason}`);
       handleLogout();
     };
 
@@ -61,11 +65,16 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     // Initial check to verify session with the backend when the app loads
     if (!isVerifyingSessionGlobal) {
+      // If we're clearly logged out locally, skip check-auth to avoid 401 noise
+      if (!authService.isAuthenticatedSync()) {
+        setIsLoading(false);
+        return;
+      }
       isVerifyingSessionGlobal = true;
       authService.verifySession().then(isValid => {
         if (!isValid) {
           // If server says not authenticated, clear local state
-          console.log('Session verification failed, clearing local auth state');
+          // Silenced info log
           localStorage.removeItem('isAuthenticated');
           localStorage.removeItem('client_id');
           window.dispatchEvent(new Event('authStateChanged'));

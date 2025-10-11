@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { searchStocks, addStockToWatchlist } from "@/services/api";
+import { searchStocks, addStockToWatchlist, fetchWatchlistStocks } from "@/services/api";
 import { useDataContext } from "@/context/DataContext";
 import { Input } from "@/assets/ui/input";
 import { Avatar, AvatarFallback } from "@/assets/ui/avatar";
@@ -35,9 +35,10 @@ const Navbar = () => {
   const [searchLoading, setSearchLoading] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
   const [allWatchlists, setAllWatchlists] = useState([]);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isSearchExpanded, setIsSearchExpanded] = useState(false);
   const [showSearchDropdown, setShowSearchDropdown] = useState(false);
+  const [watchlistStocks, setWatchlistStocks] = useState([]);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const searchContainerRef = useRef(null);
 
   // --- Effects ---
@@ -97,6 +98,18 @@ const Navbar = () => {
         const wlRes = await getWatchlists();
         if (!wlRes?.error) {
           setAllWatchlists(wlRes);
+          // Fetch stocks from the "Stocks" watchlist for filtering search results
+          const stocksWatchlist = wlRes.find(w => w.name?.toLowerCase() === "stocks");
+          if (stocksWatchlist) {
+            try {
+              const stocksRes = await fetchWatchlistStocks(stocksWatchlist.name);
+              const stocks = Array.isArray(stocksRes.stocks) ? stocksRes.stocks : [];
+              setWatchlistStocks(stocks.map(s => s.symbol));
+            } catch (error) {
+              console.warn("Could not fetch watchlist stocks:", error);
+              setWatchlistStocks([]);
+            }
+          }
         }
       } catch (error) {
         if (error.message?.includes("401") || error.message?.includes("Unauthorized")) {
@@ -117,16 +130,19 @@ const Navbar = () => {
     setSearchLoading(true);
     try {
       const response = await searchStocks(query);
-      // Handle both direct array response and object with bestMatches property
-      const results = response?.bestMatches || response || [];
-      setSearchResults(results);
+      // Backend returns array with { symbol, name, exchange, scripcode } format
+      const results = Array.isArray(response) ? response : [];
+      // Filter out stocks already in watchlist
+      const currentSymbols = new Set(watchlistStocks);
+      const filteredResults = results.filter(r => r && r.symbol && !currentSymbols.has(r.symbol));
+      setSearchResults(filteredResults);
     } catch (error) {
       console.warn('Search error:', error);
       setSearchResults([]);
     } finally {
       setSearchLoading(false);
     }
-  }, 300), []);
+  }, 300), [watchlistStocks]);
   
   useEffect(() => {
     if (searchQuery.trim()) {
@@ -178,20 +194,28 @@ const Navbar = () => {
         return;
       }
       setIsAdding(true);
-      const symbolNorm = stock["1. symbol"];
-      const res = await addStockToWatchlist(stocksWatchlist.name || "Stocks", symbolNorm, stock["2. name"]);
+      const symbolNorm = stock.symbol;
+      const res = await addStockToWatchlist(stocksWatchlist.name || "Stocks", symbolNorm, stock.name, stock.scripcode);
       if (res?.error) {
         toast.error(res.error);
       } else {
         getWatchlists(true); // Force refresh watchlists
-        toast.success(`${symbolNorm.split('.')[0]} added to watchlist`);
+        // Refresh watchlist stocks for filtering
+        try {
+          const stocksRes = await fetchWatchlistStocks(stocksWatchlist.name || "Stocks");
+          const stocks = Array.isArray(stocksRes.stocks) ? stocksRes.stocks : [];
+          setWatchlistStocks(stocks.map(s => s.symbol));
+        } catch (error) {
+          console.warn("Could not refresh watchlist stocks:", error);
+        }
+        toast.success(`${typeof symbolNorm === 'string' ? symbolNorm.split('.')[0] : symbolNorm || 'Stock'} added to watchlist`);
       }
       setIsAdding(false);
     };
 
     return (
-      <Button variant="ghost" size="icon" className="flex-shrink-0" onClick={handleAdd} disabled={isAdding}>
-        {isAdding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+      <Button size="sm" variant="outline" onClick={handleAdd} disabled={isAdding} className="ml-3 w-20">
+        {isAdding ? <div className="animate-spin h-4 w-4 border-2 border-gray-300 border-t-blue-600 rounded-full mx-auto"></div> : <><Plus className="h-4 w-4 mr-1" /> Add</>}
       </Button>
     );
   };
@@ -281,7 +305,7 @@ const Navbar = () => {
                 {/* Desktop Search Bar */}
                 <div className="hidden xl:block relative w-80 lg:w-64">
                     <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
-                    <Input placeholder="Search NSE/BSE stocks..." className="pl-12" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+                    <Input placeholder="Search to add stocks (e.g., RELIANCE, INFY)" className="pl-12" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
                     {searchLoading && <Loader2 className="h-4 w-4 animate-spin absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400" />}
                   <AnimatePresence>
                     {showSearchDropdown && (
@@ -290,15 +314,13 @@ const Navbar = () => {
                         initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}
                       >
                          {searchResults.length > 0 ? (
-                            searchResults.slice(0, 7).map((stock) => (
-                              <div key={stock["1. symbol"]} className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b dark:border-gray-700 last:border-b-0">
-                                <div className="flex items-center justify-between">
-                                  <div className="cursor-pointer flex-1" onClick={() => handleSelectStock(stock["1. symbol"])}>
-                                    <div className="font-medium">{stock["1. symbol"].split('.')[0]}</div>
-                                    <div className="text-sm text-gray-600 dark:text-gray-400 truncate">{stock["2. name"]}</div>
-                                  </div>
-                                  <AddWatchlistDropdown stock={stock} />
+                            searchResults.slice(0, 7).filter(stock => stock && stock.symbol).map((stock) => (
+                              <div key={stock.symbol} className="flex items-center justify-between p-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b dark:border-gray-700 last:border-b-0">
+                                <div className="flex-1 min-w-0 cursor-pointer" onClick={() => handleSelectStock(stock.symbol)}>
+                                  <div className="font-medium truncate">{stock.name}</div>
+                                  <div className="text-xs text-gray-500">{stock.symbol}</div>
                                 </div>
+                                <AddWatchlistDropdown stock={stock} />
                               </div>
                             ))
                           ) : !searchLoading && searchQuery && (
@@ -351,7 +373,7 @@ const Navbar = () => {
                 <motion.div className="xl:hidden pt-4" initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}>
                   <div className="relative">
                     <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
-                    <Input placeholder="Search NSE/BSE stocks..." className="pl-12" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+                    <Input placeholder="Search to add stocks (e.g., RELIANCE, INFY)" className="pl-12" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
                     {searchLoading && <Loader2 className="h-4 w-4 animate-spin absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400" />}
                   </div>
                 </motion.div>

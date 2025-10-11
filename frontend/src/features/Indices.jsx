@@ -133,9 +133,9 @@ const Indices = () => {
                             whileHover={{ scale: 1.03, y: -2 }}
                         >
                             <p className="index-name">{idx.name}</p>
-                            <p className="index-meta">
-                                {idx.exchange} | LTP: ₹{formatNumber(idx.ltp || idx.price)}
-                            </p>
+              <p className="index-meta">
+                {idx.exchange} | LTP: {formatNumber(idx.ltp || idx.price)}
+              </p>
                             <p className="index-price-details">
                                 O: {formatNumber(idx.open)} | H: {formatNumber(idx.high)} | L: {formatNumber(idx.low)} | C: {formatNumber(idx.close)}
                             </p>

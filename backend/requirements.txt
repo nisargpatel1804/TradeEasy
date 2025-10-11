@@ -1,45 +1,30 @@
-Flask==2.2.5
-Flask-Cors
-Flask-Login
-Flask-Session
-Flask-Bcrypt
-Flask-WTF==1.2.1
-flask-socketio
-python-dotenv==1.0.1
-cryptography
-pycryptodome
-yfinance
-pandas
-numpy
-requests
-aiohttp
-retrying
-alpha-vantage
-bcrypt
-blinker
-certifi
-charset-normalizer
-click
-idna
-itsdangerous==2.1.2
-Jinja2
-Mako
-MarkupSafe
-multitasking
-pycparser
-python-dateutil
-pytz
-six
-typing_extensions
-tzdata
-urllib3
-Werkzeug
-WTForms==3.1.2
-fake-useragent
-selenium
-pytest
-pyotp
-email-validator==2.1.1
-gunicorn==22.0.0
-py-moneyed==2.0
-flask-mongoengine==1.0.0
+# Runtime dependencies for TradeEasy backend (Python 3.11.9 compatible)
+
+# Core framework
+Flask>=2.2,<2.3  # Keep Flask 2.2.x to align with flask-mongoengine and existing project code
+Flask-Cors>=4.0
+Flask-Login>=0.6
+Flask-Session>=0.5
+Flask-Bcrypt>=1.0
+flask-socketio>=5.3,<6
+
+# Persistence
+flask-mongoengine>=1.0.0  # Requires Flask 2.2+ for JSONEncoder compatibility
+mongoengine>=0.27  # Explicit dependency for Python 3.11 compatibility
+
+# Utilities
+python-dotenv>=1.0.1
+requests>=2.31
+websocket-client>=1.6  # required for `import websocket`
+pyotp>=2.9
+blinker>=1.7
+
+# Production server (optional locally, required on Linux deploys)
+gunicorn>=20.1,<23
+
+# SocketIO dependencies
+python-engineio>=4.8
+python-socketio>=5.10
+
+# Time zone database for ZoneInfo on Windows
+tzdata>=2024.1

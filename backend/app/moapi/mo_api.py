@@ -5,11 +5,10 @@ import json
 import logging
 import websocket
 import threading
-import time
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time
 from dotenv import load_dotenv
 import pyotp
-import pytz
+from zoneinfo import ZoneInfo
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -19,7 +18,7 @@ class MarketHoursManager:
     """Manages Indian market hours detection and holiday checking."""
     
     def __init__(self):
-        self.ist_tz = pytz.timezone('Asia/Kolkata')
+        self.ist_tz = ZoneInfo('Asia/Kolkata')
         self.market_open = dt_time(9, 15)
         self.market_close = dt_time(15, 30)
         
@@ -56,9 +55,10 @@ class MotilalOswalAPI:
             raise ValueError("Ensure USER_ID, PASSWORD, API_KEY, TWO_FA, and TOTP_SECRET are set in .env file.")
 
         self.base_url = "https://openapi.motilaloswal.com/rest" if not use_test_url else "https://openapi.motilaloswaluat.com/rest"
-        self.websocket_url = "wss://openapi.motilaloswal.com/ws" if not use_test_url else "wss://openapi.motilaloswaluat.com/websocket"
+        self.websocket_url = "wss://openapi.motilaloswal.com/ws" if not use_test_url else "wss://uatopenapi.motilaloswal.com/ws"
         
         self.auth_token = None
+        self.login_time = None
         self.session = requests.Session()
         self.ws = None
         self.ws_thread = None
@@ -66,13 +66,26 @@ class MotilalOswalAPI:
         self._update_headers()
 
     def _update_headers(self, auth_token=None):
-        """Constructs and updates session headers."""
+        """Constructs and updates session headers FOR REST API CALLS."""
         self.headers = {
-            'Accept': 'application/json', 'User-Agent': 'MOSL/V.1.1.0', 'ApiKey': self.api_key,
-            'ClientLocalIp': '1.2.3.4', 'ClientPublicIp': '1.2.3.4', 'MacAddress': '00:00:00:00:00:00',
-            'SourceId': 'WEB', 'vendorinfo': self.user_id, 'osname': 'Windows 11', 'osversion': '10.0.22000',
-            'devicemodel': 'Desktop', 'manufacturer': 'Generic', 'productname': 'TradeEasy', 'productversion': '1.0.0',
-            'installedappid': 'TradeEasyApp', 'browsername': 'Chrome', 'browserversion': '119.0.0.0'
+            'Accept': 'application/json',
+            'User-Agent': 'MOSL/V.1.1.0',
+            'ApiKey': self.api_key,
+            'ClientLocalIp': '1.2.3.4',
+            'ClientPublicIp': '1.2.3.4',
+            'MacAddress': '00:00:00:00:00:00',
+            'SourceId': 'WEB',
+            # This header is required for REST calls but fails on WebSocket actions.
+            'vendorinfo': self.user_id,
+            'osname': 'Windows 11',
+            'osversion': '10.0.22000',
+            'devicemodel': 'Desktop',
+            'manufacturer': 'Generic',
+            'productname': 'TradeEasy',
+            'productversion': '1.0.0',
+            'installedappid': 'TradeEasyApp',
+            'browsername': 'Chrome',
+            'browserversion': '119.0.0.0'
         }
         if auth_token:
             self.headers['Authorization'] = auth_token
@@ -102,6 +115,7 @@ class MotilalOswalAPI:
 
         if response and response.get("status") == "SUCCESS":
             self.auth_token = response.get("AuthToken")
+            self.login_time = datetime.now()
             self._update_headers(self.auth_token)
             logger.info("Login successful.")
             return True
@@ -113,32 +127,35 @@ class MotilalOswalAPI:
 
     def get_index_data(self, exchangename):
         """Fetches the master list of all indices for a given exchange."""
-        if not self.auth_token:
-            logger.error("Authentication required.")
-            return None
+        if not self.auth_token: self.login()
         endpoint = "/report/v1/getindexdatabyexchangename"
         return self._make_request("POST", endpoint, {"exchangename": exchangename})
 
     def get_bulk_eod_data(self, exchangename):
-        """
-        EFFICIENTLY fetches bulk EOD/LTP data for all instruments on an exchange.
-        This is the preferred method for getting a full market snapshot.
-        """
-        if not self.auth_token:
-            logger.error("Authentication required.")
-            return None
-        
+        """EFFICIENTLY fetches bulk EOD/LTP data for all instruments on an exchange."""
+        if not self.auth_token: self.login()
         endpoint = "/report/v1/geteoddatabyexchangename"
         response = self._make_request("POST", endpoint, {"exchangename": exchangename})
         
         if response and response.get("status") == "SUCCESS":
-            # Convert the list of data into a dictionary mapped by 'scripcode'
-            # for instant O(1) time complexity lookups. This is highly performant.
             data_map = {str(item.get('scripcode')): item for item in response.get("data", [])}
             response['data'] = data_map
             return response
-        
         return response
+
+    def get_scrips_by_exchange(self, exchangename: str):
+        """Fetches the scrip/instrument master for a given exchange name."""
+        if not self.auth_token: self.login()
+        endpoint = "/report/v1/getscripsbyexchangename"
+        payload = {"exchangename": exchangename}
+        return self._make_request("POST", endpoint, payload)
+
+    def get_ltp_data(self, exchange: str, scripcode: int):
+        """Fetches LTP data for a single instrument."""
+        if not self.auth_token: self.login()
+        endpoint = "/report/v1/getltpdata"
+        payload = {"exchange": exchange, "scripcode": int(scripcode)}
+        return self._make_request("POST", endpoint, payload)
 
     # --- WebSocket Methods ---
     def connect_websocket(self, on_message, on_open, on_close, on_error):
@@ -147,8 +164,15 @@ class MotilalOswalAPI:
             logger.error("Cannot connect to WebSocket without authentication.")
             return
         
-        ws_url = f"{self.websocket_url}?Authorization={self.auth_token}"
-        ws_headers = {'Authorization': self.auth_token, 'ApiKey': self.api_key, 'User-Agent': 'MOSL/V.1.1.0'}
+        ws_url = self.websocket_url
+        
+        # **FINAL FIX**: The WebSocket connection requires a minimal header set that
+        # EXCLUDES the 'vendorinfo' tag to prevent action request failures.
+        ws_headers = {
+            'User-Agent': 'MOSL/V.1.1.0',
+            'Authorization': self.auth_token or '',
+            'ApiKey': self.api_key
+        }
         
         self.ws = websocket.WebSocketApp(ws_url, on_open=on_open, on_message=on_message, 
                                          on_error=on_error, on_close=on_close, header=ws_headers)
@@ -163,22 +187,38 @@ class MotilalOswalAPI:
         if self.ws:
             self.ws.close()
             logger.info("WebSocket connection closed.")
+        self.ws = None
         if self.ws_thread:
             self.ws_thread.join()
 
     def _send_ws_message(self, action, params):
         """Helper to send a JSON message to the WebSocket."""
-        if not self.ws or not self.ws.sock or not self.ws.sock.connected:
-            logger.error("WebSocket is not connected.")
-            return
-        message = json.dumps({"action": action, "params": params})
-        self.ws.send(message)
-        logger.info(f"Sent WebSocket Message: {message}")
+        try:
+            if not self.ws or not getattr(self.ws, 'sock', None) or not getattr(self.ws.sock, 'connected', False):
+                logger.warning("WebSocket is not connected. Skipping send.")
+                return
+            message = json.dumps({"clientid": self.user_id, "action": action, **params})
+            self.ws.send(message)
+            logger.info(f"Sent WebSocket Message: {message}")
+        except Exception as e:
+            logger.error(f"Failed to send WS message ({action}): {e}")
+
+    def _send_ws_auth_message(self, params):
+        """Helper to send authorization JSON message to the WebSocket."""
+        try:
+            if not self.ws or not getattr(self.ws, 'sock', None) or not getattr(self.ws.sock, 'connected', False):
+                logger.warning("WebSocket is not connected. Skipping auth send.")
+                return
+            message = json.dumps({"clientid": self.user_id, **params})
+            self.ws.send(message)
+            logger.info("Sent WebSocket Auth Message")
+        except Exception as e:
+            logger.error(f"Failed to send WS auth message: {e}")
 
     def register_index(self, exchange):
-        """Subscribes to the broadcast for all indices on a given exchange."""
-        self._send_ws_message("indexRegister", {"exchange": exchange})
-        
+        """Subscribes to all index feeds for a given exchange using the 'IndexRegister' action."""
+        self._send_ws_message("IndexRegister", {"exchange": exchange})
+
     def unregister_index(self, exchange):
-        """Unsubscribes from the index broadcast for a given exchange."""
-        self._send_ws_message("indexUnregister", {"exchange": exchange})
+        """Unsubscribes from all index feeds for a given exchange."""
+        self._send_ws_message("IndexUnregister", {"exchange": exchange})

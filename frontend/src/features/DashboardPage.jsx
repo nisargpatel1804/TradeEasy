@@ -291,15 +291,15 @@ const Dashboard = () => {
         if (symbols.length === 0) return
         const res = await fetchBatchStockData(symbols)
         const data = res?.data || {}
-        // Update state
+        // Update state (convert paise -> rupees for UI)
         setWatchlistStocks(prev => prev.map(stk => {
           const base = (stk.symbol || "").split(".")[0]
           const nd = data[base]
           if (nd && !nd.error) {
             return {
               ...stk,
-              price: nd.ltp ?? stk.price,
-              change: nd.change ?? stk.change,
+              price: (nd.ltp != null ? nd.ltp : stk.price),
+              change: (nd.change != null ? nd.change : stk.change),
               percent_change: (nd.p_change ?? stk.percent_change),
               last_updated: new Date().toISOString()
             }

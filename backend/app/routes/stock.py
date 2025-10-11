@@ -2,6 +2,7 @@ import logging
 from flask import Blueprint, jsonify, request
 from functools import lru_cache
 from app.moapi.mo_api import MotilalOswalAPI
+from app.models import AQScrip, Stock
 
 # Configure logging
 stock_bp = Blueprint('stock', __name__)
@@ -36,14 +37,105 @@ def get_stock_data_from_api(symbol):
         mo_api = get_mo_api()
         if not mo_api.auth_token and not mo_api.login():
             raise ConnectionError("MO API login failed")
-        
-        # Assume NSE for consistency
-        mo_response = mo_api.get_ltp_data("NSE", clean_symbol)
-        
+
+        # Resolve symbol to exchange + scripcode
+        # Priority: Stock collection (user-added metadata), then AQScrip master
+        exchange = None
+        scripcode = None
+
+        # Try in Stock collection first
+        try:
+            stock_doc = Stock.objects(symbol=clean_symbol).first()
+            if stock_doc and getattr(stock_doc, 'scripcode', None):
+                exchange = getattr(stock_doc, 'exchange', 'NSE') or 'NSE'
+                scripcode = int(stock_doc.scripcode)
+        except Exception:
+            pass
+
+        if scripcode is None:
+            # Try AQScrip master by scripshortname (symbol) on NSE
+            try:
+                aq = AQScrip.objects(exchangename='NSE', scripshortname=clean_symbol).first()
+                if aq:
+                    exchange = 'NSE'
+                    scripcode = int(aq.scripcode)
+            except Exception:
+                pass
+
+        if scripcode is None:
+            # Last-resort fallback: query MO master scrips (NSE) and resolve once, then optionally cache in DB
+            try:
+                master_resp = mo_api.get_scrips_by_exchange('NSE')
+                if master_resp and master_resp.get('status') == 'SUCCESS':
+                    candidates = master_resp.get('data', [])
+                    chosen = None
+                    clean_up = clean_symbol.upper()
+                    # Prefer exact shortname match
+                    for s in candidates:
+                        if str(s.get('scripshortname', '')).upper() == clean_up:
+                            chosen = s
+                            break
+                    # Fallback: match by scripname prefix (common format: "<SYMBOL> EQ")
+                    if not chosen:
+                        for s in candidates:
+                            if str(s.get('scripname', '')).upper().startswith(clean_up):
+                                chosen = s
+                                break
+                    if chosen and chosen.get('scripcode'):
+                        exchange = 'NSE'
+                        scripcode = int(chosen.get('scripcode'))
+                        # Opportunistically cache minimal record into AQScrip if missing
+                        try:
+                            if not AQScrip.objects(exchangename='NSE', scripcode=scripcode).first():
+                                AQScrip(
+                                    exchange=int(chosen.get('exchange', 0) or 0),
+                                    exchangename='NSE',
+                                    scripcode=scripcode,
+                                    scripname=str(chosen.get('scripname') or clean_up),
+                                    scripshortname=str(chosen.get('scripshortname') or clean_up),
+                                    scripfullname=str(chosen.get('scripfullname') or ''),
+                                ).save()
+                        except Exception:
+                            # Best-effort cache; ignore failures
+                            pass
+            except Exception:
+                # Ignore master fetch failures; we'll return not found below if still unresolved
+                pass
+
+        if scripcode is None:
+            logger.warning(f"Unable to resolve scripcode for symbol {clean_symbol}")
+            return None
+
+        mo_response = mo_api.get_ltp_data(exchange or 'NSE', scripcode)
+
         if mo_response and mo_response.get("status") == "SUCCESS":
-            return mo_response.get("data", {})
+            data = mo_response.get("data", {})
+            # Normalize numeric fields and derive change/percent_change if possible
+            try:
+                open_p = float(data.get('open') or 0)
+                high = float(data.get('high') or 0)
+                low = float(data.get('low') or 0)
+                close = float(data.get('close') or 0)
+                ltp = float(data.get('ltp') or 0)
+                volume = int(data.get('volume') or 0)
+                change = ltp - close if close else 0.0
+                p_change = (change / close * 100.0) if close else 0.0
+                return {
+                    'exchange': exchange or 'NSE',
+                    'scripcode': scripcode,
+                    'open': open_p,
+                    'high': high,
+                    'low': low,
+                    'close': close,
+                    'ltp': ltp,
+                    'volume': volume,
+                    'change': round(change, 2),
+                    'p_change': round(p_change, 2)
+                }
+            except Exception:
+                return mo_response.get('data', {})
         else:
-            logger.warning(f"No data found for symbol {clean_symbol} via API.")
+            logger.warning(f"No data found for scripcode {scripcode} ({clean_symbol}) via API.")
             return None
             
     except Exception as e:
