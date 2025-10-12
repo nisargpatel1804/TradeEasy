@@ -1,159 +1,137 @@
 import os
 import logging
+import atexit
 from flask import Flask, jsonify, request
 from flask_mongoengine import MongoEngine
 from flask_cors import CORS
 from flask_login import LoginManager
-from flask_session import Session
 from flask_bcrypt import Bcrypt
-from dotenv import load_dotenv
 from flask_socketio import SocketIO, emit
+from dotenv import load_dotenv
 from bson import ObjectId
 
-# Load environment variables from .env file
+# --- Load Environment Variables ---
+# Best practice to load this at the very top
 load_dotenv()
 
 # --- Configure Logging ---
-logging.basicConfig(level=logging.INFO)
-# Quiets the default request logger for a cleaner console
-logging.getLogger('werkzeug').setLevel(logging.WARNING) 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.getLogger('werkzeug').setLevel(logging.WARNING)  # Quiets the default Flask request logger
 logger = logging.getLogger(__name__)
 
 # --- Initialize Flask Extensions ---
-# These are initialized here but configured inside the create_app factory
+# Extensions are instantiated globally and then initialized within the app factory
 db = MongoEngine()
 login_manager = LoginManager()
-session_manager = Session()
 bcrypt = Bcrypt()
-# Initialize SocketIO for real-time communication
 socketio = SocketIO()
+
+# --- Application Factory ---
 
 def create_app():
     """
     Factory function to create and configure the Flask application.
-    This pattern allows for multiple app instances and is ideal for testing.
+    This pattern promotes testability and avoids circular imports.
     """
     app = Flask(__name__)
 
-    # Load configuration from the AppConfig object in config.py
+    # --- Load Configuration ---
     from app.config import AppConfig
     app.config.from_object(AppConfig)
 
-    # --- Configure Extensions with App Context ---
+    # --- Initialize Extensions with App Context ---
     db.init_app(app)
     login_manager.init_app(app)
-    session_manager.init_app(app)
     bcrypt.init_app(app)
 
     # --- CORS Configuration ---
+    # Configure CORS for both standard HTTP requests and WebSocket connections
     frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
-    
-    # SocketIO requires its own CORS configuration
-    socketio.init_app(
-        app, 
-        cors_allowed_origins=[frontend_url, "http://127.0.0.1:5173"]
-    )
-
-    # Configure CORS for standard HTTP requests
+    socketio.init_app(app, cors_allowed_origins=[frontend_url, "http://127.0.0.1:5173"])
     CORS(
         app,
-        resources={
-            r"/api/*": {
-                "origins": [frontend_url, "http://127.0.0.1:5173"],
-                "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-                "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
-                "supports_credentials": True,
-            }
-        }
+        resources={r"/api/*": {"origins": [frontend_url, "http://127.0.0.1:5173"]}},
+        supports_credentials=True
     )
 
-    # --- Start the WebSocket Manager ---
-    # This must be done only once. It starts the background thread that
-    # connects to the Motilal Oswal API and listens for real-time data.
+    # --- Singleton WebSocket Manager Initialization ---
     with app.app_context():
         from app.socket_manager import MO_WebSocket_Manager
-        # Ensure indexes exist (idempotent)
-        try:
-            from app.models import ensure_db_indexes
-            ensure_db_indexes()
-        except Exception as e:
-            logger.warning(f"Failed to ensure DB indexes: {e}")
-        # Pass the socketio server instance to the manager so it can emit messages
+        
+        # Instantiate the singleton manager and pass the socketio server to it
+        # This allows the manager's background threads to emit data to clients
         socket_manager = MO_WebSocket_Manager(socketio_server=socketio)
         socket_manager.start()
 
-    # Set the view to redirect to for routes requiring login
-    login_manager.login_view = '/api/auth/login'
+        # --- Graceful Shutdown Hook ---
+        # Register the shutdown function to be called when the app exits.
+        # This ensures WebSocket connections are closed cleanly.
+        atexit.register(socket_manager.shutdown)
 
-    # --- Import and Register Blueprints ---
-    from .routes import auth, trade, portfolio, orders, profile, search, markets, watchlist
-    from .routes.stock import stock_bp
-
-    # Register all blueprints with a consistent '/api' prefix
-    app.register_blueprint(auth.bp, url_prefix='/api/auth')
-    app.register_blueprint(stock_bp, url_prefix='/api')
-    app.register_blueprint(search.search_bp, url_prefix='/api')
-    app.register_blueprint(trade.bp, url_prefix='/api')
-    app.register_blueprint(portfolio.bp, url_prefix='/api')
-    app.register_blueprint(orders.bp, url_prefix='/api')
-    app.register_blueprint(profile.bp, url_prefix='/api')
-    app.register_blueprint(markets.markets_bp, url_prefix='/api')
-    app.register_blueprint(watchlist.bp, url_prefix='/api')
+    # --- Register Blueprints for API Routes ---
+    # Grouping blueprint imports and registrations for better organization
+    from .routes import auth, markets, orders, portfolio, profile, search, stock, trade, watchlist
+    from .data_management import db_scrips_populate
     
-    # Import db_scrips_populate here to avoid circular imports
-    from . import db_scrips_populate
+    app.register_blueprint(auth.auth_bp, url_prefix='/api/auth')
+    app.register_blueprint(markets.markets_bp, url_prefix='/api/markets')
+    app.register_blueprint(orders.orders_bp, url_prefix='/api/orders')
+    app.register_blueprint(portfolio.portfolio_bp, url_prefix='/api/portfolio')
+    app.register_blueprint(profile.profile_bp, url_prefix='/api/profile')
+    app.register_blueprint(search.search_bp, url_prefix='/api/search')
+    app.register_blueprint(stock.stock_bp, url_prefix='/api/stock')
+    app.register_blueprint(trade.trade_bp, url_prefix='/api/trade')
+    app.register_blueprint(watchlist.watchlist_bp, url_prefix='/api/watchlist')
     app.register_blueprint(db_scrips_populate.data_management_bp, url_prefix='/api/data')
 
-    # --- Root Route for Health Check ---
+    # --- Health Check Endpoint ---
     @app.route('/')
     def health_check():
-        """Simple health check endpoint."""
         return jsonify({"status": "healthy", "message": "TradeEasy API is running"}), 200
 
-    # --- Define Login Manager Handlers ---
+    # --- Configure Flask-Login Handlers ---
+    login_manager.login_view = 'auth.login' # Points to the login function in the auth blueprint
+
     @login_manager.user_loader
     def load_user(user_id):
-        """Load user by ID for session management."""
+        """Loads a user from the database for session management."""
         from .models import User
         try:
             return User.objects(id=ObjectId(user_id)).first()
         except Exception as e:
-            logger.warning(f"Failed to load user with ID {user_id}: {e}")
+            logger.error(f"Error loading user {user_id}: {e}")
             return None
 
     @login_manager.unauthorized_handler
-    def unauthorized_handler():
-        """Handle unauthorized access attempts for @login_required routes."""
-        return jsonify({"error": "Unauthorized access. Please log in."}), 401
+    def unauthorized():
+        """Returns a consistent 401 Unauthorized error response."""
+        return jsonify({
+            "success": False,
+            "message": "Authentication required. Please log in."
+        }), 401
 
-    # --- Define SocketIO Event Handlers ---
+    # --- Configure SocketIO Event Handlers ---
     @socketio.on('connect')
     def handle_connect():
         """
-        Handles a new client connection. It immediately sends the latest
-        cached data to populate the client's UI.
+        Handles new client connections by sending the latest cached data
+        to immediately populate their UI.
         """
-        logger.info("Client connected")
-        # Get the existing socket manager instance (don't create a new one)
-        socket_manager = MO_WebSocket_Manager(socketio_server=socketio)
-        latest_data = socket_manager.get_latest_data()
-        if latest_data:
-            # Emit to the specific client that just connected
-            emit('initial_indices', latest_data, room=request.sid)
-        # Emit current market status (open/closed) so client can adjust expectations
-        try:
-            is_open = False
-            # Prefer the MO market hours helper if available
-            if hasattr(socket_manager, 'mo_api') and hasattr(socket_manager.mo_api, 'market_hours'):
-                is_open = bool(socket_manager.mo_api.market_hours.is_market_open())
-            emit('market_status', {"isOpen": is_open, "source": "connect"}, room=request.sid)
-        except Exception:
-            pass
+        logger.info(f"Client connected: {request.sid}")
+        # Get the singleton instance of the manager
+        manager = MO_WebSocket_Manager() 
+        # Send the latest cached index data to the newly connected client
+        latest_indices = manager.get_latest_indices_data()
+        if latest_indices:
+            emit('initial_indices', latest_indices, room=request.sid)
+        # Inform client of current market status
+        market_open = manager.mo_api.market_hours.is_market_open()
+        emit('market_status', {"isOpen": market_open}, room=request.sid)
 
     @socketio.on('disconnect')
     def handle_disconnect():
-        """Handles a client disconnection."""
-        logger.info("Client disconnected")
+        """Logs when a client disconnects."""
+        logger.info(f"Client disconnected: {request.sid}")
 
-    logger.info(f"Flask app created with '{AppConfig.__name__}' configuration.")
+    logger.info("Flask application created and configured successfully.")
     return app

@@ -6,12 +6,23 @@ import { Button } from "../assets/ui/button.jsx";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../assets/ui/card.jsx";
 import { Label } from "../assets/ui/label.jsx";
 import { Loader2 } from "lucide-react";
+import { useToast } from "@/assets/ui/use-toast";
+
+const LOGIN_ERROR_MESSAGES = {
+  400: "Client ID and password are required.",
+  401: "Invalid client ID or password.",
+  403: "Your account is inactive. Please contact support to reactivate it.",
+  429: "Too many login attempts. Please wait a moment before trying again.",
+  500: "We're experiencing issues right now. Please try again shortly.",
+  default: "Login failed. Please check your credentials.",
+};
 
 const Login = () => {
   const [formData, setFormData] = useState({ client_id: "", password: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const { login } = useAuth(); // Get the login function from our AuthContext
+  const { toast } = useToast();
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -26,17 +37,38 @@ const Login = () => {
       // Use the context's login function. It handles the API call,
       // state update, and navigation on success.
       const response = await login(formData);
-      
-      // If the login function returns a response with an error, display it.
-      if (response && response.error) {
-        setError(response.error);
-        if (response.error === "Invalid client ID or password") {
-          setFormData({ client_id: "", password: "" });
-        }
+
+      if (response?.success) {
+        const description = response.message || "Logged in successfully.";
+        toast({
+          title: "Login successful",
+          description,
+        });
+        setError("");
       }
     } catch (err) {
-      // Catch any unexpected errors during the process.
-      setError(err.message || "Login failed. Please check your credentials.");
+      const status = err?.status;
+  const fallback = LOGIN_ERROR_MESSAGES[status] || LOGIN_ERROR_MESSAGES.default;
+  const hasServerMessage = typeof err?.message === "string" && err.message.trim().length > 0;
+  const description = hasServerMessage ? err.message : fallback;
+      const toastTitle =
+        status === 403
+          ? "Account inactive"
+          : status === 429
+            ? "Too many attempts"
+            : "Login failed";
+
+      setError(description);
+
+      toast({
+        title: toastTitle,
+        description,
+        variant: "destructive",
+      });
+
+      if (status === 401) {
+        setFormData({ client_id: "", password: "" });
+      }
     } finally {
       setLoading(false);
     }

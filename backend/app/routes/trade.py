@@ -1,199 +1,154 @@
-import re
 import logging
-from datetime import datetime
-from decimal import Decimal, ROUND_DOWN
-from flask import Blueprint, request, jsonify, session
+from decimal import Decimal
+from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from app.models import Transaction, Holding, User
-from app.moapi.mo_api import MotilalOswalAPI
+# Import the centralized, cached function for all stock data lookups
+from .stock import get_stock_data_from_api, format_symbol
 
-# Configure logging
+# --- Configuration ---
 logger = logging.getLogger(__name__)
+trade_bp = Blueprint('trade', __name__)
 
-# The url_prefix is now handled in the main __init__.py for consistency
-bp = Blueprint('trade', __name__)
+# --- Helper Functions ---
 
-# --- Validation Helpers ---
-
-def validate_symbol(symbol):
-    """Validates the stock symbol format."""
-    return bool(re.match(r'^[A-Z0-9.&-]{1,20}$', symbol))
-
-def validate_quantity(quantity):
-    """Validates and converts quantity to a positive integer."""
-    try:
-        qty = int(quantity)
-        return qty if qty > 0 else None
-    except (ValueError, TypeError):
-        return None
-
-def validate_price(price):
-    """Validates and converts a price to a Decimal with 2 decimal places."""
-    try:
-        return Decimal(str(price)).quantize(Decimal('0.01'))
-    except (ValueError, TypeError):
-        return None
-
-# --- Core Trade Processor ---
-
-def process_trade(action, data):
+def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, int]:
     """
-    Validates trade data and fetches live market price from the Motilal Oswal API.
-    This is the single source of truth for pricing at the time of a trade.
+    Centralized validation and price fetching for all trade orders.
+    This function ensures data consistency and leverages the cached API function.
     """
-    symbol = data.get('symbol', '').upper().strip()
-    quantity = validate_quantity(data.get('quantity'))
-    limit_price = validate_price(data.get('price')) if data.get('orderType', 'market').lower() == 'limit' else None
-    order_type = data.get('orderType', 'market').lower()
+    symbol_input = data.get('symbol')
+    quantity_input = data.get('quantity')
+    order_type = str(data.get('order_type', 'MARKET')).upper()
 
-    # --- Initial Validation ---
-    if not symbol or not validate_symbol(symbol):
-        return {"error": "Invalid or missing stock symbol"}, 400
-    if not quantity:
-        return {"error": "Quantity must be a positive whole number"}, 400
-    if order_type == 'limit' and not limit_price:
-        return {"error": "A valid price is required for limit orders"}, 400
+    # --- Step 1: Validate Basic Inputs ---
+    if not symbol_input or not isinstance(quantity_input, int) or quantity_input <= 0:
+        return {"success": False, "message": "A valid symbol and a positive integer quantity are required."}, 400
+    
+    if order_type not in ['MARKET', 'LIMIT']:
+        return {"success": False, "message": "Invalid order type. Must be 'MARKET' or 'LIMIT'."}, 400
 
-    # --- Fetch Live Price from MO API ---
-    try:
-        mo_api = MotilalOswalAPI()
-        if not mo_api.auth_token and not mo_api.login():
-            raise ConnectionError("Could not log in to trading API.")
+    quantity = int(quantity_input)
 
-        # Assuming NSE for all trades for consistency
-        response = mo_api.get_ltp_data("NSE", symbol)
+    # --- Step 2: Fetch Live Data Using Centralized Cached Function ---
+    api_data = get_stock_data_from_api(symbol_input)
+    if not api_data:
+        return {"success": False, "message": f"Instrument '{format_symbol(symbol_input)}' is not available for trading."}, 404
 
-        if not response or response.get('status') != 'SUCCESS':
-            msg = response.get('message', 'Unknown API error') if response else 'No response from API'
-            logger.error(f"API price fetch failed for {symbol}: {msg}")
-            return {"error": f"Could not fetch live price for {symbol}. Please try again."}, 404
+    # --- Step 3: Determine Execution Price ---
+    execution_price = Decimal(str(api_data.get('ltp', 0)))
+    if execution_price <= 0:
+        return {"success": False, "message": f"Could not fetch a valid market price for '{format_symbol(symbol_input)}'. Trading may be halted."}, 502
 
-        api_data = response['data']
-        current_price = Decimal(str(api_data.get('ltp', 0)))
+    if order_type == 'LIMIT':
+        limit_price = Decimal(str(data.get('price', 0)))
+        if limit_price <= 0:
+            return {"success": False, "message": "A positive limit price is required for LIMIT orders."}, 400
+        
+        # For limit orders, the execution price is the limit price, but we check against LTP
+        if action == 'BUY' and execution_price > limit_price:
+            return {"success": False, "message": f"Buy limit not met. Current price ({execution_price}) is above your limit ({limit_price})."}, 409
+        if action == 'SELL' and execution_price < limit_price:
+            return {"success": False, "message": f"Sell limit not met. Current price ({execution_price}) is below your limit ({limit_price})."}, 409
+        
+        execution_price = limit_price
 
-        # --- Determine Execution Price ---
-        execution_price = current_price
-        if order_type == 'limit':
-            if action == 'buy' and current_price > limit_price:
-                return {"error": f"Buy limit not met. Current price {current_price} > limit {limit_price}"}, 400
-            if action == 'sell' and current_price < limit_price:
-                return {"error": f"Sell limit not met. Current price {current_price} < limit {limit_price}"}, 400
-            execution_price = limit_price # Execute at the user's specified limit price
+    total_amount = execution_price * Decimal(quantity)
 
-        total_amount = execution_price * Decimal(quantity)
-
-        return {
-            "symbol": symbol, "quantity": quantity, "execution_price": execution_price,
-            "total_amount": total_amount, "order_type": order_type,
-            "limit_price": limit_price, "current_price": current_price,
-            "success": True
+    # --- Step 4: Return Processed Trade Data ---
+    return {
+        "success": True,
+        "data": {
+            "symbol": f"{api_data['symbol']}.{api_data['exchange']}",
+            "quantity": quantity,
+            "execution_price": execution_price,
+            "total_amount": total_amount,
+            "order_type": order_type
         }
+    }, 200
 
-    except Exception as e:
-        logger.error(f"Error in trade processing for {symbol}: {e}")
-        return {"error": "An internal error occurred while processing the trade."}, 500
+# --- API Routes ---
 
-
-@bp.route('/buy', methods=['POST'])
+@trade_bp.route('/buy', methods=['POST'])
 @login_required
 def buy():
-    """Handles a buy order request."""
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "Invalid request body"}), 400
+    """Handles a buy order by validating the request and updating user records."""
+    result, status_code = _validate_and_process_trade_request('BUY', request.get_json())
+    if status_code != 200:
+        return jsonify(result), status_code
 
-    trade_result = process_trade('buy', data)
-    if not trade_result.get("success"):
-        # Return error from process_trade
-        return jsonify(trade_result), trade_result.get("status_code", 400)
+    trade_data = result['data']
+    user = User.objects.get(id=current_user.id) # Re-fetch user to ensure fresh data
+    
+    if Decimal(str(user.balance)) < trade_data['total_amount']:
+        return jsonify({"success": False, "message": "Insufficient funds to complete this purchase."}), 402
 
+    # --- Perform Database Operations ---
     try:
-        if current_user.balance < trade_result['total_amount']:
-            return jsonify({"error": "Insufficient funds to complete this purchase."}), 400
-
-        # --- Update User Balance and Holdings ---
-        current_user.balance -= trade_result['total_amount']
+        user.balance -= float(trade_data['total_amount'])
         
-        holding = Holding.objects(user=current_user.id, symbol=trade_result['symbol']).first()
-        if holding:
-            # Update existing holding
-            old_total_cost = holding.average_price * holding.quantity
-            new_total_cost = old_total_cost + trade_result['total_amount']
-            holding.quantity += trade_result['quantity']
-            holding.average_price = new_total_cost / holding.quantity
+        holding, created = Holding.objects.get_or_create(user=user, symbol=trade_data['symbol'])
+        if not created:
+            # Update average price for an existing holding
+            old_total_cost = Decimal(str(holding.average_price)) * Decimal(holding.quantity)
+            new_total_cost = old_total_cost + trade_data['total_amount']
+            holding.quantity += trade_data['quantity']
+            holding.average_price = float(new_total_cost / Decimal(holding.quantity))
         else:
-            # Create new holding
-            holding = Holding(
-                user=current_user.id,
-                symbol=trade_result['symbol'],
-                quantity=trade_result['quantity'],
-                average_price=trade_result['execution_price']
-            )
+            # Create a new holding
+            holding.quantity = trade_data['quantity']
+            holding.average_price = float(trade_data['execution_price'])
         
-        # --- Create Transaction Record ---
-        transaction = Transaction(
-            user=current_user.id, symbol=trade_result['symbol'], action='buy',
-            quantity=trade_result['quantity'], price=trade_result['execution_price'],
-            order_type=trade_result['order_type'], limit_price=trade_result['limit_price']
-        )
-
-        # Save all changes to the database
-        current_user.save()
+        Transaction(user=user, action='BUY', **trade_data).save()
+        user.save()
         holding.save()
-        transaction.save()
 
+        logger.info(f"BUY order executed for {user.client_id}: {trade_data['quantity']} of {trade_data['symbol']}")
         return jsonify({
-            "message": f"Successfully purchased {trade_result['quantity']} shares of {trade_result['symbol']}",
-            "newBalance": f"{current_user.balance:.2f}",
-            "transactionId": str(transaction.id)
+            "success": True, 
+            "message": "Buy order executed successfully.",
+            "new_balance": float(user.balance)
         }), 200
 
     except Exception as e:
-        logger.error(f"Database error during buy transaction: {e}")
-        return jsonify({"error": "Failed to save transaction. Please try again."}), 500
+        logger.error(f"Database error during BUY for {user.client_id}: {e}", exc_info=True)
+        return jsonify({"success": False, "message": "A database error occurred. The trade was not completed."}), 500
 
-@bp.route('/sell', methods=['POST'])
+@trade_bp.route('/sell', methods=['POST'])
 @login_required
 def sell():
-    """Handles a sell order request."""
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "Invalid request body"}), 400
+    """Handles a sell order by validating the request and updating user records."""
+    result, status_code = _validate_and_process_trade_request('SELL', request.get_json())
+    if status_code != 200:
+        return jsonify(result), status_code
+    
+    trade_data = result['data']
+    user = User.objects.get(id=current_user.id)
+    holding = Holding.objects(user=user, symbol=trade_data['symbol']).first()
 
-    trade_result = process_trade('sell', data)
-    if not trade_result.get("success"):
-        return jsonify(trade_result), trade_result.get("status_code", 400)
+    if not holding or holding.quantity < trade_data['quantity']:
+        return jsonify({"success": False, "message": "Insufficient shares to sell."}), 400
 
+    # --- Perform Database Operations ---
     try:
-        holding = Holding.objects(user=current_user.id, symbol=trade_result['symbol']).first()
+        user.balance += float(trade_data['total_amount'])
+        holding.quantity -= trade_data['quantity']
+        
+        Transaction(user=user, action='SELL', **trade_data).save()
+        user.save()
 
-        if not holding or holding.quantity < trade_result['quantity']:
-            return jsonify({"error": f"Insufficient shares. You only own {holding.quantity if holding else 0}."}), 400
-
-        # --- Update User Balance and Holdings ---
-        current_user.balance += trade_result['total_amount']
-        holding.quantity -= trade_result['quantity']
-
-        # --- Create Transaction Record ---
-        transaction = Transaction(
-            user=current_user.id, symbol=trade_result['symbol'], action='sell',
-            quantity=trade_result['quantity'], price=trade_result['execution_price'],
-            order_type=trade_result['order_type'], limit_price=trade_result['limit_price']
-        )
-
-        current_user.save()
         if holding.quantity == 0:
-            holding.delete() # Remove holding if all shares are sold
+            holding.delete()
         else:
             holding.save()
-        transaction.save()
 
+        logger.info(f"SELL order executed for {user.client_id}: {trade_data['quantity']} of {trade_data['symbol']}")
         return jsonify({
-            "message": f"Successfully sold {trade_result['quantity']} shares of {trade_result['symbol']}",
-            "newBalance": f"{current_user.balance:.2f}",
-            "transactionId": str(transaction.id)
+            "success": True, 
+            "message": "Sell order executed successfully.",
+            "new_balance": float(user.balance)
         }), 200
-
+        
     except Exception as e:
-        logger.error(f"Database error during sell transaction: {e}")
-        return jsonify({"error": "Failed to save transaction. Please try again."}), 500
+        logger.error(f"Database error during SELL for {user.client_id}: {e}", exc_info=True)
+        return jsonify({"success": False, "message": "A database error occurred. The trade was not completed."}), 500

@@ -11,6 +11,56 @@ class PriceUpdateService {
     this.allPrices = {};
     this.isConnected = false;
     this.isMarketOpen = false; // Tracks market open/close status
+    this.isStreamingPaused = true;
+    this.lastConnectionEvent = null;
+
+    this._handleConnect = () => {
+      this.isConnected = true;
+      this.isStreamingPaused = false;
+      this.lastConnectionEvent = 'reconnected';
+      this.notifySubscribers({ connectionEvent: 'reconnected', changedPrices: {} });
+      this.lastConnectionEvent = null;
+    };
+
+    this._handleDisconnect = () => {
+      this.isConnected = false;
+      this.isStreamingPaused = true;
+      this.lastConnectionEvent = 'disconnected';
+      console.warn("Price feed disconnected.");
+      this.notifySubscribers({ connectionEvent: 'disconnected', changedPrices: {} });
+      this.lastConnectionEvent = null;
+    };
+
+    this._handleStockUpdate = (priceData = {}) => {
+      const { symbol, ltp, change, percent_change, last_updated, data_type } = priceData;
+
+      if (!symbol) return;
+
+      const updateSource =
+        data_type === 'LIVE_STOCK' ? 'TICK-BY-TICK (WebSocket)'
+          : data_type === 'POLL_STOCK' ? 'MANUAL POLL (15s fallback)'
+            : 'UNKNOWN';
+      console.log(`📈 Price update for ${symbol}: ₹${ltp} (${updateSource})`);
+
+      const newPrice = {
+        ltp,
+        change,
+        percent_change,
+        last_updated,
+      };
+
+      this.allPrices[symbol] = { ...this.allPrices[symbol], ...newPrice };
+      const shouldFlash = !this.isStreamingPaused;
+      this.notifySubscribers({
+        changedPrices: shouldFlash ? { [symbol]: newPrice } : {},
+        source: updateSource
+      });
+    };
+
+    this._handleMarketStatus = (status = {}) => {
+      this.isMarketOpen = status.isOpen;
+      this.notifySubscribers();
+    };
   }
 
   /**
@@ -19,59 +69,44 @@ class PriceUpdateService {
    * @param {object} socketInstance - The connected socket.io-client instance.
    */
   init(socketInstance) {
-    if (this.socket) {
-      console.warn("PriceUpdateService is already initialized.");
+    if (!socketInstance) {
       return;
     }
-    
+
+    if (this.socket === socketInstance) {
+      return;
+    }
+
+    if (this.socket) {
+      this._detachSocketListeners(this.socket);
+    }
+
     this.socket = socketInstance;
-    // Silenced noisy init log
+    this._attachSocketListeners(this.socket);
+    this.notifySubscribers();
+  }
 
-    // Listen for standard connection events to update status
-    this.socket.on('connect', () => {
-      this.isConnected = true;
-      // Silenced noisy connection log
-      this.notifySubscribers();
-    });
+  reset() {
+    if (this.socket) {
+      this._detachSocketListeners(this.socket);
+      this.socket = null;
+    }
+    this.isConnected = false;
+    this.notifySubscribers();
+  }
 
-    this.socket.on('disconnect', () => {
-      this.isConnected = false;
-      console.warn("Price feed disconnected.");
-      this.notifySubscribers();
-    });
+  _attachSocketListeners(socket) {
+    socket.on('connect', this._handleConnect);
+    socket.on('disconnect', this._handleDisconnect);
+    socket.on('stock_update', this._handleStockUpdate);
+    socket.on('market_status', this._handleMarketStatus);
+  }
 
-    // Listen for the specific 'stock_update' event from the backend
-    this.socket.on('stock_update', (priceData) => {
-      const { symbol, ltp, change, percent_change, last_updated, data_type } = priceData;
-
-      if (!symbol) return;
-
-      // Log the source of the price update
-      const updateSource = data_type === 'LIVE_STOCK' ? 'TICK-BY-TICK (WebSocket)' : 
-                          data_type === 'POLL_STOCK' ? 'MANUAL POLL (15s fallback)' : 
-                          'UNKNOWN';
-      console.log(`📈 Price update for ${symbol}: ₹${ltp} (${updateSource})`);
-
-      // Normalize incoming values from backend (already in rupees)
-      const newPrice = {
-        ltp: ltp,
-        change: change,
-        percent_change, // already a percentage value
-        last_updated,
-      };
-
-      // Update the central price map
-      this.allPrices[symbol] = { ...this.allPrices[symbol], ...newPrice };
-
-      // Notify subscribers with the complete map and the specific change
-      this.notifySubscribers({ changedPrices: { [symbol]: newPrice } });
-    });
-
-    // Listen for market status updates from the backend
-    this.socket.on('market_status', (status) => {
-        this.isMarketOpen = status.isOpen;
-        this.notifySubscribers();
-    });
+  _detachSocketListeners(socket) {
+    socket.off('connect', this._handleConnect);
+    socket.off('disconnect', this._handleDisconnect);
+    socket.off('stock_update', this._handleStockUpdate);
+    socket.off('market_status', this._handleMarketStatus);
   }
 
   /**
@@ -100,7 +135,10 @@ class PriceUpdateService {
       changedPrices: data.changedPrices || {},
       isConnected: this.isConnected,
       isMarketOpen: this.isMarketOpen,
+      isStreamingPaused: this.isStreamingPaused,
+      connectionEvent: data.connectionEvent || null,
       error: data.error || null,
+      source: data.source || null,
     };
     
     const callbacksToNotify = singleCallback ? [singleCallback] : this.subscribers;
@@ -140,7 +178,8 @@ class PriceUpdateService {
       ])
     );
     this.allPrices = { ...this.allPrices, ...normalized };
-    this.notifySubscribers({ changedPrices: normalized });
+    const shouldFlash = !this.isStreamingPaused;
+    this.notifySubscribers({ changedPrices: shouldFlash ? normalized : {} });
   }
 
   /**
@@ -160,7 +199,8 @@ class PriceUpdateService {
       ])
     );
     this.allPrices = { ...this.allPrices, ...normalized };
-    this.notifySubscribers({ changedPrices: normalized });
+    const shouldFlash = !this.isStreamingPaused;
+    this.notifySubscribers({ changedPrices: shouldFlash ? normalized : {} });
   }
 
   /**
@@ -168,6 +208,7 @@ class PriceUpdateService {
    */
   setConnected(flag) {
     this.isConnected = !!flag;
+    this.isStreamingPaused = !this.isConnected;
     this.notifySubscribers();
   }
 

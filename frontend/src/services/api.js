@@ -38,9 +38,25 @@ const handleApiError = (error) => {
                          error.config?.url?.includes('/auth/logout');
 
     if (!isAuthRequest) {
+      const requestUrl = error.config?.url ?? null;
+      let fullUrl = null;
+      try {
+        if (requestUrl) {
+          fullUrl = error.config?.baseURL
+            ? new URL(requestUrl, error.config.baseURL).toString()
+            : new URL(requestUrl, window.location.origin).toString();
+        }
+      } catch (urlError) {
+        fullUrl = requestUrl;
+      }
+
       const eventDetail = {
         reason: 'SESSION_EXPIRED',
-        endpoint: error.config?.url ?? null,
+        endpoint: requestUrl,
+        method: error.config?.method ?? null,
+        status: error.response?.status ?? null,
+        fullUrl,
+        timestamp: Date.now(),
       };
 
       const unauthorizedEvent = typeof window.CustomEvent === 'function'
@@ -57,8 +73,11 @@ const handleApiError = (error) => {
       const sessionError = new Error("You're signed out. Please log in to continue.");
       sessionError.code = 'SESSION_EXPIRED';
       sessionError.status = 401;
-      if (error.config?.url) {
-        sessionError.endpoint = error.config.url;
+      if (requestUrl) {
+        sessionError.endpoint = requestUrl;
+      }
+      if (error.config?.method) {
+        sessionError.method = error.config.method;
       }
 
       return Promise.reject(sessionError);
@@ -75,6 +94,23 @@ const handleApiError = (error) => {
   const apiError = new Error(errorMessage);
   apiError.status = error.response?.status ?? null;
   apiError.code = error.response?.data?.code ?? error.response?.status ?? 'API_ERROR';
+  if (error.response?.headers) {
+    apiError.headers = error.response.headers;
+    const retryAfter = error.response.headers['retry-after'];
+    if (retryAfter !== undefined) {
+      const retrySeconds = Number.parseInt(retryAfter, 10);
+      if (!Number.isNaN(retrySeconds)) {
+        apiError.retryAfter = retrySeconds;
+      }
+    }
+    const remaining = error.response.headers['x-ratelimit-remaining'];
+    if (remaining !== undefined) {
+      const remainingInt = Number.parseInt(remaining, 10);
+      if (!Number.isNaN(remainingInt)) {
+        apiError.rateLimitRemaining = remainingInt;
+      }
+    }
+  }
 
   return Promise.reject(apiError);
 };
@@ -113,7 +149,22 @@ export const fetchProfile = () => {
 
 /** Updates the user's profile. */
 export const updateProfile = (profileData) => {
-  return apiClient.put("/profile/update", profileData).then(res => res.data);
+  return apiClient.put("/profile/update", profileData).then(res => {
+    const payload = res.data;
+    if (payload?.success && typeof window !== 'undefined') {
+      const eventDetail = { profile: payload.profile ?? null };
+      const profileUpdatedEvent = typeof window.CustomEvent === 'function'
+        ? new CustomEvent('profile:updated', { detail: eventDetail })
+        : (() => {
+            const fallbackEvent = new Event('profile:updated');
+            fallbackEvent.detail = eventDetail;
+            return fallbackEvent;
+          })();
+
+      window.dispatchEvent(profileUpdatedEvent);
+    }
+    return payload;
+  });
 };
 
 
@@ -214,8 +265,22 @@ export const fetchOrders = () => fetchData("/orders");
 export const fetchOrderDetail = (orderId) => fetchData(`/orders/${orderId}`);
 
 /** Places a trade order (buy/sell). */
-export const placeTrade = (tradeData) => {
-  return apiClient.post("/trade", tradeData).then(res => res.data);
+export const placeTrade = (tradeData = {}) => {
+  const action = (tradeData.action || 'buy').toLowerCase();
+  const endpoint = action === 'sell' ? '/trade/sell' : '/trade/buy';
+  const payload = {
+    symbol: tradeData.symbol,
+    quantity: Number(tradeData.quantity),
+    orderType: tradeData.orderType,
+    price: tradeData.price,
+    client_id: tradeData.client_id,
+  };
+
+  if (payload.orderType !== 'limit') {
+    delete payload.price;
+  }
+
+  return apiClient.post(endpoint, payload).then(res => res.data);
 };
 
 export default apiClient;

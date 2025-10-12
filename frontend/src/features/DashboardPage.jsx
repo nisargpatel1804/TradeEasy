@@ -53,6 +53,7 @@ const Dashboard = () => {
   })
   const [portfolioPage, setPortfolioPage] = useState(0)
   const [watchlistPage, setWatchlistPage] = useState(0)
+  const [pollTrigger, setPollTrigger] = useState(0)
   const [profile, setProfile] = useState({ name: "Client Name", clientId: "TR123456" })
   const [indices, setIndices] = useState([])
   const navigate = useNavigate()
@@ -230,14 +231,32 @@ const Dashboard = () => {
     
     // Only subscribe if we have watchlist stocks
     if (watchlistStocks.length > 0) {
-      unsubscribe = priceUpdateService.subscribe(({ allPrices, isConnected, isMarketHours, error }) => {
+      unsubscribe = priceUpdateService.subscribe((pricePayload) => {
+        const {
+          allPrices,
+          changedPrices = {},
+          isConnected: priceFeedConnected = false,
+          isStreamingPaused = false,
+          connectionEvent = null,
+          error,
+          isMarketOpen,
+        } = pricePayload
+
         setPriceUpdateStatus(prev => ({
-          isConnected,
-          lastUpdate: isConnected ? new Date().toLocaleTimeString() : prev.lastUpdate,
-          updateCount: isConnected ? prev.updateCount + 1 : prev.updateCount
+          isConnected: priceFeedConnected,
+          lastUpdate: priceFeedConnected && Object.keys(changedPrices).length > 0
+            ? new Date().toLocaleTimeString()
+            : prev.lastUpdate,
+          updateCount: priceFeedConnected && Object.keys(changedPrices).length > 0
+            ? prev.updateCount + 1
+            : prev.updateCount
         }))
-        
-        if (isConnected && allPrices && Object.keys(allPrices).length > 0) {
+
+        if (connectionEvent === 'reconnected') {
+          setPollTrigger(Date.now())
+        }
+
+        if (!isStreamingPaused && allPrices && Object.keys(allPrices).length > 0) {
           // Update watchlist stocks with new prices
           setWatchlistStocks(prevStocks => {
             const updatedStocks = prevStocks.map(stock => {
@@ -267,7 +286,7 @@ const Dashboard = () => {
           setRealTimePrices(allPrices)
         }
         
-        if (error && isMarketHours) {
+        if (error && isMarketOpen) {
           console.warn('Dashboard: Price update service error:', error)
         }
       })
@@ -329,7 +348,7 @@ const Dashboard = () => {
     const intervalMs = isConnected ? 4000 : 30000
     timer = setInterval(poll, intervalMs)
     return () => { if (timer) clearInterval(timer) }
-  }, [watchlistStocks.map(s => s.symbol).join(','), isConnected])
+  }, [watchlistStocks.map(s => s.symbol).join(','), isConnected, pollTrigger])
 
   const formatCurrency = useCallback((amount) => {
     if (amount === null || amount === undefined) {

@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 import { authService } from '../services/auth.js';
 import { useNavigate } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
+import { useToast } from '@/assets/ui/use-toast';
 
 // Global flag to prevent multiple session verifications across component instances
 let isVerifyingSessionGlobal = false;
@@ -16,8 +17,10 @@ const AuthContext = createContext(null);
 export const AuthProvider = ({ children }) => {
   const [isLoggedIn, setIsLoggedIn] = useState(authService.isAuthenticatedSync());
   const [isLoading, setIsLoading] = useState(true); // Manages loading state for initial auth check
+  const [clientId, setClientId] = useState(authService.getClientId());
   const [lastLogoutTime, setLastLogoutTime] = useState(0); // Track last logout to prevent spam
   const navigate = useNavigate();
+  const { toast } = useToast();
 
   // Memoized logout handler to ensure consistency
   const handleLogout = useCallback(async () => {
@@ -30,6 +33,7 @@ export const AuthProvider = ({ children }) => {
     setLastLogoutTime(now);
 
     await authService.logout();
+    setClientId(authService.getClientId());
     // The 'authStateChanged' event dispatched by authService will update isLoggedIn
     navigate('/login');
   }, [navigate, lastLogoutTime]);
@@ -38,15 +42,23 @@ export const AuthProvider = ({ children }) => {
     // This handler listens for login/logout events from our authService
     const handleAuthChange = () => {
       setIsLoggedIn(authService.isAuthenticatedSync());
+      setClientId(authService.getClientId());
     };
 
     // This handler listens for 401 Unauthorized errors from our apiService
     const handleUnauthorized = (event) => {
-      const reason = event?.detail?.reason === 'SESSION_EXPIRED'
-        ? 'Session expired. Redirecting to login.'
-        : 'Authentication issue detected. Refreshing session.';
+      const isExpired = event?.detail?.reason === 'SESSION_EXPIRED';
+      const message = isExpired
+        ? 'Your session has expired. Please sign in again.'
+        : 'Authentication issue detected. Please sign in to continue.';
 
-      console.info(`[AuthContext] ${reason}`);
+      console.info(`[AuthContext] ${message}`);
+      toast({
+        title: isExpired ? 'Session ended' : 'Authentication required',
+        description: message,
+        variant: 'destructive',
+      });
+
       handleLogout();
     };
 
@@ -94,16 +106,24 @@ export const AuthProvider = ({ children }) => {
    */
   const login = async (credentials) => {
     const response = await authService.login(credentials);
-    if (response.success) {
+    if (response?.success) {
+      if (response.client_id) {
+        setClientId(response.client_id);
+      }
       navigate('/dashboard');
+      return response;
     }
-    return response; // Return the full response for error handling in the login component
+
+    const loginError = new Error(response?.message || 'Login failed.');
+    loginError.code = response?.code || 'LOGIN_FAILED';
+    throw loginError;
   };
 
   // The value provided to consuming components
   const value = {
     isLoggedIn,
     isLoading,
+    clientId,
     login,
     logout: handleLogout, // Provide the memoized logout function
   };

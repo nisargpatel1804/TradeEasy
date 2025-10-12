@@ -1,44 +1,59 @@
-from flask import Blueprint, jsonify
+import logging
+from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from app.models import Transaction
-import logging
 
-logging.basicConfig(level=logging.INFO)
+# --- Configuration ---
 logger = logging.getLogger(__name__)
+orders_bp = Blueprint('orders', __name__)
 
-bp = Blueprint('orders', __name__)
+# --- Helper Function ---
 
-@bp.route('/orders', methods=['GET'])
+def _format_order(order: Transaction) -> dict:
+    """Formats a Transaction document into a clean dictionary for the API response."""
+    return {
+        "id": str(order.id),
+        "symbol": order.symbol,
+        "action": order.action,
+        "quantity": order.quantity,
+        "price": float(order.price),
+        "order_type": order.order_type,
+        "status": order.status,
+        "date": order.transaction_date.isoformat()
+    }
+
+# --- API Route ---
+
+@orders_bp.route('/orders', methods=['GET'])
 @login_required
 def get_orders():
-    """Fetches executed and pending orders for the authenticated user."""
+    """
+    Fetches the complete order history for the authenticated user, separated into
+    executed and pending orders.
+    """
     try:
-        # Using current_user proxy for secure, session-based user fetching
-        executed = Transaction.objects(user=current_user, status="executed").order_by('-transaction_date')
-        pending = Transaction.objects(user=current_user, status="pending").order_by('-transaction_date')
+        # Securely query for orders belonging only to the current logged-in user
+        # Sort by date in descending order to show the most recent orders first
+        executed_orders = Transaction.objects(
+            user=current_user,
+            status="executed"
+        ).order_by('-transaction_date')
 
-        executed_list = [
-            {
-                "id": str(order.id), "symbol": order.symbol, "action": order.action,
-                "quantity": order.quantity, "price": float(order.price),
-                "date": order.transaction_date.isoformat(), "order_type": order.order_type
-            } for order in executed
-        ]
+        pending_orders = Transaction.objects(
+            user=current_user,
+            status="pending"
+        ).order_by('-transaction_date')
 
-        pending_list = [
-            {
-                "id": str(order.id), "symbol": order.symbol, "action": order.action,
-                "quantity": order.quantity, "limit_price": float(order.limit_price) if order.limit_price else None,
-                "stop_loss": float(order.stop_loss) if order.stop_loss else None,
-                "date": order.transaction_date.isoformat(), "order_type": order.order_type
-            } for order in pending
-        ]
+        # Format the query results into a clean list of dictionaries
+        executed_list = [_format_order(order) for order in executed_orders]
+        pending_list = [_format_order(order) for order in pending_orders]
 
         return jsonify({
-            "executed_orders": executed_list,
-            "pending_orders": pending_list
+            "success": True,
+            "executed": executed_list,
+            "pending": pending_list
         }), 200
 
     except Exception as e:
-        logger.error(f"Error fetching orders for user {current_user.client_id}: {e}")
-        return jsonify({"error": "An internal error occurred while fetching your orders."}), 500
+        logger.error(f"Error fetching orders for user {current_user.client_id}: {e}", exc_info=True)
+        return jsonify({"success": False, "message": "An internal server error occurred while fetching your orders."}), 500

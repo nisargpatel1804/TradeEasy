@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { fetchProfile as getProfile, updateProfile } from "@/services/api";
+import { fetchProfile as fetchProfileApi, updateProfile } from "@/services/api";
 import { isAuthenticatedSync } from "@/services/auth";
 import { Input } from "@/assets/ui/input";
 import { Button } from "@/assets/ui/button";
 import { Card, CardContent } from "@/assets/ui/card";
 import { Skeleton } from "@/assets/ui/skeleton";
 import { motion } from "framer-motion";
+import { useDataContext } from "@/context/DataContext";
 
 const ProfilePage = () => {
   const [profile, setProfile] = useState({ email: "", mobile: "" });
@@ -13,6 +14,7 @@ const ProfilePage = () => {
   const [updating, setUpdating] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const { getProfile: getProfileFromContext } = useDataContext();
 
   useEffect(() => {
     const fetchProfile = async () => {
@@ -27,7 +29,7 @@ const ProfilePage = () => {
       }
 
       try {
-        const response = await getProfile();
+        const response = await fetchProfileApi();
         setProfile(response);
       } catch (err) {
         console.error("Profile fetch error:", err);
@@ -69,6 +71,20 @@ const ProfilePage = () => {
 
       await updateProfile(profile);
       setSuccess("Profile updated successfully!");
+
+      try {
+        let refreshedProfile = null;
+        if (typeof getProfileFromContext === "function") {
+          refreshedProfile = await getProfileFromContext(true);
+        } else {
+          refreshedProfile = await fetchProfileApi();
+        }
+        if (refreshedProfile) {
+          setProfile(refreshedProfile);
+        }
+      } catch (refreshError) {
+        console.warn("Profile refresh after update failed:", refreshError);
+      }
     } catch (err) {
       console.error("Profile update error:", err);
       setError(err.error || "Failed to update profile");

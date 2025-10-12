@@ -96,6 +96,16 @@ export function DataProvider({ children }) {
     return data;
   }, [profileData, lastProfileFetch]);
 
+  const refreshProfile = useCallback(async () => {
+    setLastProfileFetch(0);
+    try {
+      return await getProfile(true);
+    } catch (error) {
+      console.error('[DataContext] Failed to refresh profile cache:', error);
+      throw error;
+    }
+  }, [getProfile]);
+
   const getWatchlists = useCallback(async (forceRefresh = false) => {
     const now = Date.now();
     if (!forceRefresh && watchlistsData && now - lastWatchlistsFetch < 10000) {
@@ -107,6 +117,19 @@ export function DataProvider({ children }) {
     return data;
   }, [watchlistsData, lastWatchlistsFetch]);
 
+  useEffect(() => {
+    const handleProfileUpdated = async () => {
+      try {
+        await refreshProfile();
+      } catch (error) {
+        // Already logged inside refreshProfile
+      }
+    };
+
+    window.addEventListener('profile:updated', handleProfileUpdated);
+    return () => window.removeEventListener('profile:updated', handleProfileUpdated);
+  }, [refreshProfile]);
+
   const contextValue = React.useMemo(() => ({
     profileData,
     indicesData,
@@ -116,7 +139,8 @@ export function DataProvider({ children }) {
     getProfile,
     getWatchlists,
     getInitialIndices,
-  }), [profileData, indicesData, watchlistsData, isLoadingIndices, indicesError, getProfile, getWatchlists, getInitialIndices]);
+    refreshProfile,
+  }), [profileData, indicesData, watchlistsData, isLoadingIndices, indicesError, getProfile, getWatchlists, getInitialIndices, refreshProfile]);
 
   return (
     <DataContext.Provider value={contextValue}>

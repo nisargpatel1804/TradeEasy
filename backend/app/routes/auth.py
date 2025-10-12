@@ -1,137 +1,147 @@
+import logging
+import re
+import time
 from flask import Blueprint, request, jsonify, session
 from flask_login import login_user, logout_user, login_required, current_user
-from mongoengine.queryset.visitor import Q
+from mongoengine.errors import NotUniqueError
 from app.models import User, Watchlist
-from app import bcrypt
-import logging
+from app import bcrypt  # Imported from the app factory in __init__.py
 
-# Configure logging for this blueprint
+# --- Configuration ---
 logger = logging.getLogger(__name__)
+auth_bp = Blueprint('auth', __name__)
 
-bp = Blueprint('auth', __name__)
+# --- Constants for Validation and Security ---
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+MOBILE_REGEX = re.compile(r"^\+91[6-9]\d{9}$") # Indian mobile number format
+PASSWORD_MIN_LENGTH = 8
+LOGIN_ATTEMPT_WINDOW_SECONDS = 300  # 5 minutes
+LOGIN_ATTEMPT_THRESHOLD = 5
+LOGIN_RETRY_AFTER_SECONDS = 300
 
+# --- Routes ---
 
-@bp.route('/signup', methods=['POST'])
+@auth_bp.route('/signup', methods=['POST'])
 def signup():
     """
-    Handles new user registration.
-    Validates input, checks for existing users, and securely hashes the password.
+    Handles new user registration with robust validation and secure password hashing.
     """
     try:
-        data = request.json
-        email = data.get('email')
-        mobile = data.get('mobile')
+        data = request.get_json()
+        if not data:
+            return jsonify({"success": False, "message": "Invalid request body."}), 400
+
+        email = str(data.get('email', '')).strip().lower()
+        mobile = str(data.get('mobile', '')).strip()
         password = data.get('password')
-        # Standardize on snake_case for API consistency
-        confirm_password = data.get('confirm_password')
 
-        if not all([email, mobile, password, confirm_password]):
-            return jsonify({"error": "All fields are required"}), 400
-        if password != confirm_password:
-            return jsonify({"error": "Passwords do not match"}), 400
+        # --- Input Validation ---
+        if not all([email, mobile, password]):
+            return jsonify({"success": False, "message": "Email, mobile, and password are required."}), 400
+        if not EMAIL_REGEX.match(email):
+            return jsonify({"success": False, "message": "Invalid email format."}), 400
+        if not MOBILE_REGEX.match(mobile):
+            return jsonify({"success": False, "message": "Mobile number must be in +91XXXXXXXXXX format."}), 400
+        if len(password) < PASSWORD_MIN_LENGTH:
+            return jsonify({"success": False, "message": f"Password must be at least {PASSWORD_MIN_LENGTH} characters."}), 400
+        if password != data.get('confirm_password'):
+            return jsonify({"success": False, "message": "Passwords do not match."}), 400
 
-        # Check if a user with the same email or mobile already exists
-        if User.objects(Q(email=email) | Q(mobile=mobile)).first():
-            return jsonify({"error": "An account with this email or mobile already exists"}), 409
-
-        # Hash the password securely using bcrypt before storing
+        # --- User Creation ---
         hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
-
+        
         new_user = User(
             email=email,
             mobile=mobile,
             password=hashed_password,
-            username=email  # Default username to email for simplicity
+            username=email.split('@')[0] # Default username from email prefix
         )
         
-        # Create a default, non-deletable watchlist for a better user experience
-        default_watchlist = Watchlist(name="Stocks", is_deletable=False, stocks=[])
-        new_user.watchlists = [default_watchlist]
+        # Every new user gets a default watchlist for a better first-time experience
+        new_user.watchlists.append(Watchlist(name="My Watchlist", is_deletable=False))
         
         new_user.save()
 
-        logger.info(f"New user account created. Client ID: {new_user.client_id}")
+        logger.info(f"New user signed up: {new_user.client_id} ({new_user.email})")
         return jsonify({
             "success": True,
-            "message": "Account created successfully. Please log in with your Client ID.",
+            "message": "Account created successfully. Please log in.",
             "client_id": new_user.client_id
         }), 201
 
+    except NotUniqueError:
+        logger.warning(f"Signup attempt with existing email/mobile: {email}/{mobile}")
+        return jsonify({"success": False, "message": "An account with this email or mobile already exists."}), 409
     except Exception as e:
         logger.error(f"Error during signup: {e}", exc_info=True)
-        return jsonify({"error": "An internal server error occurred"}), 500
+        return jsonify({"success": False, "message": "An internal server error occurred."}), 500
 
-
-@bp.route('/login', methods=['POST'])
+@auth_bp.route('/login', methods=['POST'])
 def login():
     """
-    Handles user login.
-    Verifies credentials against the stored hash and creates a session.
+    Handles user login with credential verification and brute-force protection.
     """
     try:
-        data = request.json
-        client_id = data.get('client_id')
+        now = time.time()
+        attempts = [ts for ts in session.get('login_attempts', []) if now - ts < LOGIN_ATTEMPT_WINDOW_SECONDS]
+
+        if len(attempts) >= LOGIN_ATTEMPT_THRESHOLD:
+            logger.warning(f"Login rate limit hit for IP: {request.remote_addr}")
+            return jsonify({"success": False, "message": "Too many login attempts. Please try again later."}), 429
+
+        data = request.get_json()
+        if not data or not data.get('client_id') or not data.get('password'):
+            return jsonify({"success": False, "message": "Client ID and password are required."}), 400
+
+        client_id = data.get('client_id').strip().upper()
         password = data.get('password')
-
-        if not client_id or not password:
-            return jsonify({"error": "Client ID and password are required"}), 400
-
+        
         user = User.objects(client_id=client_id).first()
 
-        # Securely check the provided password against the stored hash
-        if not user or not bcrypt.check_password_hash(user.password, password):
-            return jsonify({"error": "Invalid client ID or password"}), 401
-
-        # Log the user in, creating a secure session
-        login_user(user, remember=True)
-        
-        return jsonify({
-            "success": True,
-            "message": "Logged in successfully",
-            "client_id": user.client_id,
-            "username": user.username
-        }), 200
+        if user and user.is_active and bcrypt.check_password_hash(user.password, password):
+            login_user(user, remember=True)
+            session.pop('login_attempts', None) # Clear attempts on successful login
+            logger.info(f"User {user.client_id} logged in successfully.")
+            return jsonify({
+                "success": True,
+                "message": "Login successful.",
+                "user": {"client_id": user.client_id, "username": user.username}
+            }), 200
+        else:
+            attempts.append(now)
+            session['login_attempts'] = attempts
+            logger.warning(f"Failed login attempt for Client ID: {client_id}")
+            return jsonify({"success": False, "message": "Invalid Client ID or password."}), 401
 
     except Exception as e:
         logger.error(f"Error during login: {e}", exc_info=True)
-        return jsonify({"error": "An internal server error occurred"}), 500
+        return jsonify({"success": False, "message": "An internal server error occurred."}), 500
 
-
-@bp.route('/logout', methods=['POST'])
+@auth_bp.route('/logout', methods=['POST'])
+@login_required
 def logout():
-    """
-    Handles user logout.
-    Securely invalidates the current user's session.
-    Note: This endpoint doesn't require authentication to allow logout even with expired sessions.
-    """
+    """Logs out the current user and clears the session."""
     try:
-        # Check if user is authenticated before trying to get their info
-        if current_user.is_authenticated:
-            user_client_id = current_user.client_id
-            logout_user()  # Invalidates the Flask-Login session
-            logger.info(f"User '{user_client_id}' logged out successfully.")
-        else:
-            logger.info("Logout called with no active session (possibly expired).")
-        
-        session.clear()  # Ensures any session data is removed regardless
-        return jsonify({"success": True, "message": "You have been logged out"}), 200
-        
+        user_id = current_user.client_id
+        logout_user()
+        session.clear()
+        logger.info(f"User {user_id} logged out.")
+        return jsonify({"success": True, "message": "You have been successfully logged out."}), 200
     except Exception as e:
         logger.error(f"Error during logout: {e}", exc_info=True)
-        return jsonify({"error": "An internal server error occurred"}), 500
+        return jsonify({"success": False, "message": "An internal server error occurred during logout."}), 500
 
-
-@bp.route('/check-auth', methods=['GET'])
+@auth_bp.route('/check-auth', methods=['GET'])
 @login_required
 def check_auth():
     """
-    Verifies if the current user has an active, authenticated session.
-    The @login_required decorator handles the verification. If the user is not
-    authenticated, it will automatically return a 401 Unauthorized response.
+    A protected endpoint to verify if the client's session is still valid.
+    The @login_required decorator handles the authentication check.
     """
-    logger.info(f"Auth check for user: {current_user.client_id}")
     return jsonify({
         "isAuthenticated": True,
-        "client_id": current_user.client_id,
-        "username": current_user.username
+        "user": {
+            "client_id": current_user.client_id,
+            "username": current_user.username
+        }
     }), 200

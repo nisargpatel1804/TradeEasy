@@ -8,10 +8,11 @@ import { Skeleton } from "@/assets/ui/skeleton";
 import { Label } from "@/assets/ui/label";
 import { motion } from "framer-motion";
 import { useToast } from "@/assets/ui/use-toast";
+import { useAuth } from "@/context/AuthContext.jsx";
 
 const TradeForm = ({ symbol, defaultAction = "buy", onClose, onTradeSuccess }) => {
   const [formData, setFormData] = useState({
-    symbol: symbol || "",
+    symbol: symbol ? symbol.toUpperCase() : "",
     action: defaultAction,
     quantity: "",
     orderType: "market",
@@ -20,11 +21,12 @@ const TradeForm = ({ symbol, defaultAction = "buy", onClose, onTradeSuccess }) =
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const { toast } = useToast();
+  const { clientId } = useAuth();
 
   // Update formData.symbol if the symbol prop changes
   useEffect(() => {
     if (symbol) {
-      setFormData((prev) => ({ ...prev, symbol }));
+      setFormData((prev) => ({ ...prev, symbol: symbol.toUpperCase() }));
     }
   }, [symbol]);
 
@@ -35,9 +37,9 @@ const TradeForm = ({ symbol, defaultAction = "buy", onClose, onTradeSuccess }) =
 
   const validateForm = () => {
     // Symbol validation
-    const symbolRegex = /^[A-Za-z0-9.]{1,12}$/;
+    const symbolRegex = /^[A-Z0-9]{1,12}(?:\.(?:NS|NSE|BSE|BO))?$/;
     if (!symbolRegex.test(formData.symbol)) {
-      setError("Symbol must be 1-12 alphanumeric characters (dots allowed)");
+      setError("Symbol must be 1-12 uppercase letters/numbers with optional .NS or .BO suffix");
       return false;
     }
 
@@ -66,20 +68,43 @@ const TradeForm = ({ symbol, defaultAction = "buy", onClose, onTradeSuccess }) =
 
     if (!validateForm()) return;
 
+    if (!clientId) {
+      const sessionError = "Your session is inactive. Please log in again.";
+      setError(sessionError);
+      toast({
+        title: "Trade unavailable",
+        description: sessionError,
+        variant: "destructive",
+      });
+      return;
+    }
+
     setLoading(true);
     try {
-      const response = await placeTrade(
-        formData.action,
-        formData.symbol,
-        Number(formData.quantity),
-        formData.orderType === "limit" ? Number(formData.price) : undefined,
-        formData.orderType
-      );
+      const [baseSymbol, rawSuffix] = formData.symbol.split(".");
+      let exchangeHint;
+      if (rawSuffix) {
+        const suffix = rawSuffix.toUpperCase();
+        if (suffix === "NS" || suffix === "NSE") exchangeHint = "NSE";
+        if (suffix === "BO" || suffix === "BSE") exchangeHint = "BSE";
+      }
+
+      const payload = {
+        action: formData.action,
+        symbol: formData.symbol,
+        quantity: Number(formData.quantity),
+        orderType: formData.orderType,
+        price: formData.orderType === "limit" ? Number(formData.price) : undefined,
+        client_id: clientId,
+        exchange: exchangeHint,
+      };
+
+      const response = await placeTrade(payload);
 
       toast({
         title: "Trade Successful",
         description: response.message || `${formData.action.toUpperCase()} order placed`,
-        status: "success",
+        variant: "default",
       });
 
       // Reset form but keep symbol
@@ -95,14 +120,17 @@ const TradeForm = ({ symbol, defaultAction = "buy", onClose, onTradeSuccess }) =
       if (onClose) onClose();
     } catch (err) {
       console.error("Trade error:", err);
-      const errorMessage = err.response?.data?.error || 
-                         err.message || 
-                         "Trade failed. Please try again.";
+      const responseData = err?.response?.data;
+      const apiMessage = responseData?.error;
+      const errorCode = responseData?.code ? ` (${responseData.code})` : "";
+      const errorMessage = apiMessage
+        ? `${apiMessage}${errorCode}`
+        : err.message || "Trade failed. Please try again.";
       
       toast({
         title: "Trade Failed",
         description: errorMessage,
-        status: "error",
+        variant: "destructive",
       });
       
       setError(errorMessage);

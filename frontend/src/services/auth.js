@@ -41,12 +41,20 @@ export const authService = {
    */
   login: async (credentials) => {
     const response = await apiClient.post('/auth/login', credentials);
-    if (response.data.success) {
-      localStorage.setItem('isAuthenticated', 'true');
-      localStorage.setItem('client_id', response.data.client_id);
-      window.dispatchEvent(new Event('authStateChanged'));
+
+    const { data } = response;
+    if (!data?.success) {
+      const loginError = new Error(data?.message || 'Login failed.');
+      loginError.code = data?.code || 'LOGIN_FAILED';
+      loginError.status = response.status;
+      throw loginError;
     }
-    return response.data;
+
+    localStorage.setItem('isAuthenticated', 'true');
+    localStorage.setItem('client_id', data.client_id);
+    window.dispatchEvent(new Event('authStateChanged'));
+
+    return data;
   },
 
   /**
@@ -79,7 +87,7 @@ export const authService = {
     // Prevent multiple logout attempts
     if (authService._isLoggingOut) {
       console.log('Logout already in progress, skipping duplicate attempt');
-      return;
+      return Promise.resolve();
     }
 
     authService._isLoggingOut = true;

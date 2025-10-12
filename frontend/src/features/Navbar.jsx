@@ -4,6 +4,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { searchStocks, addStockToWatchlist, fetchWatchlistStocks } from "@/services/api";
 import { useDataContext } from "@/context/DataContext";
+import { useSocketContext } from "@/context/SocketContext";
 import { Input } from "@/assets/ui/input";
 import { Avatar, AvatarFallback } from "@/assets/ui/avatar";
 import { Button } from "@/assets/ui/button";
@@ -26,6 +27,7 @@ const Navbar = () => {
   // --- Global State from Context ---
   // We get live indices data directly from the context.
   const { indicesData, getProfile, getWatchlists } = useDataContext();
+  const { isConnected } = useSocketContext() || {};
 
   // --- Local Component State ---
   const [profile, setProfile] = useState({ name: "Client Name", clientId: "TR123456", email: "" });
@@ -122,14 +124,15 @@ const Navbar = () => {
   
   // Debounced search logic
   const debouncedSearch = useCallback(debounce(async (query) => {
-    if (!query.trim()) {
+    const trimmedQuery = (query || "").trim();
+    if (!trimmedQuery) {
       setSearchResults([]);
       setSearchLoading(false);
       return;
     }
     setSearchLoading(true);
     try {
-      const response = await searchStocks(query);
+      const response = await searchStocks(trimmedQuery);
       // Backend returns array with { symbol, name, exchange, scripcode } format
       const results = Array.isArray(response) ? response : [];
       // Filter out stocks already in watchlist
@@ -191,6 +194,10 @@ const Navbar = () => {
       const stocksWatchlist = allWatchlists.find(w => w.name?.toLowerCase() === "stocks");
       if (!stocksWatchlist) {
         toast.error("Stocks watchlist not found");
+        return;
+      }
+      if (Array.isArray(watchlistStocks) && watchlistStocks.length >= 25) {
+        toast.error("Watchlists are limited to 25 stocks.");
         return;
       }
       setIsAdding(true);
@@ -272,7 +279,17 @@ const Navbar = () => {
                     </div>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-3">
+                  <span
+                    className={`text-xs font-semibold px-3 py-1 rounded-full border ${
+                      isConnected === false
+                        ? "text-red-600 border-red-200 bg-red-50 dark:text-red-400 dark:border-red-900/40 dark:bg-red-900/20"
+                        : "text-green-600 border-green-200 bg-green-50 dark:text-green-400 dark:border-green-900/40 dark:bg-green-900/20"
+                    }`}
+                    aria-live="polite"
+                  >
+                    {isConnected === false ? "Offline" : "Live"}
+                  </span>
                   <Button variant="outline" size="sm" onClick={() => navigate("/indices")} className="bg-black text-white border-none hover:bg-gray-800 flex items-center gap-2">
                     <BarChart3 className="h-4 w-4" /> Indices
                   </Button>
@@ -295,7 +312,7 @@ const Navbar = () => {
                   </span>
                 </div>
                 <nav className="hidden xl:flex items-center gap-6">
-                  {['Dashboard', 'Watchlist', 'Portfolio', 'Performance', 'Markets'].map(item => (
+                  {['Dashboard', 'Watchlist', 'Portfolio', 'Orders', 'Performance', 'Markets'].map(item => (
                     <a key={item} onClick={() => navigate(`/${item.toLowerCase() === 'dashboard' ? '' : item.toLowerCase()}`)}
                       className="text-sm font-medium text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer">
                       {item}
@@ -389,7 +406,7 @@ const Navbar = () => {
                 initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }} exit={{ height: 0, opacity: 0 }}
               >
                 <div className="px-6 py-4 space-y-2">
-                  {['Dashboard', 'Watchlist', 'Portfolio', 'Performance', 'Markets'].map(item => (
+                  {['Dashboard', 'Watchlist', 'Portfolio', 'Orders', 'Performance', 'Markets'].map(item => (
                     <a key={item} onClick={() => {
                         navigate(`/${item.toLowerCase() === 'dashboard' ? '' : item.toLowerCase()}`);
                         setIsMobileMenuOpen(false);

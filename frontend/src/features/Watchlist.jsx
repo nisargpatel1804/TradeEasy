@@ -70,26 +70,54 @@ const Watchlist = () => {
   // Subscribe to real-time price updates
   useEffect(() => {
     const unsubscribe = priceUpdateService.subscribe((priceData) => {
-      const { allPrices, changedPrices, isConnected = false } = priceData;
-      
-      if (isConnected && changedPrices) {
-        const symbolsToFlash = Object.keys(changedPrices);
-        setUpdatedSymbols(prev => ({ ...prev, ...symbolsToFlash.reduce((acc, sym) => ({ ...acc, [sym]: true }), {}) }));
+      const {
+        allPrices,
+        changedPrices = {},
+        isConnected: priceFeedConnected = false,
+        isStreamingPaused = false,
+        connectionEvent = null,
+      } = priceData;
+
+      if (connectionEvent === 'disconnected') {
+        setUpdatedSymbols({});
+      }
+
+      const symbolsToFlash = Object.keys(changedPrices || {});
+      const shouldFlash = priceFeedConnected && !isStreamingPaused && symbolsToFlash.length > 0;
+
+      if (shouldFlash) {
+        setUpdatedSymbols(prev => ({
+          ...prev,
+          ...symbolsToFlash.reduce((acc, sym) => ({ ...acc, [sym]: true }), {}),
+        }));
         setTimeout(() => {
           setUpdatedSymbols(prev => {
-            const newUpdates = { ...prev };
-            symbolsToFlash.forEach(sym => delete newUpdates[sym]);
-            return newUpdates;
+            const next = { ...prev };
+            symbolsToFlash.forEach(sym => delete next[sym]);
+            return next;
           });
         }, 600);
       }
-      
+
+      if (isStreamingPaused && !shouldFlash) {
+        setUpdatedSymbols({});
+      }
+
       if (allPrices) {
-        setWatchlistStocks(prevStocks => 
-          Array.isArray(prevStocks) ? prevStocks.map(stock => {
-            const newPriceData = allPrices[stock.symbol];
-            return newPriceData ? { ...stock, price: newPriceData.ltp, change: newPriceData.change, percent_change: newPriceData.percent_change } : stock;
-          }) : []
+        setWatchlistStocks(prevStocks =>
+          Array.isArray(prevStocks)
+            ? prevStocks.map(stock => {
+                const newPriceData = allPrices[stock.symbol];
+                return newPriceData
+                  ? {
+                      ...stock,
+                      price: newPriceData.ltp,
+                      change: newPriceData.change,
+                      percent_change: newPriceData.percent_change,
+                    }
+                  : stock;
+              })
+            : []
         );
       }
     });
@@ -99,13 +127,14 @@ const Watchlist = () => {
 
   // Debounced search
   const debouncedSearch = useCallback(debounce(async (query) => {
-    if (!query) {
+    const trimmedQuery = (query || "").trim();
+    if (!trimmedQuery) {
       setSearchResults([]);
       setSearching(false);
       return;
     }
     try {
-      const results = await searchStocks(query);
+      const results = await searchStocks(trimmedQuery);
       const currentSymbols = new Set(watchlistStocks.map(s => s.symbol));
       setSearchResults(results.filter(r => !currentSymbols.has(r.symbol)));
     } catch (error) {
@@ -150,7 +179,13 @@ const Watchlist = () => {
         setShowSearchResults(false);
       }
     } catch (error) {
-      toast.error(error.message || "Failed to add stock.");
+      if (error?.status === 409) {
+        toast.error(error.message || "Watchlist update conflict detected.");
+      } else if (error?.status === 400) {
+        toast.error(error.message || "Invalid stock details provided.");
+      } else {
+        toast.error(error?.message || "Failed to add stock.");
+      }
     } finally {
       setIsAddingStock(null);
     }

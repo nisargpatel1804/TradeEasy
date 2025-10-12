@@ -17,6 +17,7 @@ import Indices from "./features/Indices.jsx";
 import OrderDetail from "./features/OrderDetail.jsx";
 import NotFoundPage from './features/NotFoundPage.jsx';
 import Navbar from "./features/Navbar.jsx";
+import { Toaster } from "@/assets/ui/toaster.jsx";
 
 /**
  * A wrapper component that protects routes requiring authentication.
@@ -77,6 +78,7 @@ function App() {
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </main>
+      <Toaster />
     </div>
   );
 }
