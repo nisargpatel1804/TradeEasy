@@ -25,8 +25,8 @@ import { Toaster } from "./assets/ui/toaster.jsx";
  * Otherwise, it redirects the user to the login page.
  */
 const ProtectedRoute = ({ children }) => {
-  const { isLoggedIn } = useAuth();
-  if (!isLoggedIn) {
+  const { isAuthenticated } = useAuth();
+  if (!isAuthenticated) {
     // The 'replace' prop prevents the user from navigating back to the protected route
     return <Navigate to="/login" replace />;
   }
@@ -43,21 +43,21 @@ const TradePage = () => {
 };
 
 function App() {
-  const { isLoggedIn } = useAuth();
+  const { isAuthenticated } = useAuth();
 
   return (
     <div className="flex flex-col min-h-screen bg-gray-50 text-gray-900">
       {/* The Navbar will only be displayed for logged-in users */}
-      {isLoggedIn && <Navbar />}
+      {isAuthenticated && <Navbar />}
       
       <main className="flex-grow p-4 md:p-6 lg:p-8">
         <Routes>
           {/* --- Public Routes --- */}
           {/* These routes are accessible to everyone. If a logged-in user tries to
               access them, they are redirected to their dashboard. */}
-          <Route path="/" element={isLoggedIn ? <Navigate to="/dashboard" /> : <LandingPage />} />
-          <Route path="/login" element={isLoggedIn ? <Navigate to="/dashboard" /> : <LoginPage />} />
-          <Route path="/signup" element={isLoggedIn ? <Navigate to="/dashboard" /> : <SignupPage />} />
+          <Route path="/" element={isAuthenticated ? <Navigate to="/dashboard" /> : <LandingPage />} />
+          <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" /> : <LoginPage />} />
+          <Route path="/signup" element={isAuthenticated ? <Navigate to="/dashboard" /> : <SignupPage />} />
 
           {/* --- Protected Routes --- */}
           {/* These routes are wrapped with the ProtectedRoute component to ensure

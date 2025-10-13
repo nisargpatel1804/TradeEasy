@@ -66,7 +66,11 @@ const StockSearch = () => {
 
     const toastId = toast.loading(`Adding ${stock.symbol}...`);
     try {
-      await api.addStockToWatchlist(defaultWatchlist.name, stock.symbol, stock.name, stock.scripcode);
+      await api.addStockToWatchlist(defaultWatchlist.name, {
+        symbol: stock.symbol,
+        name: stock.name,
+        scripcode: stock.scripcode
+      });
       toast.success(`${stock.symbol} added to ${defaultWatchlist.name}`, { id: toastId });
       getWatchlists(true); // Refresh watchlists data
       setQuery(""); // Clear search after adding

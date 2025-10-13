@@ -63,25 +63,33 @@ def create_app():
         socket_manager = MO_WebSocket_Manager(socketio_server=socketio)
         socket_manager.start()
 
+        # --- Initialize Task Scheduler for Background Jobs ---
+        from app.scheduler import init_scheduler
+        task_scheduler = init_scheduler(app)
+
         # --- Graceful Shutdown Hook ---
         # Register the shutdown function to be called when the app exits.
-        # This ensures WebSocket connections are closed cleanly.
-        atexit.register(socket_manager.shutdown)
+        # This ensures WebSocket connections and scheduled tasks are closed cleanly.
+        def cleanup():
+            socket_manager.shutdown()
+            task_scheduler.shutdown()
+        
+        atexit.register(cleanup)
 
     # --- Register Blueprints for API Routes ---
     # Grouping blueprint imports and registrations for better organization
     from .routes import auth, markets, orders, portfolio, profile, search, stock, trade, watchlist
     from .db_scrips_populate import data_management_bp
     
-    app.register_blueprint(auth.auth_bp, url_prefix='/api/auth')
-    app.register_blueprint(markets.markets_bp, url_prefix='/api/markets')
-    app.register_blueprint(orders.orders_bp, url_prefix='/api/orders')
-    app.register_blueprint(portfolio.portfolio_bp, url_prefix='/api/portfolio')
-    app.register_blueprint(profile.profile_bp, url_prefix='/api/profile')
-    app.register_blueprint(search.search_bp, url_prefix='/api/search')
-    app.register_blueprint(stock.stock_bp, url_prefix='/api/stock')
-    app.register_blueprint(trade.trade_bp, url_prefix='/api/trade')
-    app.register_blueprint(watchlist.watchlist_bp, url_prefix='/api/watchlist')
+    app.register_blueprint(auth.auth_bp, url_prefix='/api')
+    app.register_blueprint(markets.markets_bp, url_prefix='/api')
+    app.register_blueprint(orders.orders_bp, url_prefix='/api')
+    app.register_blueprint(portfolio.portfolio_bp, url_prefix='/api')
+    app.register_blueprint(profile.profile_bp, url_prefix='/api')
+    app.register_blueprint(search.search_bp, url_prefix='/api')
+    app.register_blueprint(stock.stock_bp, url_prefix='/api')
+    app.register_blueprint(trade.trade_bp, url_prefix='/api')
+    app.register_blueprint(watchlist.watchlist_bp, url_prefix='/api')
     app.register_blueprint(data_management_bp, url_prefix='/api/data')
 
     # --- Health Check Endpoint ---
@@ -115,15 +123,29 @@ def create_app():
     def handle_connect():
         """
         Handles new client connections by sending the latest cached data
-        to immediately populate their UI.
+        to immediately populate their UI and registering their watchlist stocks.
         """
+        from flask_login import current_user
+        
         logger.info(f"Client connected: {request.sid}")
+        
         # Get the singleton instance of the manager
-        manager = MO_WebSocket_Manager() 
+        manager = MO_WebSocket_Manager()
+        
+        # If user is authenticated, register their watchlist stocks for real-time updates
+        if current_user.is_authenticated:
+            try:
+                manager.register_user_watchlist_stocks(current_user.id)
+            except Exception as e:
+                logger.error(f"Error registering watchlist stocks for user {current_user.id}: {e}")
+        
         # Send the latest cached index data to the newly connected client
         latest_indices = manager.get_latest_indices_data()
         if latest_indices:
             emit('initial_indices', latest_indices, room=request.sid)
+        latest_stock_prices = manager.get_latest_stock_data()
+        if latest_stock_prices:
+            emit('initial_stock_prices', latest_stock_prices, room=request.sid)
         # Inform client of current market status
         market_open = manager.mo_api.market_hours.is_market_open()
         emit('market_status', {"isOpen": market_open}, room=request.sid)

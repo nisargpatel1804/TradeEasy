@@ -95,6 +95,23 @@ def populate_scrips_endpoint():
         logger.error(f"Error in /populate-scrips endpoint: {e}", exc_info=True)
         return jsonify({"status": "error", "message": "An internal server error occurred."}), 500
 
+@data_management_bp.route("/trigger-scrip-update", methods=["POST"])
+@login_required
+def trigger_scrip_update():
+    """
+    Manually trigger the daily scrip update job immediately.
+    Useful for testing or on-demand updates.
+    """
+    try:
+        logger.info(f"Manual scrip update triggered by user: {current_user.client_id}")
+        from app.scheduler import TaskScheduler
+        scheduler = TaskScheduler()
+        scheduler.trigger_scrip_update_now()
+        return jsonify({"status": "success", "message": "Scrip update triggered successfully."})
+    except Exception as e:
+        logger.error(f"Error triggering scrip update: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": "Failed to trigger scrip update."}), 500
+
 def populate_scrips_from_scratch():
     """
     Standalone function for a full, clean population of the scrips database.

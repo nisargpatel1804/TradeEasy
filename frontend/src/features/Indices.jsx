@@ -10,7 +10,7 @@ import { Button } from '../assets/ui/button.jsx';
 
 const Indices = () => {
   const { indicesData: initialIndices, isLoadingIndices, indicesError, getInitialIndices } = useDataContext();
-  const { isConnected } = useSocket();
+  const { isConnected, isReconnecting, connectionStatus, lastError } = useSocket();
   const [indices, setIndices] = useState([]);
 
   useEffect(() => {
@@ -22,23 +22,36 @@ const Indices = () => {
 
   useEffect(() => {
     // Subscribe to real-time updates
-    const onPriceUpdate = (data) => {
+    const unsubscribe = priceUpdateService.subscribe(update => {
       setIndices(prevIndices => {
-        const updatedIndices = { ...data.allPrices };
-        // Create a map for efficient lookups
+        if (update?.type === 'reset') {
+          return prevIndices;
+        }
+
+        let changes = null;
+
+        if (update?.type === 'snapshot' && update?.allPrices && Object.keys(update.allPrices).length > 0) {
+          changes = update.allPrices;
+        } else if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
+          changes = update.changedPrices;
+        }
+
+        if (!changes) {
+          return prevIndices;
+        }
+
         const indexMap = new Map(prevIndices.map(i => [i.symbol, i]));
 
-        // Update based on incoming data
-        for (const symbol in updatedIndices) {
-            if (indexMap.has(symbol)) {
-                indexMap.set(symbol, { ...indexMap.get(symbol), ...updatedIndices[symbol] });
-            }
+        for (const [symbol, value] of Object.entries(changes)) {
+          if (indexMap.has(symbol)) {
+            indexMap.set(symbol, { ...indexMap.get(symbol), ...value });
+          }
         }
+
         return Array.from(indexMap.values());
       });
-    };
+    });
 
-    const unsubscribe = priceUpdateService.subscribe(onPriceUpdate);
     return () => unsubscribe();
   }, []);
 
@@ -119,8 +132,19 @@ const Indices = () => {
        <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Market Overview</h1>
          <div className="flex items-center gap-2">
-           <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} title={isConnected ? 'Live connection' : 'Disconnected'}></div>
-           <span className="text-sm font-medium text-gray-600 dark:text-gray-300">{isConnected ? 'Live' : 'Offline'}</span>
+           <div
+             className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : isReconnecting ? 'bg-amber-400' : 'bg-red-500'}`}
+             title={
+               isConnected
+                 ? 'Live market data connected'
+                 : isReconnecting
+                   ? 'Reconnecting to live market data'
+                   : lastError?.message || 'Live market data disconnected'
+             }
+           ></div>
+           <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
+             {connectionStatus === 'reconnecting' ? 'Reconnecting…' : isConnected ? 'Live' : 'Offline'}
+           </span>
         </div>
       </div>
       {renderContent()}

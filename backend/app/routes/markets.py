@@ -46,6 +46,27 @@ def _to_rupees(paisa_value):
     except (ValueError, TypeError):
         return 0.0
 
+def _normalize_price_map(raw_data, key_candidates):
+    """Converts the API's price payload into a dictionary keyed by the first matching identifier."""
+    if isinstance(raw_data, dict):
+        return raw_data
+
+    normalized = {}
+    if isinstance(raw_data, list):
+        for entry in raw_data:
+            if not isinstance(entry, dict):
+                continue
+
+            for key in key_candidates:
+                identifier = entry.get(key)
+                if identifier is None or identifier == "":
+                    continue
+
+                normalized[str(identifier)] = entry
+                break
+
+    return normalized
+
 def _get_index_constituents(exchange, search_terms):
     """Finds constituent scrips for a major index from the database."""
     search_query = Q(exchangename=exchange) & (Q(scripname__in=search_terms) | Q(scripshortname__in=search_terms))
@@ -83,12 +104,12 @@ def get_market_indices():
         formatted_indices = []
         for exchange in ["NSE", "BSE"]:
             master_resp = _get_cached_or_fetch(f"index_master_{exchange}", mo_api.get_index_data, exchange)
-            price_resp = _get_cached_or_fetch(f"bulk_eod_{exchange}", mo_api.get_bulk_eod_data, exchange)
+            price_resp = _get_cached_or_fetch(f"eod_{exchange}", mo_api.get_eod_data, exchange)
 
             if not (master_resp and master_resp.get("status") == "SUCCESS" and price_resp and price_resp.get("status") == "SUCCESS"):
                 continue
 
-            price_map = price_resp.get("data", {})
+            price_map = _normalize_price_map(price_resp.get("data"), ["indexcode", "scripcode"])
             for index_info in master_resp.get("data", []):
                 price_data = price_map.get(str(index_info.get("indexcode")))
                 if price_data:

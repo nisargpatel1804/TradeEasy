@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect, useContext, useCallback } from 'react';
+import React, { createContext, useState, useEffect, useContext, useCallback, useRef } from 'react';
 import { useAuth } from './AuthContext.jsx';
 import * as api from '../services/api.js';
 
@@ -24,11 +24,140 @@ export const useDataContext = useData;
  */
 export const DataProvider = ({ children }) => {
   const { isAuthenticated } = useAuth();
-  const [profile, setProfile] = useState(null);
-  const [watchlists, setWatchlists] = useState([]);
-  const [indices, setIndices] = useState([]);
+
+  const [profileData, setProfileData] = useState(null);
+  const [watchlistsData, setWatchlistsData] = useState(null);
+  const [indicesData, setIndicesData] = useState([]);
+
+  const profileRef = useRef(profileData);
+  const watchlistsRef = useRef(watchlistsData);
+  const indicesRef = useRef(indicesData);
+
+  const updateProfileData = useCallback((data) => {
+    profileRef.current = data;
+    setProfileData(data);
+  }, []);
+
+  const updateWatchlistsData = useCallback((data) => {
+    watchlistsRef.current = data;
+    setWatchlistsData(data);
+  }, []);
+
+  const updateIndicesData = useCallback((data) => {
+    indicesRef.current = data;
+    setIndicesData(data);
+  }, []);
+
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingProfile, setIsLoadingProfile] = useState(false);
+  const [isLoadingWatchlists, setIsLoadingWatchlists] = useState(false);
+  const [isLoadingIndices, setIsLoadingIndices] = useState(true);
+
   const [error, setError] = useState(null);
+  const [indicesError, setIndicesError] = useState(null);
+
+  const resetState = useCallback(() => {
+    updateProfileData(null);
+    updateWatchlistsData(null);
+    updateIndicesData([]);
+    setIsLoading(false);
+    setIsLoadingProfile(false);
+    setIsLoadingWatchlists(false);
+    setIsLoadingIndices(false);
+    setError(null);
+    setIndicesError(null);
+  }, [updateProfileData, updateWatchlistsData, updateIndicesData]);
+
+  const getProfile = useCallback(
+    async (force = false) => {
+      if (!isAuthenticated) {
+        updateProfileData(null);
+        return null;
+      }
+
+      if (!force && profileRef.current) {
+        return profileRef.current;
+      }
+
+      setIsLoadingProfile(true);
+      setError(null);
+
+      try {
+  const response = await api.getProfile();
+  const profile = response?.profile ?? response ?? null;
+  updateProfileData(profile);
+        return profile;
+      } catch (err) {
+        console.error('Failed to load profile:', err);
+        setError(err.message || 'Could not load profile.');
+        throw err;
+      } finally {
+        setIsLoadingProfile(false);
+      }
+    },
+    [isAuthenticated, updateProfileData]
+  );
+
+  const refreshProfile = useCallback(() => getProfile(true), [getProfile]);
+
+  const getWatchlists = useCallback(
+    async (force = false) => {
+      if (!isAuthenticated) {
+        updateWatchlistsData(null);
+        return null;
+      }
+
+      if (!force && watchlistsRef.current) {
+        return watchlistsRef.current;
+      }
+
+      setIsLoadingWatchlists(true);
+
+      try {
+  const response = await api.getWatchlists();
+  updateWatchlistsData(response);
+        return response;
+      } catch (err) {
+        console.error('Failed to load watchlists:', err);
+        setError(err.message || 'Could not load watchlists.');
+        throw err;
+      } finally {
+        setIsLoadingWatchlists(false);
+      }
+    },
+    [isAuthenticated, updateWatchlistsData]
+  );
+
+  const getInitialIndices = useCallback(
+    async (force = false) => {
+      if (!isAuthenticated) {
+        updateIndicesData([]);
+        return [];
+      }
+
+      if (!force && Array.isArray(indicesRef.current) && indicesRef.current.length > 0) {
+        return indicesRef.current;
+      }
+
+      setIsLoadingIndices(true);
+      setIndicesError(null);
+
+      try {
+        const response = await api.getMarketIndices();
+        const indices = Array.isArray(response?.indices) ? response.indices : [];
+        updateIndicesData(indices);
+        return indices;
+      } catch (err) {
+        console.error('Failed to load indices:', err);
+        updateIndicesData([]);
+        setIndicesError(err.message || 'Could not load market indices.');
+        throw err;
+      } finally {
+        setIsLoadingIndices(false);
+      }
+    },
+    [isAuthenticated, updateIndicesData]
+  );
 
   /**
    * Fetches all essential application data from the backend.
@@ -36,62 +165,46 @@ export const DataProvider = ({ children }) => {
    */
   const fetchInitialData = useCallback(async () => {
     if (!isAuthenticated) {
-        // Clear data when user logs out
-        setProfile(null);
-        setWatchlists([]);
-        setIndices([]);
-        return;
-    };
+      resetState();
+      return;
+    }
 
     setIsLoading(true);
     setError(null);
 
     try {
-      // Fetch all data in parallel for better performance
-      const [profileData, watchlistsData, indicesData] = await Promise.all([
-        api.getProfile(),
-        api.getWatchlists(),
-        api.getMarketIndices(),
+      await Promise.allSettled([
+        getProfile(true),
+        getWatchlists(true),
+        getInitialIndices(true),
       ]);
-
-      setProfile(profileData.profile);
-      setWatchlists(watchlistsData.watchlists);
-      setIndices(indicesData.indices);
-      
-    } catch (err) {
-      console.error("Failed to fetch initial application data:", err);
-      setError(err.message || "Could not load data.");
     } finally {
       setIsLoading(false);
     }
-  }, [isAuthenticated]);
+  }, [getInitialIndices, getProfile, getWatchlists, isAuthenticated, resetState]);
 
   // Effect to trigger the initial data fetch when the user's authentication state changes.
   useEffect(() => {
     fetchInitialData();
   }, [fetchInitialData]);
 
-  /**
-   * Provides a function to manually refetch the watchlists.
-   * Useful after a user creates a new watchlist or adds a stock.
-   */
-  const refetchWatchlists = async () => {
-    try {
-  const watchlistsData = await api.getWatchlists();
-      setWatchlists(watchlistsData.watchlists);
-    } catch (err) {
-      console.error("Failed to refetch watchlists:", err);
-    }
-  };
-
   const contextValue = {
-    profile,
-    watchlists,
-    indices,
+    profileData,
+    watchlistsData,
+    indicesData,
     isLoading,
+    isLoadingProfile,
+    isLoadingWatchlists,
+    isLoadingIndices,
     error,
-    refetchWatchlists,
-    // We will add functions here later to update indices from WebSocket data
+    indicesError,
+    getProfile,
+    refreshProfile,
+    getWatchlists,
+    getInitialIndices,
+    // Backwards compatibility conveniences
+    profile: profileData,
+    watchlists: watchlistsData?.watchlists ?? [],
   };
 
   return (

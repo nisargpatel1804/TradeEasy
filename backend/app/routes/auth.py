@@ -124,7 +124,15 @@ def logout():
     try:
         user_id = current_user.client_id
         logout_user()
-        session.clear()
+
+        # Remove application-specific session data while preserving
+        # Flask-Login's internal markers (e.g. _remember) so the
+        # framework can properly clear persistent cookies.
+        for key in list(session.keys()):
+            if not key.startswith('_'):
+                session.pop(key, None)
+
+        session.modified = True
         logger.info(f"User {user_id} logged out.")
         return jsonify({"success": True, "message": "You have been successfully logged out."}), 200
     except Exception as e:

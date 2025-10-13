@@ -15,7 +15,7 @@ import { Skeleton } from "../assets/ui/skeleton.jsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../assets/ui/table.jsx";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../assets/ui/dialog.jsx";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "../assets/ui/dropdown-menu.jsx";
-import { Search, Plus, Trash2, Loader2, TrendingUp, TrendingDown } from "lucide-react";
+import { Search, Plus, Trash2, Loader2, TrendingUp, TrendingDown, AlertTriangle } from "lucide-react";
 
 import TradeForm from "./TradeForm.jsx";
 import { Card, CardContent } from "../assets/ui/card.jsx";
@@ -23,7 +23,7 @@ import { Card, CardContent } from "../assets/ui/card.jsx";
 const Watchlist = () => {
     const navigate = useNavigate();
     const { watchlistsData, getWatchlists } = useDataContext();
-    const { isConnected } = useSocket();
+    const { connectionStatus } = useSocket();
 
     const [activeWatchlistName, setActiveWatchlistName] = useState("");
     const [stocks, setStocks] = useState([]);
@@ -58,8 +58,21 @@ const Watchlist = () => {
 
     // --- Real-time Price Updates ---
     useEffect(() => {
-        const unsubscribe = priceUpdateService.subscribe(data => {
-            setLivePrices(data.allPrices);
+        const unsubscribe = priceUpdateService.subscribe(update => {
+            setLivePrices(prev => {
+                if (update?.type === 'snapshot' || update?.type === 'reset') {
+                    return update?.allPrices || {};
+                }
+
+                if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
+                    return {
+                        ...prev,
+                        ...update.changedPrices,
+                    };
+                }
+
+                return prev;
+            });
         });
         return () => unsubscribe();
     }, []);
@@ -73,6 +86,64 @@ const Watchlist = () => {
             return liveData ? { ...stock, ...liveData } : stock;
         }).filter(Boolean); // Filter out any null/invalid stock entries
     }, [stocks, livePrices]);
+
+    // --- Initial Snapshot Fallback ---
+    useEffect(() => {
+        if (!Array.isArray(stocks) || stocks.length === 0) {
+            return;
+        }
+
+        const symbolsNeedingSnapshot = Array.from(new Set(
+            stocks
+                .map(stock => stock?.symbol)
+                .filter(Boolean)
+                .filter(symbol => !priceUpdateService.getLatestPrice(symbol))
+        ));
+
+        if (symbolsNeedingSnapshot.length === 0) {
+            return;
+        }
+
+        let isActive = true;
+
+        const fetchInitialSnapshot = async () => {
+            try {
+                const response = await api.batchGetStockData(symbolsNeedingSnapshot);
+                const batchData = response?.data || {};
+                const priceMap = {};
+
+                symbolsNeedingSnapshot.forEach(fullSymbol => {
+                    const baseSymbol = fullSymbol.includes('.') ? fullSymbol.split('.')[0] : fullSymbol;
+                    const apiPayload = batchData?.[baseSymbol];
+                    if (!apiPayload || apiPayload.error) {
+                        return;
+                    }
+
+                    priceMap[fullSymbol] = {
+                        symbol: fullSymbol,
+                        ltp: apiPayload.ltp,
+                        change: apiPayload.change,
+                        percent_change: apiPayload.percent_change,
+                        volume: apiPayload.volume,
+                        last_updated: apiPayload.last_updated,
+                        entityType: 'stock',
+                    };
+                });
+
+                if (isActive && Object.keys(priceMap).length > 0) {
+                    priceUpdateService.seedPrices(priceMap);
+                }
+            } catch (error) {
+                console.error('Failed to fetch initial watchlist prices:', error);
+            }
+        };
+
+        fetchInitialSnapshot();
+
+        return () => {
+            isActive = false;
+        };
+    }, [stocks]);
 
     // --- Handlers ---
     const handleTradeClick = (stock, action) => {
@@ -128,6 +199,24 @@ const Watchlist = () => {
                     />
                 </div>
             </header>
+
+            {connectionStatus !== 'connected' && (
+                <div className="mb-6 flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+                    <div>
+                        <p className="font-semibold">
+                            {connectionStatus === 'reconnecting'
+                                ? 'Reconnecting to live market data…'
+                                : 'Live market data is temporarily unavailable.'}
+                        </p>
+                        <p className="mt-1 text-amber-700">
+                            {connectionStatus === 'reconnecting'
+                                ? 'We are attempting to restore live price updates in the background. You can continue managing your watchlist.'
+                                : 'Live price updates are paused. Recently added stocks will still appear with their last known prices.'}
+                        </p>
+                    </div>
+                </div>
+            )}
             
             <Card className="shadow-lg">
                 <CardContent className="p-0">
@@ -273,21 +362,39 @@ const StockSearch = ({ onAddSuccess }) => {
     }, [query, debouncedSearch]);
 
     const handleAddStock = async (e, stock) => {
+        e.preventDefault();
         e.stopPropagation();
         const defaultWatchlist = watchlistsData?.watchlists.find(w => !w.is_deletable);
         if (!defaultWatchlist) {
             toast.error("Your primary watchlist could not be found.");
             return;
         }
+        const existingSymbols = new Set((defaultWatchlist.stocks || []).map(item => item?.symbol?.toUpperCase()).filter(Boolean));
+        if (existingSymbols.has(stock.symbol.toUpperCase())) {
+            toast(`'${stock.symbol}' is already in ${defaultWatchlist.name}.`, {
+                icon: 'ℹ️',
+            });
+            setQuery("");
+            setResults([]);
+            return;
+        }
+
         const toastId = toast.loading(`Adding ${stock.symbol}...`);
         try {
-            await api.addStockToWatchlist(defaultWatchlist.name, stock.symbol, stock.name, stock.scripcode);
+            await api.addStockToWatchlist(defaultWatchlist.name, {
+                symbol: stock.symbol,
+                name: stock.name,
+                scripcode: stock.scripcode
+            });
             toast.success(`${stock.symbol} added to ${defaultWatchlist.name}`, { id: toastId });
             setQuery("");
             setResults([]);
             if(onAddSuccess) onAddSuccess();
         } catch (error) {
-            toast.error(error.message || `Failed to add ${stock.symbol}`, { id: toastId });
+            const friendlyMessage = error?.status === 409
+                ? `'${stock.symbol}' is already in ${defaultWatchlist.name}.`
+                : (error?.message || `Failed to add ${stock.symbol}`);
+            toast.error(friendlyMessage, { id: toastId });
         }
     };
 
@@ -318,14 +425,22 @@ const StockSearch = ({ onAddSuccess }) => {
                         <div className="p-4 text-center text-sm text-gray-500">Searching...</div>
                     ) : results.length > 0 ? (
                     results.map((stock) => (
-                        <div key={stock.symbol} className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b dark:border-gray-700 last:border-b-0 flex items-center justify-between">
-                        <div>
+                        <div 
+                            key={stock.symbol} 
+                            className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b dark:border-gray-700 last:border-b-0 flex items-center justify-between group"
+                        >
+                        <div className="flex-1 min-w-0">
                             <div className="font-medium">{stock.symbol}</div>
                             <div className="text-sm text-gray-600 dark:text-gray-400 truncate">{stock.name}</div>
                         </div>
-                        <Button variant="ghost" size="icon" onClick={(e) => handleAddStock(e, stock)}>
+                        <button
+                            type="button"
+                            onClick={(e) => handleAddStock(e, stock)}
+                            className="shrink-0 ml-2 p-2 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                            aria-label={`Add ${stock.symbol} to watchlist`}
+                        >
                             <Plus className="h-4 w-4" />
-                        </Button>
+                        </button>
                         </div>
                     ))
                     ) : (

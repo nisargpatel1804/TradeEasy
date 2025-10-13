@@ -31,6 +31,13 @@ class Stock(Document):
     instrument_type = StringField(max_length=20, default="EQUITY")
     is_active = BooleanField(default=True)
     
+    # Real-time market data fields (updated via WebSocket or API)
+    current_price = FloatField()
+    change = FloatField()
+    percent_change = FloatField()
+    volume = IntField()
+    last_updated = DateTimeField()
+    
     meta = {
         'collection': 'stocks',
         'indexes': [
@@ -126,14 +133,23 @@ class AQScrip(Document):
     scripisinno = StringField(max_length=20)
     isbanscrip = StringField(max_length=1, default="N")
     issuspended = StringField(max_length=1, default="N")
+    # Additional fields from Motilal Oswal API
+    markettype = StringField(max_length=10)
+    foexposurepercent = FloatField()
+    facevalue = FloatField()
+    calevel = IntField()
+    maxqtyperorder = IntField()
+    algoid = IntField()
+    indicesidentifier = IntField()
+    ultoken = StringField(max_length=20)
     created_at = DateTimeField(default=datetime.utcnow)
     updated_at = DateTimeField(default=datetime.utcnow)
 
     meta = {
         'collection': 'AQ_scrips',
         'indexes': [
-            # Unique compound index to prevent duplicates and speed up lookups
-            {'fields': ('scripcode', 'exchangename'), 'unique': True},
+            # Compound index to speed up lookups (non-unique to match existing DB index)
+            {'fields': ('scripcode', 'exchangename')},
             'exchangename',
             'instrumentname',
             'scripshortname'

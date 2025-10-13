@@ -66,8 +66,21 @@ const DashboardPage = () => {
     
     // Subscribe to price updates
     useEffect(() => {
-        const unsubscribe = priceUpdateService.subscribe(data => {
-            setLivePrices(data.allPrices);
+        const unsubscribe = priceUpdateService.subscribe(update => {
+            setLivePrices(prev => {
+                if (update?.type === 'snapshot' || update?.type === 'reset') {
+                    return update?.allPrices || {};
+                }
+
+                if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
+                    return {
+                        ...prev,
+                        ...update.changedPrices,
+                    };
+                }
+
+                return prev;
+            });
         });
         return () => unsubscribe();
     }, []);

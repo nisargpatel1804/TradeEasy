@@ -34,8 +34,8 @@ class MO_WebSocket_Manager:
                 self.socketio = socketio_server
                 logger.info("SocketIO server attached to existing MO_WebSocket_Manager instance.")
             return
-            
-        self.mo_api = MotilalOswalAPI(use_test_url=False)
+
+        self.mo_api = MotilalOswalAPI()
         self.socketio = socketio_server
         self.force_connect = force_connect
 
@@ -43,6 +43,7 @@ class MO_WebSocket_Manager:
         self.is_connected = False
         self.ws_authed = False # Tracks if the binary login handshake is complete
         self.stop_event = threading.Event()
+        self.data_lock = threading.Lock()
         
         # Background threads
         self.manager_thread = None
@@ -50,16 +51,18 @@ class MO_WebSocket_Manager:
         
         # Data caches and mappings
         self.latest_indices_data = {}
+        self.latest_stock_data = {}
         self.index_codes_map = {}
-        self.scrip_to_symbol_map = {} # Maps scripcode to full symbol (e.g., '3456' -> 'RELIANCE.NSE')
+        self.scrip_to_symbol_map = {} # Maps 'EXCHANGE:SCRIPCODE' to a user-friendly symbol string
         self.scrip_prev_close = {}    # Caches previous day's close for change calculations
 
         # Subscription tracking
-        self.registered_scrips = set() # Tracks scrips to subscribe to, format: 'EXCHANGE:SCRIPCODE'
+        self.registered_scrips = set() # Tracks scrip subscriptions, format: 'EXCHANGE:EXCHANGETYPE:SCRIPCODE'
         
         self.initialized = True
         logger.info("MO WebSocket Manager initialized.")
         self._load_initial_index_data()
+        # Note: Watchlist scrips are loaded on-demand when users connect, not at startup
 
     def start(self):
         """Starts the WebSocket connection manager in a background thread."""
@@ -90,8 +93,8 @@ class MO_WebSocket_Manager:
                 self.mo_api.unregister_index("BSE")
                 for scrip_key in list(self.registered_scrips):
                     try:
-                        exchange, scripcode = scrip_key.split(':')
-                        self.mo_api.unregister_scrip(exchange, int(scripcode))
+                        exchange, exchange_type, scripcode = scrip_key.split(':')
+                        self.mo_api.unregister_scrip(exchange, int(scripcode), exchange_type)
                         time.sleep(0.05)
                     except Exception as e:
                         logger.warning(f"Error unsubscribing {scrip_key}: {e}")
@@ -111,29 +114,30 @@ class MO_WebSocket_Manager:
             self.is_connected = False
             self.ws_authed = False
 
-    def register_scrip(self, symbol, exchange, scripcode):
+    def register_scrip(self, symbol, exchange, scripcode, exchange_type="CASH"):
         """
         Adds a scrip to the subscription list. If already connected, it subscribes
         immediately. Otherwise, it will be subscribed upon the next connection.
         """
-        scrip_key = f"{exchange}:{scripcode}"
-        self.scrip_to_symbol_map[str(scripcode)] = symbol
+        composite_key = f"{exchange.upper()}:{exchange_type.upper()}:{int(scripcode)}"
+        self.scrip_to_symbol_map[f"{exchange.upper()}:{int(scripcode)}"] = symbol
         
-        if scrip_key not in self.registered_scrips:
-            self.registered_scrips.add(scrip_key)
-            logger.info(f"Queued subscription for {symbol} ({scrip_key})")
+        if composite_key not in self.registered_scrips:
+            self.registered_scrips.add(composite_key)
+            logger.info(f"Queued subscription for {symbol} ({composite_key})")
             
             if self.is_connected and self.ws_authed:
-                self.mo_api.register_scrip(exchange, int(scripcode))
+                self.mo_api.register_scrip(exchange, int(scripcode), exchange_type)
 
-    def unregister_scrip(self, exchange, scripcode):
+    def unregister_scrip(self, exchange, scripcode, exchange_type="CASH"):
         """Removes a scrip from the subscription list and unsubscribes if connected."""
-        scrip_key = f"{exchange}:{scripcode}"
-        if scrip_key in self.registered_scrips:
-            self.registered_scrips.remove(scrip_key)
-            logger.info(f"Queued unsubscription for {scrip_key}")
+        composite_key = f"{exchange.upper()}:{exchange_type.upper()}:{int(scripcode)}"
+        if composite_key in self.registered_scrips:
+            self.registered_scrips.remove(composite_key)
+            logger.info(f"Queued unsubscription for {composite_key}")
             if self.is_connected and self.ws_authed:
-                self.mo_api.unregister_scrip(exchange, int(scripcode))
+                self.mo_api.unregister_scrip(exchange, int(scripcode), exchange_type)
+        self.scrip_to_symbol_map.pop(f"{exchange.upper()}:{int(scripcode)}", None)
 
     def _run(self):
         """Main loop that maintains the WebSocket connection with exponential backoff."""
@@ -189,46 +193,49 @@ class MO_WebSocket_Manager:
     def _on_message(self, ws, message):
         """Processes incoming binary messages and emits formatted data via Socket.IO."""
         try:
-            data = MOPacketParser.parse_packet(message)
-            if not data: return
+            packets = MOPacketParser.parse_packet(message)
+            if not packets:
+                return
 
-            packet_type = data.get('packet_type')
-            scrip_code_str = str(data.get('Scrip Code', ''))
+            for data in packets:
+                packet_type = data.get('packet_type')
+                exchange = str(data.get('Exchange', '')).upper()
+                scrip_code_str = str(data.get('Scrip Code', ''))
+                composite_scrip_key = f"{exchange}:{scrip_code_str}" if exchange and scrip_code_str else scrip_code_str
 
-            if packet_type == 'DayOHLC':
-                self.scrip_prev_close[scrip_code_str] = data.get('PrevDayClose', 0.0)
-                return # This packet is only for caching, not for UI update
+                if packet_type == 'DayOHLC':
+                    self.scrip_prev_close[composite_scrip_key] = data.get('PrevDayClose', 0.0)
+                    continue
 
-            # Handle Index updates
-            if packet_type == 'Index' and scrip_code_str in self.index_codes_map:
-                self._process_index_update(data)
-            # Handle Stock updates
-            elif packet_type == 'LTP' and str(data.get('Scrip Code')) in self.scrip_to_symbol_map:
-                self._process_stock_update(data)
+                if packet_type == 'Index' and scrip_code_str in self.index_codes_map:
+                    self._process_index_update(data)
+                elif packet_type == 'LTP' and composite_scrip_key in self.scrip_to_symbol_map:
+                    self._process_stock_update(data)
 
         except Exception as e:
             logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
 
     def _process_stock_update(self, data):
         """Formats and emits a stock LTP update."""
+        exchange = str(data.get('Exchange', '')).upper()
         scrip_code_str = str(data.get('Scrip Code'))
-        symbol = self.scrip_to_symbol_map.get(scrip_code_str)
+        composite_key = f"{exchange}:{scrip_code_str}" if exchange else scrip_code_str
+        symbol = self.scrip_to_symbol_map.get(composite_key)
         ltp = data.get('LTP_Rate', 0.0)
 
         if not symbol or ltp <= 0: return
         
-        prev_close = self.scrip_prev_close.get(scrip_code_str, 0.0)
-        change = ltp - prev_close if prev_close > 0 else 0.0
-        percent_change = (change / prev_close * 100) if prev_close > 0 else 0.0
+        prev_close = self.scrip_prev_close.get(composite_key, 0.0)
+        volume = data.get('LTP_Cumulative Qty', 0)
+        payload = self._compose_stock_payload(
+            symbol=symbol,
+            ltp=ltp,
+            prev_close=prev_close,
+            volume=volume
+        )
 
-        payload = {
-            'symbol': symbol,
-            'ltp': round(ltp, 2),
-            'change': round(change, 2),
-            'percent_change': round(percent_change, 2),
-            'volume': data.get('LTP_Cumulative Qty', 0),
-            'last_updated': int(time.time() * 1000)
-        }
+        with self.data_lock:
+            self.latest_stock_data[symbol] = payload
         if self.socketio:
             self.socketio.emit('stock_update', payload)
         logger.debug(f"Emitted STOCK update for {symbol}: {payload}")
@@ -241,7 +248,8 @@ class MO_WebSocket_Manager:
 
         if not index_info or ltp <= 0: return
 
-        prev_close = self.scrip_prev_close.get(scrip_code_str, 0.0)
+        exchange_key = index_info.get('exchange', '').upper()
+        prev_close = self.scrip_prev_close.get(f"{exchange_key}:{scrip_code_str}", 0.0)
         change = ltp - prev_close if prev_close > 0 else 0.0
         percent_change = (change / prev_close * 100) if prev_close > 0 else 0.0
 
@@ -257,6 +265,121 @@ class MO_WebSocket_Manager:
         if self.socketio:
             self.socketio.emit('index_update', payload)
         logger.debug(f"Emitted INDEX update for {payload['name']}: {payload}")
+
+    def _compose_stock_payload(self, symbol, ltp, prev_close, volume=0, timestamp=None):
+        """Creates a normalized payload dictionary for stock updates."""
+        timestamp = timestamp or int(time.time() * 1000)
+        change = ltp - prev_close if prev_close and prev_close > 0 else 0.0
+        percent_change = (change / prev_close * 100) if prev_close and prev_close > 0 else 0.0
+
+        return {
+            'symbol': symbol,
+            'ltp': round(ltp, 2),
+            'change': round(change, 2),
+            'percent_change': round(percent_change, 2),
+            'volume': volume,
+            'last_updated': timestamp
+        }
+
+    def get_latest_stock_data(self, symbols=None):
+        """Returns a snapshot of the latest cached stock data."""
+        with self.data_lock:
+            if symbols is None:
+                return {symbol: payload.copy() for symbol, payload in self.latest_stock_data.items()}
+
+            if isinstance(symbols, str):
+                symbols = [symbols]
+
+            snapshot = {}
+            for symbol in symbols:
+                payload = self.latest_stock_data.get(symbol)
+                if payload:
+                    snapshot[symbol] = payload.copy()
+            return snapshot
+
+    def _preload_watchlist_scrips(self):
+        """Registers watchlist stocks and seeds cached prices on startup."""
+        try:
+            from app.models import User
+
+            users = User.objects.only('watchlists__stocks')
+            if not users:
+                logger.info("No users found while preloading watchlist scrips.")
+                return
+
+            unique_stocks = {}
+            for user in users:
+                for watchlist in getattr(user, 'watchlists', []) or []:
+                    for stock in getattr(watchlist, 'stocks', []) or []:
+                        if stock and stock.symbol and stock.symbol not in unique_stocks:
+                            unique_stocks[stock.symbol] = stock
+
+            if not unique_stocks:
+                logger.info("No existing watchlist scrips to preload.")
+                return
+
+            logger.info(f"Preloading {len(unique_stocks)} watchlist scrip(s) for live updates...")
+
+            fetch_initial_quotes = True
+            if not self.mo_api.auth_token:
+                try:
+                    fetch_initial_quotes = self.mo_api.login()
+                except Exception as e:
+                    fetch_initial_quotes = False
+                    logger.warning(f"Unable to authenticate MO API during preload: {e}")
+
+            cached_count = 0
+            for stock in unique_stocks.values():
+                try:
+                    exchange = (getattr(stock, 'exchange', None) or 'NSE').upper()
+                    raw_scripcode = getattr(stock, 'scripcode', None)
+                    if raw_scripcode is None:
+                        logger.warning(f"Skipping watchlist scrip {getattr(stock, 'symbol', '?')} due to missing scripcode.")
+                        continue
+                    scripcode = int(raw_scripcode)
+                    self.register_scrip(stock.symbol, exchange, scripcode)
+                    if fetch_initial_quotes:
+                        payload = self._fetch_initial_stock_payload(stock, exchange, scripcode)
+                        if payload:
+                            with self.data_lock:
+                                self.latest_stock_data[stock.symbol] = payload
+                            cached_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to register watchlist scrip {getattr(stock, 'symbol', '?')}: {e}")
+
+            if cached_count:
+                logger.info(f"Cached initial price snapshots for {cached_count} watchlist scrip(s).")
+        except Exception as e:
+            logger.error(f"Failed to preload watchlist scrips: {e}", exc_info=True)
+
+    def _fetch_initial_stock_payload(self, stock, exchange, scripcode):
+        """Fetches the latest LTP for a stock to seed cached data."""
+        try:
+            response = self.mo_api.get_ltp_data(exchange, scripcode)
+            if not response or response.get('status') != 'SUCCESS' or not response.get('data'):
+                return None
+
+            data = response['data']
+            ltp = float(data.get('ltp', 0)) / 100.0
+            prev_close = float(data.get('close', 0)) / 100.0
+            if ltp <= 0:
+                return None
+
+            volume = int(data.get('volume', 0))
+            payload = self._compose_stock_payload(
+                symbol=stock.symbol,
+                ltp=ltp,
+                prev_close=prev_close,
+                volume=volume,
+                timestamp=int(time.time() * 1000)
+            )
+
+            composite_key = f"{exchange}:{scripcode}"
+            self.scrip_prev_close[composite_key] = prev_close
+            return payload
+        except Exception as e:
+            logger.warning(f"Unable to fetch initial price for {getattr(stock, 'symbol', '?')}: {e}")
+            return None
 
     def _on_close(self, ws, close_status_code, close_msg):
         """Callback for when the WebSocket connection is closed."""
@@ -282,8 +405,8 @@ class MO_WebSocket_Manager:
             if self.registered_scrips:
                 logger.info(f"Subscribing to {len(self.registered_scrips)} individual scrips...")
                 for scrip_key in list(self.registered_scrips):
-                    exchange, scripcode_str = scrip_key.split(':')
-                    self.mo_api.register_scrip(exchange, int(scripcode_str))
+                    exchange, exchange_type, scripcode_str = scrip_key.split(':')
+                    self.mo_api.register_scrip(exchange, int(scripcode_str), exchange_type)
                     time.sleep(0.05) # Rate limit subscriptions
         except Exception as e:
             logger.error(f"Failed during subscription process: {e}")
@@ -320,3 +443,40 @@ class MO_WebSocket_Manager:
     def get_latest_indices_data(self):
         """Returns the current cached state of all tracked indices."""
         return list(self.latest_indices_data.values())
+    
+    def register_user_watchlist_stocks(self, user_id):
+        """
+        Registers all stocks from a specific user's watchlists for real-time updates.
+        This is called when a user connects via WebSocket.
+        """
+        try:
+            from app.models import User
+            
+            user = User.objects(id=user_id).only('watchlists__stocks').first()
+            if not user:
+                logger.warning(f"User {user_id} not found while registering watchlist stocks.")
+                return 0
+            
+            stocks_registered = 0
+            for watchlist in getattr(user, 'watchlists', []) or []:
+                for stock in getattr(watchlist, 'stocks', []) or []:
+                    if stock and stock.symbol:
+                        try:
+                            exchange = (getattr(stock, 'exchange', None) or 'NSE').upper()
+                            raw_scripcode = getattr(stock, 'scripcode', None)
+                            if raw_scripcode is None:
+                                continue
+                            scripcode = int(raw_scripcode)
+                            self.register_scrip(stock.symbol, exchange, scripcode)
+                            stocks_registered += 1
+                        except Exception as e:
+                            logger.warning(f"Failed to register stock {getattr(stock, 'symbol', '?')}: {e}")
+            
+            if stocks_registered > 0:
+                logger.info(f"Registered {stocks_registered} watchlist stock(s) for user {user_id}")
+            return stocks_registered
+            
+        except Exception as e:
+            logger.error(f"Failed to register watchlist stocks for user {user_id}: {e}", exc_info=True)
+            return 0
+

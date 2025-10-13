@@ -18,6 +18,7 @@ requests>=2.31
 websocket-client>=1.6  # required for `import websocket`
 pyotp>=2.9
 blinker>=1.7
+APScheduler>=3.10  # Background task scheduling for daily scrip updates
 
 # Production server (optional locally, required on Linux deploys)
 gunicorn>=20.1,<23

@@ -22,7 +22,7 @@ import debounce from 'lodash.debounce';
 const Navbar = () => {
   const { isAuthenticated, logout, user } = useAuth();
   const { profileData, getProfile, watchlistsData, getWatchlists } = useDataContext();
-  const { isConnected } = useSocket();
+  const { isConnected, connectionStatus, isReconnecting, lastError } = useSocket();
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -91,13 +91,29 @@ const Navbar = () => {
       toast({ title: 'Error', description: 'Default watchlist not found.', variant: 'destructive' });
       return;
     }
+    const existingSymbols = new Set((defaultWatchlist.stocks || []).map(item => item?.symbol?.toUpperCase()).filter(Boolean));
+    if (existingSymbols.has(stock.symbol.toUpperCase())) {
+      toast({
+        title: 'Already added',
+        description: `${stock.symbol} is already in ${defaultWatchlist.name}.`,
+      });
+      setSearchQuery('');
+      return;
+    }
     try {
-      await api.addStockToWatchlist(defaultWatchlist.name, stock.symbol, stock.name, stock.scripcode);
+      await api.addStockToWatchlist(defaultWatchlist.name, {
+        symbol: stock.symbol,
+        name: stock.name,
+        scripcode: stock.scripcode
+      });
       toast({ title: 'Success', description: `${stock.symbol} added to ${defaultWatchlist.name}.` });
       getWatchlists(true); // Refresh watchlist data
       setSearchQuery(''); // Clear search
     } catch (error) {
-      toast({ title: 'Error', description: error.message, variant: 'destructive' });
+      const friendlyMessage = error?.status === 409
+        ? `${stock.symbol} is already in ${defaultWatchlist.name}.`
+        : (error?.message || 'Unable to add stock to watchlist.');
+      toast({ title: 'Error', description: friendlyMessage, variant: 'destructive' });
     }
   };
 
@@ -105,7 +121,7 @@ const Navbar = () => {
     return null; // Don't render navbar on auth pages
   }
 
-  const profileInitial = profileData?.profile?.username?.charAt(0).toUpperCase() || user?.username?.charAt(0).toUpperCase() || 'U';
+  const profileInitial = profileData?.username?.charAt(0).toUpperCase() || user?.username?.charAt(0).toUpperCase() || 'U';
 
   return (
     <nav className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 sticky top-0 z-50">
@@ -166,7 +182,22 @@ const Navbar = () => {
             </div>
 
             {/* Connection Status */}
-            <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} title={isConnected ? 'Live connection' : 'Disconnected'}></div>
+            <div className="flex items-center gap-2 text-xs font-medium text-gray-500">
+              <span
+                className={`inline-block h-3 w-3 rounded-full ${isConnected ? 'bg-green-500' : isReconnecting ? 'bg-amber-400' : 'bg-red-500'}`}
+                title={
+                  isConnected
+                    ? 'Live market data connected'
+                    : isReconnecting
+                      ? 'Reconnecting to live market data'
+                      : lastError?.message || 'Live market data disconnected'
+                }
+                data-status={connectionStatus}
+              ></span>
+              <span>
+                {connectionStatus === 'reconnecting' ? 'Reconnecting…' : isConnected ? 'Live' : 'Offline'}
+              </span>
+            </div>
 
             {/* Profile Dropdown */}
             <DropdownMenu>
@@ -180,8 +211,8 @@ const Navbar = () => {
               <DropdownMenuContent className="w-56" align="end" forceMount>
                 <DropdownMenuLabel className="font-normal">
                   <div className="flex flex-col space-y-1">
-                    <p className="text-sm font-medium leading-none">{profileData?.profile?.username || user?.username}</p>
-                    <p className="text-xs leading-none text-muted-foreground">{profileData?.profile?.email}</p>
+                    <p className="text-sm font-medium leading-none">{profileData?.username || user?.username}</p>
+                    <p className="text-xs leading-none text-muted-foreground">{profileData?.email}</p>
                   </div>
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />

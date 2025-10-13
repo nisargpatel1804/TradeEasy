@@ -22,8 +22,11 @@ const handleApiError = (error) => {
   // If the session has expired (401 Unauthorized), dispatch a global event.
   // The AuthContext will listen for this event to trigger a global logout,
   // preventing circular dependencies between this service and the context.
-  // We ignore 401s from the '/check-auth' endpoint to avoid logout loops on initial load.
-  if (error.response?.status === 401 && !error.config.url.endsWith('/check-auth')) {
+  // We ignore 401s from the '/check-auth' and '/logout' endpoints to avoid logout loops.
+  const isCheckAuthEndpoint = error.config?.url?.endsWith('/check-auth');
+  const isLogoutEndpoint = error.config?.url?.endsWith('/logout');
+  
+  if (error.response?.status === 401 && !isCheckAuthEndpoint && !isLogoutEndpoint) {
     window.dispatchEvent(new CustomEvent('unauthorized'));
   }
 
@@ -33,7 +36,14 @@ const handleApiError = (error) => {
     error.response?.data?.message ||
     "An unexpected error occurred. Please try again.";
 
-  return Promise.reject(new Error(errorMessage));
+  const apiError = new Error(errorMessage);
+  apiError.status = error.response?.status;
+  apiError.data = error.response?.data;
+  apiError.code = error.code;
+  apiError.isAxiosError = true;
+  apiError.originalError = error;
+
+  return Promise.reject(apiError);
 };
 
 // Attach the centralized error handler to the Axios instance.

@@ -59,7 +59,7 @@ const SignupPage = () => {
         email: formData.email.trim(),
         mobile: `+91${formData.mobile.trim()}`, // Backend expects +91 format
         password: formData.password,
-        confirmPassword: formData.confirmPassword,
+        confirm_password: formData.confirmPassword, // Backend expects snake_case
       });
 
       if (response.success && response.client_id) {

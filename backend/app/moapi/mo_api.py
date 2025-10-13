@@ -1,293 +1,556 @@
 import os
-import requests
+import re
+import uuid
+import socket
+import platform
 import hashlib
 import logging
-import websocket
 import threading
-import pyotp
-from struct import pack
+import time
+from dataclasses import dataclass
 from datetime import datetime, time as dt_time
+from struct import pack
+from typing import Any, Callable, Dict, Optional
+
+import pyotp
+import requests
+import websocket
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
 
-# --- Configuration ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# --- Logging configuration -------------------------------------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-class MarketHoursManager:
-    """Manages Indian market hours detection and holiday checking."""
 
-    def __init__(self):
-        self.ist_tz = ZoneInfo('Asia/Kolkata')
-        self.market_open = dt_time(9, 15)
-        self.market_close = dt_time(15, 30)
-        # Market holidays for 2025 (expand as needed)
-        self.holidays = {
-            '2025-01-26', '2025-03-14', '2025-04-14', '2025-05-01',
-            '2025-08-15', '2025-10-02', '2025-11-01', '2025-11-15', '2025-12-25',
+@dataclass
+class ClientDeviceInfo:
+    """Captures the per-client metadata required by MO OpenAPI headers."""
+
+    local_ip: str
+    public_ip: str
+    mac_address: str
+    source_id: str
+    vendor_info: str
+    os_name: str
+    os_version: str
+    device_model: str
+    manufacturer: str
+    product_name: str
+    product_version: str
+    installed_app_id: str
+    browser_name: Optional[str] = None
+    browser_version: Optional[str] = None
+    latitude: Optional[str] = None
+    longitude: Optional[str] = None
+
+    def to_headers(self) -> Dict[str, str]:
+        headers = {
+            "ClientLocalIp": self.local_ip,
+            "ClientPublicIp": self.public_ip,
+            "MacAddress": self.mac_address,
+            "SourceId": self.source_id,
+            "vendorinfo": self.vendor_info,
+            "osname": self.os_name,
+            "osversion": self.os_version,
+            "devicemodel": self.device_model,
+            "manufacturer": self.manufacturer,
+            "productname": self.product_name,
+            "productversion": self.product_version,
+            "installedappid": self.installed_app_id,
         }
 
-    def is_market_open(self):
-        """Checks if the Indian stock market is currently open."""
+        if self.source_id == "WEB":
+            headers["browsername"] = self.browser_name or "Chrome"
+            headers["browserversion"] = self.browser_version or "105.0"
+
+        if self.latitude and self.longitude:
+            headers["latitude"] = self.latitude
+            headers["longitude"] = self.longitude
+
+        return headers
+
+
+class MarketHoursManager:
+    """Utility that understands basic Indian market hours and holidays."""
+
+    def __init__(self) -> None:
+        self.ist_tz = ZoneInfo("Asia/Kolkata")
+        self.market_open = dt_time(9, 15)
+        self.market_close = dt_time(15, 30)
+        self.holidays = {
+            "2025-01-26", "2025-03-14", "2025-04-14", "2025-05-01",
+            "2025-08-15", "2025-10-02", "2025-11-01", "2025-11-15", "2025-12-25",
+        }
+
+    def is_market_open(self) -> bool:
+        """Returns True when the Indian equity markets are trading."""
         now_ist = datetime.now(self.ist_tz)
-        current_date_str = now_ist.date().isoformat()
-        if current_date_str in self.holidays or now_ist.weekday() >= 5:
+        if now_ist.weekday() >= 5 or now_ist.date().isoformat() in self.holidays:
             return False
         return self.market_open <= now_ist.time() <= self.market_close
 
+
 class MotilalOswalAPI:
-    """
-    A Python wrapper for the Motilal Oswal OpenAPI, updated with correct WebSocket
-    binary packet structures based on the official SDK.
-    """
-    def __init__(self, use_test_url=False):
+    """High-fidelity Motilal Oswal OpenAPI client aligned with official specs."""
+
+    REST_BASE_URL = "https://openapi.motilaloswal.com/rest"
+    WEBSOCKET_URL = "wss://ws1feed.motilaloswal.com/jwebsocket/jwebsocket"
+    WEBSOCKET_VERSION = "VER 2.0"
+
+    REST_ENDPOINTS = {
+        "login": "/login/v3/authdirectapi",
+        "logout": "/login/v1/logout",
+        "profile": "/login/v1/getprofile",
+        "ltp": "/report/v1/getltpdata",
+        "scrips": "/report/v1/getscripsbyexchangename",
+        "eod": "/report/v1/geteoddatabyexchangename",
+        "index_master": "/report/v1/getindexdatabyexchangename",
+        "index_ltp": "/report/v1/getindexltpdata",
+    }
+
+    EXCHANGE_CODES = {
+        "NSE": "N",
+        "BSE": "B",
+        "NSEFO": "N",
+        "BSEFO": "G",
+        "MCX": "M",
+        "NSECD": "C",
+        "NCDEX": "D",
+    }
+
+    INDEX_CODES = {
+        "NSE": "N",
+        "BSE": "B",
+    }
+
+    EXCHANGE_TYPE_CODES = {
+        "CASH": "C",
+        "DERIVATIVES": "D",
+    }
+
+    def __init__(self, session: Optional[requests.Session] = None) -> None:
         load_dotenv()
-        self.user_id = os.getenv("USER_ID")
-        self.password = os.getenv("PASSWORD")
-        self.api_key = os.getenv("API_KEY")
-        self.two_fa = os.getenv("TWO_FA")
+
+        self.user_id = self._require_env("USER_ID")
+        self.password = self._require_env("PASSWORD")
+        self.api_key = self._require_env("API_KEY")
+        self.two_fa = self._require_env("TWO_FA")
         self.totp_secret = os.getenv("TOTP_SECRET")
 
-        if not all([self.user_id, self.password, self.api_key, self.two_fa, self.totp_secret]):
-            raise ValueError("Ensure USER_ID, PASSWORD, API_KEY, TWO_FA, and TOTP_SECRET are set in .env file.")
+        if not self.totp_secret:
+            logger.warning("TOTP_SECRET not provided. Falling back to OTP flow where applicable.")
 
-        self.base_url = "https://openapi.motilaloswal.com/rest" if not use_test_url else "https://openapi.motilaloswaluat.com/rest"
-        self.websocket_url = "wss://ws1feed.motilaloswal.com/jwebsocket/jwebsocket"
-        
-        self.auth_token = None
-        self.session = requests.Session()
-        self.ws = None
-        self.ws_thread = None
+        self.vendor_info = os.getenv("MO_VENDOR_INFO", self.user_id)
+        self.source_id = os.getenv("MO_SOURCE_ID", "WEB").strip().upper() or "WEB"
+        self.base_url = self._normalise_base_url(os.getenv("MO_BASE_URL", self.REST_BASE_URL))
+
+        self.session = session or requests.Session()
+        self.request_timeout = int(os.getenv("MO_API_TIMEOUT", "30"))
+
+        self.device_info = self._build_device_info()
+
+        self.auth_token: Optional[str] = None
+        self.last_login_at: Optional[datetime] = None
+
+        self.ws: Optional[websocket.WebSocketApp] = None
+        self.ws_thread: Optional[threading.Thread] = None
+        self.registered_scrips: set[str] = set()
+        self.registered_indices: set[str] = set()
+
         self.market_hours = MarketHoursManager()
-        self.websocket_version = "3.0"
-        self.registered_scrips = []
-        self.endpoints = {
-            "ltp": os.getenv("MO_API_LTP_ENDPOINT", "/market/v1/getltp"),
-            "index_master": os.getenv("MO_API_INDEX_MASTER_ENDPOINT", "/market/v1/getindexdata"),
-            "bulk_eod": os.getenv("MO_API_BULK_EOD_ENDPOINT", "/market/v1/getbulkeoddata"),
-        }
+
         self._update_headers()
 
-    def _update_headers(self, auth_token=None):
-        """Constructs and updates session headers for REST API calls."""
-        self.headers = {
-            'Accept': 'application/json', 'User-Agent': 'MOSL/V.1.1.0',
-            'ApiKey': self.api_key, 'ClientLocalIp': '192.168.1.1',
-            'ClientPublicIp': '10.10.10.10', 'MacAddress': '00-00-00-00-00-00',
-            'SourceId': 'WEB', 'vendorinfo': self.user_id,
-            'osname': 'Windows 11', 'productname': 'TradeEasy', 'productversion': '1.0.0',
+    # ------------------------------------------------------------------
+    # Environment helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _require_env(key: str) -> str:
+        value = os.getenv(key)
+        if not value:
+            raise ValueError(f"Environment variable '{key}' must be set for Motilal Oswal API integration.")
+        return value.strip()
+
+    @staticmethod
+    def _normalise_base_url(url: str) -> str:
+        url = url.rstrip("/")
+        if not url.endswith("/rest"):
+            return f"{url}/rest"
+        return url
+
+    def _build_device_info(self) -> ClientDeviceInfo:
+        local_ip = os.getenv("MO_CLIENT_LOCAL_IP") or self._get_local_ip()
+        public_ip = os.getenv("MO_CLIENT_PUBLIC_IP") or "1.2.3.4"
+        mac_address = os.getenv("MO_CLIENT_MAC") or self._get_mac_address()
+
+        os_name = os.getenv("MO_OS_NAME") or platform.system()
+        os_version = os.getenv("MO_OS_VERSION") or platform.version()
+        device_model = os.getenv("MO_DEVICE_MODEL") or platform.node() or "Generic"
+        manufacturer = os.getenv("MO_DEVICE_MANUFACTURER") or "Generic"
+        product_name = os.getenv("MO_PRODUCT_NAME") or "TradeEasy"
+        product_version = os.getenv("MO_PRODUCT_VERSION") or "1.0.0"
+        installed_app_id = os.getenv("MO_INSTALLED_APP_ID") or str(uuid.uuid4())
+
+        browser_name = os.getenv("MO_BROWSER_NAME") or "Chrome"
+        browser_version = os.getenv("MO_BROWSER_VERSION") or "105.0"
+
+        latitude = os.getenv("MO_LATITUDE")
+        longitude = os.getenv("MO_LONGITUDE")
+
+        return ClientDeviceInfo(
+            local_ip=local_ip,
+            public_ip=public_ip,
+            mac_address=mac_address,
+            source_id=self.source_id,
+            vendor_info=self.vendor_info,
+            os_name=os_name,
+            os_version=os_version,
+            device_model=device_model,
+            manufacturer=manufacturer,
+            product_name=product_name,
+            product_version=product_version,
+            installed_app_id=installed_app_id,
+            browser_name=browser_name,
+            browser_version=browser_version,
+            latitude=latitude,
+            longitude=longitude,
+        )
+
+    @staticmethod
+    def _get_local_ip() -> str:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return "1.2.3.4"
+
+    @staticmethod
+    def _get_mac_address() -> str:
+        try:
+            mac = uuid.getnode()
+            return ":".join(re.findall("..", f"{mac:012x}"))
+        except Exception:
+            return "00:00:00:00:00:00"
+
+    # ------------------------------------------------------------------
+    # HTTP helpers
+    # ------------------------------------------------------------------
+    def _update_headers(self, auth_token: Optional[str] = None) -> None:
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "MOSL/V.1.1.0",
+            "ApiKey": self.api_key,
+            "SourceId": self.device_info.source_id,
+            "sdkversion": "Python 3.0",
         }
+
+        headers.update(self.device_info.to_headers())
+
         if auth_token:
-            self.headers['Authorization'] = auth_token
-        self.session.headers.update(self.headers)
+            headers["Authorization"] = auth_token
 
-    def _ensure_authenticated(self) -> bool:
-        """Ensures the session has a valid auth token before making API calls."""
-        if self.auth_token:
-            return True
-        if self.login():
-            return True
-        logger.error("MO API authentication failed. Ensure credentials are correct.")
-        return False
+        self.session.headers.clear()
+        self.session.headers.update(headers)
 
-    def _make_request(self, method, endpoint, payload=None):
-        """Generic method to make REST API requests."""
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        payload: Optional[Dict[str, Any]] = None,
+        require_auth: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        if require_auth and not self._ensure_authenticated():
+            return None
+
         url = f"{self.base_url}{endpoint}"
         try:
-            response = self.session.request(method, url, json=payload or {})
+            response = self.session.request(method, url, json=payload or {}, timeout=self.request_timeout)
             response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as req_err:
-            logger.error(f"Request error for {url}: {req_err}")
+            data = response.json()
+            if isinstance(data, dict) and data.get("status") == "FAILURE":
+                logger.warning(
+                    "MO API call failed (%s): %s | %s",
+                    endpoint,
+                    data.get("message"),
+                    data.get("errorcode"),
+                )
+            return data
+        except requests.exceptions.RequestException as exc:
+            logger.error("HTTP error while calling %s: %s", url, exc)
             return None
 
-    def login(self):
-        """Authenticates the user and retrieves an authorization token."""
-        endpoint = "/login/v3/authdirectapi"
-        hashed_password = hashlib.sha256((self.password + self.api_key).encode('utf-8')).hexdigest()
-        totp = pyotp.TOTP(self.totp_secret).now()
-        payload = {"userid": self.user_id, "password": hashed_password, "2FA": self.two_fa, "totp": str(totp)}
-        
-        response = self._make_request("POST", endpoint, payload)
+    def _ensure_authenticated(self) -> bool:
+        if self.auth_token:
+            return True
+        response = self.login()
+        return bool(response and response.get("status") == "SUCCESS")
+
+    def _generate_totp_code(self) -> Optional[str]:
+        if not self.totp_secret:
+            return None
+        try:
+            return pyotp.TOTP(self.totp_secret).now()
+        except Exception as exc:
+            logger.error("Failed to generate TOTP code: %s", exc)
+            return None
+
+    # ------------------------------------------------------------------
+    # Authentication & session APIs
+    # ------------------------------------------------------------------
+    def login(self, totp_code: Optional[str] = None, two_fa: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        hashed_password = hashlib.sha256((self.password + self.api_key).encode("utf-8")).hexdigest()
+        payload: Dict[str, Any] = {
+            "userid": self.user_id,
+            "password": hashed_password,
+            "2FA": two_fa or self.two_fa,
+        }
+
+        totp_code = totp_code or self._generate_totp_code()
+        if totp_code:
+            payload["totp"] = str(totp_code)
+
+        response = self._request("POST", self.REST_ENDPOINTS["login"], payload, require_auth=False)
         if response and response.get("status") == "SUCCESS":
             self.auth_token = response.get("AuthToken")
+            self.last_login_at = datetime.now()
             self._update_headers(self.auth_token)
-            logger.info("✔️ MO API Login successful.")
-            return True
+            logger.info("Authenticated with Motilal Oswal OpenAPI.")
         else:
-            error_msg = response.get("message", "Unknown error") if response else "No response"
-            logger.error(f"Login failed: {error_msg}")
             self.auth_token = None
+            if response:
+                logger.error(
+                    "Login failed: %s | %s",
+                    response.get("message"),
+                    response.get("errorcode"),
+                )
+            else:
+                logger.error("Login failed: no response returned.")
+        return response
+
+    def logout(self) -> Optional[Dict[str, Any]]:
+        response = self._request("POST", self.REST_ENDPOINTS["logout"], {"userid": self.user_id})
+        if response and response.get("status") == "SUCCESS":
+            self.auth_token = None
+            self._update_headers()
+        return response
+
+    def get_profile(self, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        payload: Dict[str, Any] = {"clientcode": clientcode or ""}
+        return self._request("POST", self.REST_ENDPOINTS["profile"], payload)
+
+    # ------------------------------------------------------------------
+    # Market data REST endpoints
+    # ------------------------------------------------------------------
+    def get_scrips_by_exchange(self, exchangename: str, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        payload = {"exchangename": exchangename.upper()}
+        if clientcode:
+            payload["clientcode"] = clientcode
+        return self._request("POST", self.REST_ENDPOINTS["scrips"], payload)
+
+    def get_ltp_data(self, exchange: str, scripcode: int, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        payload: Dict[str, Any] = {
+            "exchange": exchange.upper(),
+            "scripcode": int(scripcode),
+        }
+        if clientcode:
+            payload["clientcode"] = clientcode
+        return self._request("POST", self.REST_ENDPOINTS["ltp"], payload)
+
+    def get_eod_data(self, exchangename: str, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        payload = {"exchangename": exchangename.upper()}
+        if clientcode:
+            payload["clientcode"] = clientcode
+        return self._request("POST", self.REST_ENDPOINTS["eod"], payload)
+
+    def get_index_data(self, exchangename: str, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        payload = {"exchangename": exchangename.upper()}
+        if clientcode:
+            payload["clientcode"] = clientcode
+        return self._request("POST", self.REST_ENDPOINTS["index_master"], payload)
+
+    def get_index_ltp(self, exchange: str, scripcode: int, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        payload: Dict[str, Any] = {
+            "exchange": exchange.upper(),
+            "scripcode": str(scripcode),
+        }
+        if clientcode:
+            payload["clientcode"] = clientcode
+        return self._request("POST", self.REST_ENDPOINTS["index_ltp"], payload)
+
+    # ------------------------------------------------------------------
+    # WebSocket helpers
+    # ------------------------------------------------------------------
+    def connect_websocket(
+        self,
+        on_message: Callable[[websocket.WebSocketApp, bytes], None],
+        on_open: Callable[[websocket.WebSocketApp], None],
+        on_close: Callable[[websocket.WebSocketApp, int, str], None],
+        on_error: Callable[[websocket.WebSocketApp, Exception], None],
+    ) -> None:
+        if not self.auth_token:
+            logger.error("Authenticate before opening the Motilal Oswal WebSocket feed.")
+            return
+
+        if self.ws and self.ws.sock and self.ws.sock.connected:
+            logger.info("WebSocket already connected; skipping new connection.")
+            return
+
+        self.ws = websocket.WebSocketApp(
+            self.WEBSOCKET_URL,
+            on_open=on_open,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+        )
+
+        self.ws_thread = threading.Thread(
+            target=self.ws.run_forever,
+            kwargs={"ping_interval": 30, "ping_timeout": 10},
+            daemon=True,
+            name="MO-WebSocketThread",
+        )
+        self.ws_thread.start()
+        logger.info("Started Motilal Oswal WebSocket thread -> %s", self.WEBSOCKET_URL)
+
+    def disconnect_websocket(self) -> None:
+        if self.ws:
+            try:
+                self.ws.close()
+            finally:
+                logger.info("Closed Motilal Oswal WebSocket connection.")
+        if self.ws_thread and self.ws_thread.is_alive():
+            self.ws_thread.join(timeout=5)
+        self.ws = None
+        self.ws_thread = None
+
+    def send_binary_login(self) -> bool:
+        if not self._ws_connected():
+            logger.warning("Cannot send binary login; WebSocket is not connected.")
             return False
 
-    def get_scrips_by_exchange(self, exchangename: str):
-        """Fetches the scrip/instrument master for a given exchange name."""
-        if not self._ensure_authenticated():
-            return None
-        endpoint = "/report/v1/getscripsbyexchangename"
-        return self._make_request("POST", endpoint, {"exchangename": exchangename})
-
-    def get_ltp_data(self, exchange: str, scripcode: int):
-        """Fetches live quote data (LTP) for a specific scrip."""
-        if not self._ensure_authenticated():
-            return None
-
-        payload = {
-            "exchange": str(exchange).upper(),
-            "scripcode": int(scripcode)
-        }
-        response = self._make_request("POST", self.endpoints["ltp"], payload)
-        if not response:
-            logger.warning(f"LTP data request failed for {exchange}:{scripcode}")
-        return response
-
-    def get_index_data(self, exchange: str):
-        """Retrieves index master information for the given exchange."""
-        if not self._ensure_authenticated():
-            return None
-
-        payload = {"exchangename": str(exchange).upper()}
-        response = self._make_request("POST", self.endpoints["index_master"], payload)
-        if not response:
-            logger.warning(f"Index data request failed for exchange {exchange}")
-        return response
-
-    def get_bulk_eod_data(self, exchange: str):
-        """Fetches bulk end-of-day price data for the given exchange."""
-        if not self._ensure_authenticated():
-            return None
-
-        payload = {"exchangename": str(exchange).upper()}
-        response = self._make_request("POST", self.endpoints["bulk_eod"], payload)
-        if not response:
-            logger.warning(f"Bulk EOD data request failed for exchange {exchange}")
-        return response
-
-    # --- WebSocket Methods ---
-    def connect_websocket(self, on_message, on_open, on_close, on_error):
-        """Establishes a WebSocket connection in a background thread."""
-        if not self.auth_token:
-            logger.error("Cannot connect to WebSocket without authentication.")
-            return
-            
-        self.ws = websocket.WebSocketApp(
-            self.websocket_url,
-            on_open=on_open, on_message=on_message,
-            on_error=on_error, on_close=on_close
-        )
-        self.ws_thread = threading.Thread(target=lambda: self.ws.run_forever(ping_interval=30, ping_timeout=10))
-        self.ws_thread.daemon = True
-        self.ws_thread.start()
-        logger.info(f"WebSocket connection thread started to {self.websocket_url}")
-
-    def disconnect_websocket(self):
-        """Closes the WebSocket connection."""
-        if self.ws:
-            self.ws.close()
-            logger.info("WebSocket connection closed.")
-        self.ws = None
-        if self.ws_thread: self.ws_thread.join()
-
-    def send_binary_login(self):
-        """Sends a correctly structured binary login packet."""
         try:
-            if not self.ws or not self.ws.sock or not self.ws.sock.connected:
-                logger.warning("WS not connected. Skipping login packet.")
-                return False
-
             clientcode = self.user_id
-            version = self.websocket_version
-            
-            # Pad strings with null bytes to exact lengths
-            clientcode_b1 = clientcode.ljust(15, "\x00").encode('utf-8')
-            clientcode_b2 = clientcode.ljust(30, "\x00").encode('utf-8')
-            version_b = version.ljust(10, "\x00").encode('utf-8')
-            padding = ("\x00" * 45).encode('utf-8')
-            
+            version = self.WEBSOCKET_VERSION
+
+            clientcode_buffer1 = clientcode.ljust(15, " ").encode("utf-8")
+            clientcode_buffer2 = clientcode.ljust(30, " ").encode("utf-8")
+            version_buffer = version.ljust(10, " ").encode("utf-8")
+            padding = (" " * 45).encode("utf-8")
+
             login_packet = pack(
                 "=cHB15sB30sBBBB10sBBBBB45s",
-                b"Q", 111, len(clientcode), clientcode_b1,
-                len(clientcode), clientcode_b2,
-                1, 1, 1, len(version), version_b,
-                0, 0, 0, 0, 1, padding
+                b"Q",
+                111,
+                len(clientcode),
+                clientcode_buffer1,
+                len(clientcode),
+                clientcode_buffer2,
+                1,
+                1,
+                1,
+                len(version),
+                version_buffer,
+                0,
+                0,
+                0,
+                0,
+                1,
+                padding,
             )
+
             self.ws.send(login_packet, opcode=websocket.ABNF.OPCODE_BINARY)
-            logger.info("✔️ Binary login packet sent to MO WebSocket")
+            logger.info("Sent binary login handshake to MO WebSocket.")
             return True
-        except Exception as e:
-            logger.error(f"Failed to send binary login packet: {e}")
+        except Exception as exc:
+            logger.error("Failed to send binary login packet: %s", exc)
             return False
 
-    def _send_subscription_packet(self, exchange: str, scripcode: int, subscribe: bool):
-        """Helper to send scrip subscription/unsubscription packets."""
-        scrip_key = f"{exchange}:{scripcode}"
-        if subscribe and scrip_key in self.registered_scrips:
-            logger.debug(f"Scrip {scrip_key} already registered.")
+    def register_scrip(self, exchange: str, scripcode: int, exchange_type: str = "CASH") -> bool:
+        return self._toggle_scrip_subscription(exchange, exchange_type, scripcode, subscribe=True)
+
+    def unregister_scrip(self, exchange: str, scripcode: int, exchange_type: str = "CASH") -> bool:
+        return self._toggle_scrip_subscription(exchange, exchange_type, scripcode, subscribe=False)
+
+    def _toggle_scrip_subscription(self, exchange: str, exchange_type: str, scripcode: int, subscribe: bool) -> bool:
+        if not self._ws_connected():
+            logger.warning("WebSocket not connected; cannot modify scrip subscriptions.")
+            return False
+
+        exchange_code = self.EXCHANGE_CODES.get(exchange.upper())
+        exchange_type_code = self.EXCHANGE_TYPE_CODES.get(exchange_type.upper())
+        if not exchange_code or not exchange_type_code:
+            logger.error("Unsupported exchange (%s) or exchange type (%s)", exchange, exchange_type)
+            return False
+
+        key = f"{exchange.upper()}:{exchange_type.upper()}:{int(scripcode)}"
+        if subscribe and key in self.registered_scrips:
+            logger.debug("Scrip %s already registered on the WebSocket feed.", key)
             return True
-        if not self.ws or not self.ws.sock or not self.ws.sock.connected:
-            logger.warning(f"WS not connected. Cannot modify subscription for {scrip_key}")
-            return False
 
-        exchange_map = {"NSE": "N", "BSE": "B", "NSEFO": "N", "MCX": "M", "NSECD": "C", "NCDEX": "D"}
-        exchange_char = exchange_map.get(exchange.upper(), "N")
-        
-        # Payload is always 7 bytes: 1(char) + 1(char) + 4(int) + 1(byte)
-        packet = pack("=cHcciB", b"D", 7, exchange_char.encode(), b"C", int(scripcode), 1 if subscribe else 0)
-        self.ws.send(packet, opcode=websocket.ABNF.OPCODE_BINARY)
-        
-        if subscribe:
-            self.registered_scrips.append(scrip_key)
-            logger.info(f"✔️ Registered scrip {scrip_key}")
-        else:
-            if scrip_key in self.registered_scrips: self.registered_scrips.remove(scrip_key)
-            logger.info(f"✔️ Unregistered scrip {scrip_key}")
-        return True
-
-    def register_scrip(self, exchange: str, scripcode: int):
-        """Subscribes to a scrip using a correctly formatted binary packet."""
-        return self._send_subscription_packet(exchange, scripcode, subscribe=True)
-
-    def unregister_scrip(self, exchange: str, scripcode: int):
-        """Unsubscribes from a scrip using a correctly formatted binary packet."""
-        return self._send_subscription_packet(exchange, scripcode, subscribe=False)
-
-    def _send_index_packet(self, exchange: str, subscribe: bool):
-        """Helper to send index subscription/unsubscription packets."""
-        if not self.ws or not self.ws.sock or not self.ws.sock.connected:
-            logger.warning(f"WS not connected. Cannot modify index subscription for {exchange}")
-            return False
-        
-        exchange_map = {"NSE": "N", "BSE": "B"}
-        exchange_char = exchange_map.get(exchange.upper(), "N")
-        
-        # Payload is 2 bytes: 1(char) + 1(byte)
-        packet = pack("=cHcB", b"I", 2, exchange_char.encode(), 1 if subscribe else 0)
-        self.ws.send(packet, opcode=websocket.ABNF.OPCODE_BINARY)
-        
-        action = "Registered" if subscribe else "Unregistered"
-        logger.info(f"✔️ {action} ALL indices for {exchange}")
-        return True
-
-    def register_index(self, exchange: str):
-        """Subscribes to all index feeds for an exchange."""
-        return self._send_index_packet(exchange, subscribe=True)
-
-    def unregister_index(self, exchange: str):
-        """Unsubscribes from all index feeds for an exchange."""
-        return self._send_index_packet(exchange, subscribe=False)
-
-    def send_heartbeat(self):
-        """Sends a correctly structured heartbeat packet to keep the connection alive."""
         try:
-            if not self.ws or not self.ws.sock or not self.ws.sock.connected:
-                logger.debug("WS not connected, skipping heartbeat.")
-                return False
-            
-            # Heartbeat packet has a payload length of 0
-            heartbeat_packet = pack("=cH", b"H", 0)
-            self.ws.send(heartbeat_packet, opcode=websocket.ABNF.OPCODE_BINARY)
-            logger.debug("✔️ Sent heartbeat packet")
+            packet = pack("=cHcciB", b"D", 7, exchange_code.encode("ascii"), exchange_type_code.encode("ascii"), int(scripcode), 1 if subscribe else 0)
+            self.ws.send(packet, opcode=websocket.ABNF.OPCODE_BINARY)
+
+            if subscribe:
+                self.registered_scrips.add(key)
+                logger.info("Subscribed to %s via MO WebSocket.", key)
+            else:
+                self.registered_scrips.discard(key)
+                logger.info("Unsubscribed from %s via MO WebSocket.", key)
             return True
-        except Exception as e:
-            logger.error(f"Failed to send heartbeat: {e}")
+        except Exception as exc:
+            logger.error("Failed to toggle subscription for %s: %s", key, exc)
             return False
+
+    def register_index(self, exchange: str) -> bool:
+        return self._toggle_index_subscription(exchange, subscribe=True)
+
+    def unregister_index(self, exchange: str) -> bool:
+        return self._toggle_index_subscription(exchange, subscribe=False)
+
+    def _toggle_index_subscription(self, exchange: str, subscribe: bool) -> bool:
+        if not self._ws_connected():
+            logger.warning("WebSocket not connected; cannot modify index subscriptions.")
+            return False
+
+        exchange_code = self.INDEX_CODES.get(exchange.upper())
+        if not exchange_code:
+            logger.error("Unsupported index exchange '%s'", exchange)
+            return False
+
+        key = f"{exchange.upper()}"
+        if subscribe and key in self.registered_indices:
+            logger.debug("Index %s already registered on the WebSocket feed.", key)
+            return True
+
+        try:
+            packet = pack("=cHcB", b"I", 2, exchange_code.encode("ascii"), 1 if subscribe else 0)
+            self.ws.send(packet, opcode=websocket.ABNF.OPCODE_BINARY)
+
+            if subscribe:
+                self.registered_indices.add(key)
+                logger.info("Subscribed to %s index feed via MO WebSocket.", key)
+            else:
+                self.registered_indices.discard(key)
+                logger.info("Unsubscribed from %s index feed via MO WebSocket.", key)
+            return True
+        except Exception as exc:
+            logger.error("Failed to toggle index subscription for %s: %s", exchange, exc)
+            return False
+
+    def send_heartbeat(self) -> bool:
+        if not self._ws_connected():
+            logger.debug("Skipping heartbeat; WebSocket not connected.")
+            return False
+        try:
+            heartbeat_packet = pack("=cH", b"1", 0)
+            self.ws.send(heartbeat_packet, opcode=websocket.ABNF.OPCODE_BINARY)
+            logger.debug("Sent heartbeat packet to Motilal Oswal feed.")
+            return True
+        except Exception as exc:
+            logger.error("Failed to send heartbeat packet: %s", exc)
+            return False
+
+    def _ws_connected(self) -> bool:
+        return bool(self.ws and self.ws.sock and self.ws.sock.connected)

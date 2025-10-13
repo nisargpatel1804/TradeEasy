@@ -56,14 +56,50 @@ const MarketPage = () => {
   }, []);
 
   useEffect(() => {
-    const onPriceUpdate = (data) => {
-      setLivePrices(currentPrices => ({
-        ...currentPrices,
-        ...data.changedPrices,
-      }));
-    };
+    const unsubscribe = priceUpdateService.subscribe(update => {
+      setLivePrices(currentPrices => {
+        const mergePrices = (source) => {
+          if (!source || Object.keys(source).length === 0) {
+            return null;
+          }
 
-    const unsubscribe = priceUpdateService.subscribe(onPriceUpdate);
+          const normalized = {};
+
+          for (const [symbol, value] of Object.entries(source)) {
+            if (!value) continue;
+
+            const existing = currentPrices[symbol] || {};
+            const mergedEntry = {
+              ...existing,
+              ...value,
+            };
+
+            if (typeof value.ltp === 'number') {
+              mergedEntry.price = value.ltp;
+            } else if (typeof value.price === 'number') {
+              mergedEntry.price = value.price;
+            }
+
+            normalized[symbol] = mergedEntry;
+          }
+
+          return Object.keys(normalized).length > 0 ? normalized : null;
+        };
+
+        if (update?.type === 'reset') {
+          return currentPrices;
+        }
+
+        if (update?.type === 'snapshot') {
+          const mergedSnapshot = mergePrices(update?.allPrices);
+          return mergedSnapshot ? { ...currentPrices, ...mergedSnapshot } : currentPrices;
+        }
+
+        const mergedChanges = mergePrices(update?.changedPrices);
+        return mergedChanges ? { ...currentPrices, ...mergedChanges } : currentPrices;
+      });
+    });
+
     return () => unsubscribe();
   }, []);
 

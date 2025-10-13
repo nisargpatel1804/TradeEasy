@@ -1,6 +1,8 @@
 import logging
 from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
+from mongoengine.errors import NotUniqueError
+
 from app.models import User, Stock, Watchlist
 from app.socket_manager import MO_WebSocket_Manager
 # Import the centralized, cached function for resolving stock data
@@ -96,20 +98,44 @@ def add_stock_to_watchlist(watchlist_name):
         if not api_data:
             return jsonify({"success": False, "message": f"Could not find a valid instrument for symbol '{format_symbol(symbol_input)}'."}), 404
         
-        full_symbol = f"{api_data['symbol']}.{api_data['exchange']}"
-        
-        if any(s and s.symbol == full_symbol for s in target_watchlist.stocks):
+        scripcode = api_data['scripcode']
+        exchange = api_data['exchange']
+        full_symbol = f"{api_data['symbol']}.{exchange}"
+
+        if any(
+            s and s.scripcode == scripcode and s.exchange == exchange
+            for s in target_watchlist.stocks
+        ):
             return jsonify({"success": False, "message": "Stock is already in this watchlist."}), 409
 
         # Use the resolved data to create or update the Stock document
-        stock, _ = Stock.objects.get_or_create(
-            symbol=full_symbol,
-            defaults={
-                'name': data.get('name', api_data['symbol']),
-                'exchange': api_data['exchange'],
-                'scripcode': api_data['scripcode']
-            }
-        )
+        # Since symbol is the primary key, we need to handle get_or_create differently
+        stock = Stock.objects(scripcode=scripcode, exchange=exchange).first()
+        if not stock:
+            stock = Stock(
+                symbol=full_symbol,
+                name=data.get('name') or api_data['symbol'],
+                exchange=exchange,
+                scripcode=scripcode
+            )
+            try:
+                stock.save()
+            except NotUniqueError:
+                stock = Stock.objects(scripcode=scripcode, exchange=exchange).first()
+                if not stock:
+                    raise
+        else:
+            # Refresh key metadata on the existing document when supplied
+            updates_required = False
+            preferred_name = data.get('name') or api_data['symbol']
+            if preferred_name and stock.name != preferred_name:
+                stock.name = preferred_name
+                updates_required = True
+            if not stock.is_active:
+                stock.is_active = True
+                updates_required = True
+            if updates_required:
+                stock.save()
         
         target_watchlist.stocks.append(stock)
         user.save()

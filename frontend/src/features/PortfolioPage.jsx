@@ -43,14 +43,29 @@ const PortfolioPage = () => {
   }, []);
 
   useEffect(() => {
-    const onPriceUpdate = (data) => {
-        setLivePrices(currentPrices => ({
-            ...currentPrices,
-            ...data.allPrices
-        }));
-    };
+    const unsubscribe = priceUpdateService.subscribe(update => {
+      setLivePrices(currentPrices => {
+        if (update?.type === 'reset') {
+          return {};
+        }
 
-    const unsubscribe = priceUpdateService.subscribe(onPriceUpdate);
+        if (update?.type === 'snapshot') {
+          if (update?.allPrices && Object.keys(update.allPrices).length > 0) {
+            return { ...currentPrices, ...update.allPrices };
+          }
+          return currentPrices;
+        }
+
+        if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
+          return {
+            ...currentPrices,
+            ...update.changedPrices,
+          };
+        }
+
+        return currentPrices;
+      });
+    });
     return () => unsubscribe();
   }, []);
 
