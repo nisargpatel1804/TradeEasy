@@ -8,7 +8,6 @@ Each import statement corresponds to a .py file that defines a Flask Blueprint.
 
 # Import each blueprint module to make them available for registration
 from . import auth
-from . import data_management
 from . import markets
 from . import orders
 from . import portfolio

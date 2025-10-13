@@ -11,13 +11,13 @@ import Watchlist from './features/Watchlist.jsx';
 import OrdersPage from './features/OrdersPage.jsx';
 import ProfilePage from './features/ProfilePage.jsx';
 import TradeForm from './features/TradeForm.jsx';
-import { StockOverview } from "./features/StockSections.jsx";
+import StockOverview from "./features/StockSections.jsx";
 import MarketPage from "./features/MarketPage.jsx";
 import Indices from "./features/Indices.jsx";
 import OrderDetail from "./features/OrderDetail.jsx";
 import NotFoundPage from './features/NotFoundPage.jsx';
 import Navbar from "./features/Navbar.jsx";
-import { Toaster } from "@/assets/ui/toaster.jsx";
+import { Toaster } from "./assets/ui/toaster.jsx";
 
 /**
  * A wrapper component that protects routes requiring authentication.

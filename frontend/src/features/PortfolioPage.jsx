@@ -1,193 +1,192 @@
-import { useEffect, useState } from "react";
-import { fetchPortfolio } from "@/services/api"; // Import the API function
-import { Skeleton } from "@/assets/ui/skeleton";
-import { Card, CardContent } from "@/assets/ui/card";
+import { useEffect, useState, useMemo } from "react";
+import { motion } from "framer-motion";
+import { toast } from "react-hot-toast";
+import * as api from "../services/api.js";
+import priceUpdateService from "../services/priceUpdateService.js";
+import { Skeleton } from "../assets/ui/skeleton.jsx";
+import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../assets/ui/table.jsx";
+import { TrendingUp, TrendingDown, Wallet, Briefcase, PlusCircle, MinusCircle } from "lucide-react";
 
-const Portfolio = () => {
-  const [portfolio, setPortfolio] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+const PortfolioPage = () => {
+  const [portfolioData, setPortfolioData] = useState(null);
+  const [livePrices, setLivePrices] = useState({});
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  // Fetch portfolio data from the API
-  const loadPortfolio = async () => {
-    setLoading(true);
-    setError("");
-
-    try {
-      const data = await fetchPortfolio(); // Use the imported API function
-      setPortfolio(data);
-    } catch (err) {
-      console.error("Failed to fetch portfolio:", err);
-      setError("Failed to fetch portfolio data. Please try again later.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Fetch data on component mount
   useEffect(() => {
+    const loadPortfolio = async () => {
+      try {
+        setIsLoading(true);
+        setError(null);
+        const data = await api.fetchPortfolio();
+        if (data.success) {
+          setPortfolioData(data);
+          // Pre-populate live prices with LTP from holdings
+          const initialPrices = data.holdings.reduce((acc, holding) => {
+            acc[holding.symbol] = { ltp: holding.ltp };
+            return acc;
+          }, {});
+          setLivePrices(initialPrices);
+        } else {
+          throw new Error(data.message || "Failed to fetch portfolio.");
+        }
+      } catch (err) {
+        setError(err.message);
+        toast.error(`Error: ${err.message}`);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
     loadPortfolio();
   }, []);
 
-  // Loading state
-  if (loading) {
+  useEffect(() => {
+    const onPriceUpdate = (data) => {
+        setLivePrices(currentPrices => ({
+            ...currentPrices,
+            ...data.allPrices
+        }));
+    };
+
+    const unsubscribe = priceUpdateService.subscribe(onPriceUpdate);
+    return () => unsubscribe();
+  }, []);
+
+  const processedPortfolio = useMemo(() => {
+    if (!portfolioData) return null;
+
+    const holdingsWithLiveData = portfolioData.holdings.map(holding => {
+      const livePrice = livePrices[holding.symbol]?.ltp || holding.ltp;
+      const market_value = livePrice * holding.quantity;
+      const unrealized_pnl = market_value - holding.investment_value;
+      return { ...holding, ltp: livePrice, market_value, unrealized_pnl };
+    });
+
+    const current_holdings_value = holdingsWithLiveData.reduce((sum, h) => sum + h.market_value, 0);
+    const unrealized_pnl = current_holdings_value - portfolioData.summary.total_investment;
+    const total_portfolio_value = portfolioData.summary.cash_balance + current_holdings_value;
+    const total_pnl = unrealized_pnl + portfolioData.summary.realized_pnl;
+
+    return {
+      summary: { ...portfolioData.summary, holdings_value: current_holdings_value, unrealized_pnl, total_portfolio_value, total_pnl },
+      holdings: holdingsWithLiveData,
+    };
+  }, [portfolioData, livePrices]);
+  
+  const formatCurrency = (value) => {
+    if (typeof value !== 'number') return '₹0.00';
+    return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  const getPnlColor = (value) => {
+    if (value > 0) return 'text-green-600';
+    if (value < 0) return 'text-red-600';
+    return 'text-gray-700 dark:text-gray-300';
+  };
+
+  const SummaryCard = ({ title, value, icon: Icon, colorClass = 'text-gray-900 dark:text-white' }) => (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+        <CardTitle className="text-sm font-medium">{title}</CardTitle>
+        <Icon className={`h-4 w-4 ${colorClass.replace('text-', 'text-muted-')}`} />
+      </CardHeader>
+      <CardContent>
+        <div className={`text-2xl font-bold ${colorClass}`}>{formatCurrency(value)}</div>
+      </CardContent>
+    </Card>
+  );
+
+  if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-white">
-        <Skeleton className="w-96 h-24" />
+      <div className="p-4 sm:p-6 lg:p-8 space-y-6">
+        <Skeleton className="h-8 w-48" />
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <Skeleton className="h-24" />
+          <Skeleton className="h-24" />
+          <Skeleton className="h-24" />
+          <Skeleton className="h-24" />
+        </div>
+        <Skeleton className="h-96" />
       </div>
     );
   }
 
+  if (error) {
+    return <div className="p-8 text-center text-red-500">{error}</div>;
+  }
+  
+  if (!processedPortfolio) {
+    return <div className="p-8 text-center">No portfolio data available.</div>;
+  }
+
+  const { summary, holdings } = processedPortfolio;
+
   return (
-    <div className="p-8 bg-white min-h-screen">
-      <h2 className="text-2xl font-semibold mb-6 text-center">Portfolio</h2>
+    <motion.div 
+      className="p-4 sm:p-6 lg:p-8"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5 }}
+    >
+      <h1 className="text-3xl font-bold mb-6">My Portfolio</h1>
 
-      {error && (
-        <div className="mb-4 text-center">
-          <p className="text-yellow-600">{error}</p>
-        </div>
-      )}
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-6">
+        <SummaryCard title="Total Value" value={summary.total_portfolio_value} icon={Wallet} colorClass="text-blue-600" />
+        <SummaryCard title="Holdings Value" value={summary.holdings_value} icon={Briefcase} />
+        <SummaryCard title="Unrealized P/L" value={summary.unrealized_pnl} icon={summary.unrealized_pnl >= 0 ? TrendingUp : TrendingDown} colorClass={getPnlColor(summary.unrealized_pnl)} />
+        <SummaryCard title="Cash Balance" value={summary.cash_balance} icon={Wallet} colorClass="text-green-600" />
+      </div>
 
-      {/* Portfolio Summary */}
-      <Card className="p-6 bg-gray-100 rounded-lg shadow-md mb-6">
-        <CardContent className="space-y-4">
-          <p className="text-lg font-medium">
-            Portfolio Value:{" "}
-            <span className="font-bold text-blue-600">
-              ₹{portfolio?.portfolio_value?.toLocaleString()}
-            </span>
-          </p>
-          <p className="text-lg font-medium">
-            Balance:{" "}
-            <span className="font-bold text-green-600">
-              ₹{portfolio?.balance?.toLocaleString()}
-            </span>
-          </p>
-          <p className="text-lg font-medium">
-            Total Investment:{" "}
-            <span className="font-bold text-gray-800">
-              ₹{portfolio?.total_investment?.toLocaleString()}
-            </span>
-          </p>
-          <p className="text-lg font-medium">
-            Total Profit/Loss:{" "}
-            <span
-              className={`font-bold ${
-                portfolio?.total_profit_loss >= 0
-                  ? "text-green-600"
-                  : "text-red-600"
-              }`}
-            >
-              ₹{portfolio?.total_profit_loss?.toLocaleString()}
-            </span>
-          </p>
-        </CardContent>
-      </Card>
+       <div className="grid gap-4 md:grid-cols-3 mb-6">
+          <SummaryCard title="Total Investment" value={summary.total_investment} icon={PlusCircle} />
+          <SummaryCard title="Realized P/L" value={summary.realized_pnl} icon={summary.realized_pnl >= 0 ? PlusCircle : MinusCircle} colorClass={getPnlColor(summary.realized_pnl)} />
+          <SummaryCard title="Total P/L" value={summary.total_pnl} icon={summary.total_pnl >= 0 ? TrendingUp : TrendingDown} colorClass={getPnlColor(summary.total_pnl)} />
+      </div>
 
-      {/* Holdings Section */}
-      <Card className="p-6 bg-gray-100 rounded-lg shadow-md mb-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Holdings ({holdings.length})</CardTitle>
+        </CardHeader>
         <CardContent>
-          <h3 className="text-lg font-semibold mb-4">Holdings</h3>
-          {portfolio?.holdings?.length > 0 ? (
-            <div className="grid gap-4">
-              {portfolio.holdings.map((holding, index) => {
-                // Ensure profit_loss_percentage is a number
-                const profitLossPercentage =
-                  typeof holding.profit_loss_percentage === "number"
-                    ? holding.profit_loss_percentage
-                    : 0;
-
-                return (
-                  <Card key={index} className="p-4 bg-white shadow-sm border rounded-lg">
-                    <CardContent className="space-y-2">
-                      <p className="font-semibold text-lg">{holding.symbol}</p>
-                      <p className="text-gray-700">Quantity: {holding.quantity}</p>
-                      <p className="text-gray-700">
-                        Avg Price: ₹{holding.average_price?.toLocaleString()}
-                      </p>
-                      <p className="text-gray-700">
-                        Current Price: ₹{holding.current_price?.toLocaleString()}
-                      </p>
-                      <p className="text-gray-700">
-                        Investment Value: ₹{holding.investment_value?.toLocaleString()}
-                      </p>
-                      <p className="text-gray-700">
-                        Current Value: ₹{holding.current_value?.toLocaleString()}
-                      </p>
-                      <p className="text-gray-700">
-                        Profit/Loss:{" "}
-                        <span
-                          className={`font-bold ${
-                            holding.profit_loss >= 0 ? "text-green-600" : "text-red-600"
-                          }`}
-                        >
-                          ₹{holding.profit_loss?.toLocaleString()}
-                        </span>
-                      </p>
-                      <p className="text-gray-700">
-                        Profit/Loss (%):{" "}
-                        <span
-                          className={`font-bold ${
-                            profitLossPercentage >= 0
-                              ? "text-green-600"
-                              : "text-red-600"
-                          }`}
-                        >
-                          {profitLossPercentage.toFixed(2)}%
-                        </span>
-                      </p>
-                    </CardContent>
-                  </Card>
-                );
-              })}
-            </div>
-          ) : (
-            <p className="text-gray-500 text-center">No holdings available.</p>
-          )}
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Symbol</TableHead>
+                <TableHead className="text-right">Qty</TableHead>
+                <TableHead className="text-right">Avg. Price</TableHead>
+                <TableHead className="text-right">LTP</TableHead>
+                <TableHead className="text-right">Market Value</TableHead>
+                <TableHead className="text-right">Unrealized P/L</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {holdings.length > 0 ? (
+                holdings.map(holding => (
+                  <TableRow key={holding.symbol}>
+                    <TableCell className="font-medium">{holding.symbol}</TableCell>
+                    <TableCell className="text-right">{holding.quantity}</TableCell>
+                    <TableCell className="text-right">{formatCurrency(holding.average_price)}</TableCell>
+                    <TableCell className="text-right">{formatCurrency(holding.ltp)}</TableCell>
+                    <TableCell className="text-right">{formatCurrency(holding.market_value)}</TableCell>
+                    <TableCell className={`text-right font-medium ${getPnlColor(holding.unrealized_pnl)}`}>
+                      {formatCurrency(holding.unrealized_pnl)}
+                    </TableCell>
+                  </TableRow>
+                ))
+              ) : (
+                <TableRow>
+                  <TableCell colSpan={6} className="text-center">You have no holdings yet.</TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
         </CardContent>
       </Card>
-
-      {/* Recent Transactions Section */}
-      <Card className="p-6 bg-gray-100 rounded-lg shadow-md">
-        <CardContent>
-          <h3 className="text-lg font-semibold mb-4">Recent Transactions</h3>
-          {portfolio?.recent_transactions?.length > 0 ? (
-            <div className="grid gap-4">
-              {portfolio.recent_transactions.map((transaction, index) => (
-                <Card key={index} className="p-4 bg-white shadow-sm border rounded-lg">
-                  <CardContent className="space-y-2">
-                    <p className="font-semibold text-lg">{transaction.symbol}</p>
-                    <p className="text-gray-700">
-                      Action:{" "}
-                      <span
-                        className={`font-bold ${
-                          transaction.action === "buy" ? "text-green-600" : "text-red-600"
-                        }`}
-                      >
-                        {transaction.action.toUpperCase()}
-                      </span>
-                    </p>
-                    <p className="text-gray-700">Quantity: {transaction.quantity}</p>
-                    <p className="text-gray-700">
-                      Price: ₹{transaction.price?.toLocaleString()}
-                    </p>
-                    <p className="text-gray-700">
-                      Total Value: ₹{transaction.total_value?.toLocaleString()}
-                    </p>
-                    <p className="text-gray-700">
-                      Date: {new Date(transaction.date).toLocaleString()}
-                    </p>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          ) : (
-            <p className="text-gray-500 text-center">No recent transactions.</p>
-          )}
-        </CardContent>
-      </Card>
-    </div>
+    </motion.div>
   );
 };
 
-export default Portfolio;
+export default PortfolioPage;
+

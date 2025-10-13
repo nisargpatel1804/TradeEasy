@@ -1,158 +1,119 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { authService } from '../services/auth.js';
+import React, { createContext, useState, useEffect, useContext, useCallback } from 'react';
+import * as authService from '../services/auth.js'; // Using the dedicated auth service with .js extension
 import { useNavigate } from 'react-router-dom';
-import { Loader2 } from 'lucide-react';
-import { useToast } from '@/assets/ui/use-toast';
 
-// Global flag to prevent multiple session verifications across component instances
-let isVerifyingSessionGlobal = false;
-
-// Create the context to be shared across the application
 const AuthContext = createContext(null);
 
 /**
- * The AuthProvider component is a wrapper that provides authentication state
- * and functions to all of its children components.
+ * Custom hook to easily access the AuthContext from any component.
+ * @returns {object} The authentication context value.
+ */
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error('useAuth must be used within an AuthProvider');
+  }
+  return context;
+};
+
+/**
+ * The AuthProvider component wraps the application and provides global
+ * authentication state and functions.
  */
 export const AuthProvider = ({ children }) => {
-  const [isLoggedIn, setIsLoggedIn] = useState(authService.isAuthenticatedSync());
-  const [isLoading, setIsLoading] = useState(true); // Manages loading state for initial auth check
-  const [clientId, setClientId] = useState(authService.getClientId());
-  const [lastLogoutTime, setLastLogoutTime] = useState(0); // Track last logout to prevent spam
+  const [user, setUser] = useState(null);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isLoading, setIsLoading] = useState(true); // Manages loading for the initial session check
   const navigate = useNavigate();
-  const { toast } = useToast();
 
-  // Memoized logout handler to ensure consistency
+  /**
+   * Memoized logout function. It calls the logout service, updates state,
+   * and navigates the user to the login page.
+   */
   const handleLogout = useCallback(async () => {
-    // Prevent rapid successive logout attempts (debounce to 1 second)
-    const now = Date.now();
-    if (now - lastLogoutTime < 1000) {
-      console.log('Logout debounced - too soon since last logout attempt');
-      return;
+    try {
+      await authService.logout();
+    } catch (error) {
+      console.error("Logout failed, but proceeding with client-side cleanup:", error);
+    } finally {
+      setUser(null);
+      setIsAuthenticated(false);
+      navigate('/login');
     }
-    setLastLogoutTime(now);
-
-    await authService.logout();
-    setClientId(authService.getClientId());
-    // The 'authStateChanged' event dispatched by authService will update isLoggedIn
-    navigate('/login');
-  }, [navigate, lastLogoutTime]);
-
+  }, [navigate]);
+  
+  // Effect to verify user session on initial application load.
   useEffect(() => {
-    // This handler listens for login/logout events from our authService
-    const handleAuthChange = () => {
-      setIsLoggedIn(authService.isAuthenticatedSync());
-      setClientId(authService.getClientId());
+    const verifyUserSession = async () => {
+      try {
+        const data = await authService.checkAuth();
+        if (data.isAuthenticated) {
+          setUser(data.user);
+          setIsAuthenticated(true);
+        }
+      } catch (error) {
+        // This is expected if the user is not logged in.
+        // The api.js interceptor will handle the 401.
+        setUser(null);
+        setIsAuthenticated(false);
+      } finally {
+        setIsLoading(false);
+      }
     };
+    
+    verifyUserSession();
+  }, []);
 
-    // This handler listens for 401 Unauthorized errors from our apiService
-    const handleUnauthorized = (event) => {
-      const isExpired = event?.detail?.reason === 'SESSION_EXPIRED';
-      const message = isExpired
-        ? 'Your session has expired. Please sign in again.'
-        : 'Authentication issue detected. Please sign in to continue.';
-
-      console.info(`[AuthContext] ${message}`);
-      toast({
-        title: isExpired ? 'Session ended' : 'Authentication required',
-        description: message,
-        variant: 'destructive',
-      });
-
+  // Effect to listen for the global 'unauthorized' event dispatched by api.js
+  useEffect(() => {
+    const onUnauthorized = () => {
+      console.log("Session expired or invalid. Logging out.");
       handleLogout();
     };
 
-    // Subscribe to custom events
-    window.addEventListener('authStateChanged', handleAuthChange);
-    window.addEventListener('unauthorized', handleUnauthorized);
+    window.addEventListener('unauthorized', onUnauthorized);
 
-    // Cleanup function to remove listeners when the component unmounts
     return () => {
-      window.removeEventListener('authStateChanged', handleAuthChange);
-      window.removeEventListener('unauthorized', handleUnauthorized);
+      window.removeEventListener('unauthorized', onUnauthorized);
     };
-  }, []); // Remove dependencies that cause re-runs
-
-  // Separate effect for initial session verification
-  useEffect(() => {
-    // Initial check to verify session with the backend when the app loads
-    if (!isVerifyingSessionGlobal) {
-      // If we're clearly logged out locally, skip check-auth to avoid 401 noise
-      if (!authService.isAuthenticatedSync()) {
-        setIsLoading(false);
-        return;
-      }
-      isVerifyingSessionGlobal = true;
-      authService.verifySession().then(isValid => {
-        if (!isValid) {
-          // If server says not authenticated, clear local state
-          // Silenced info log
-          localStorage.removeItem('isAuthenticated');
-          localStorage.removeItem('client_id');
-          window.dispatchEvent(new Event('authStateChanged'));
-        }
-        setIsLoading(false); // Auth check is complete
-        isVerifyingSessionGlobal = false;
-      }).catch(() => {
-        setIsLoading(false);
-        isVerifyingSessionGlobal = false;
-      });
-    }
-  }, []); // Only run once on mount
+  }, [handleLogout]);
 
   /**
-   * Provides a login function that components can call.
-   * It uses the authService to perform the login and then navigates on success.
+   * Login function to be called from components.
+   * It uses the authService, updates the state on success, and navigates.
+   * @param {object} credentials - { client_id, password }
    */
   const login = async (credentials) => {
-    const response = await authService.login(credentials);
-    if (response?.success) {
-      if (response.client_id) {
-        setClientId(response.client_id);
-      }
-      navigate('/dashboard');
-      return response;
+    const data = await authService.login(credentials);
+    if (data.success) {
+      setUser(data.user);
+      setIsAuthenticated(true);
+      navigate('/dashboard'); // Navigate to a protected route on successful login
     }
-
-    const loginError = new Error(response?.message || 'Login failed.');
-    loginError.code = response?.code || 'LOGIN_FAILED';
-    throw loginError;
+    return data;
   };
 
-  // The value provided to consuming components
-  const value = {
-    isLoggedIn,
+  const contextValue = {
+    user,
+    isAuthenticated,
     isLoading,
-    clientId,
     login,
-    logout: handleLogout, // Provide the memoized logout function
+    logout: handleLogout,
   };
 
-  // While checking auth, show a loading screen to prevent UI flashes
+  // While checking the initial session, display a loading indicator.
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center h-screen w-full">
-        <Loader2 className="w-10 h-10 animate-spin text-gray-700" />
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+        <h2>Loading...</h2>
       </div>
     );
   }
 
   return (
-    <AuthContext.Provider value={value}>
+    <AuthContext.Provider value={contextValue}>
       {children}
     </AuthContext.Provider>
   );
-};
-
-/**
- * Custom hook `useAuth` for easy consumption of the AuthContext in components.
- * This avoids the need to import `useContext` and `AuthContext` everywhere.
- */
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
 };
 

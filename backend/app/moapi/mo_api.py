@@ -61,6 +61,11 @@ class MotilalOswalAPI:
         self.market_hours = MarketHoursManager()
         self.websocket_version = "3.0"
         self.registered_scrips = []
+        self.endpoints = {
+            "ltp": os.getenv("MO_API_LTP_ENDPOINT", "/market/v1/getltp"),
+            "index_master": os.getenv("MO_API_INDEX_MASTER_ENDPOINT", "/market/v1/getindexdata"),
+            "bulk_eod": os.getenv("MO_API_BULK_EOD_ENDPOINT", "/market/v1/getbulkeoddata"),
+        }
         self._update_headers()
 
     def _update_headers(self, auth_token=None):
@@ -75,6 +80,15 @@ class MotilalOswalAPI:
         if auth_token:
             self.headers['Authorization'] = auth_token
         self.session.headers.update(self.headers)
+
+    def _ensure_authenticated(self) -> bool:
+        """Ensures the session has a valid auth token before making API calls."""
+        if self.auth_token:
+            return True
+        if self.login():
+            return True
+        logger.error("MO API authentication failed. Ensure credentials are correct.")
+        return False
 
     def _make_request(self, method, endpoint, payload=None):
         """Generic method to make REST API requests."""
@@ -108,9 +122,46 @@ class MotilalOswalAPI:
 
     def get_scrips_by_exchange(self, exchangename: str):
         """Fetches the scrip/instrument master for a given exchange name."""
-        if not self.auth_token: self.login()
+        if not self._ensure_authenticated():
+            return None
         endpoint = "/report/v1/getscripsbyexchangename"
         return self._make_request("POST", endpoint, {"exchangename": exchangename})
+
+    def get_ltp_data(self, exchange: str, scripcode: int):
+        """Fetches live quote data (LTP) for a specific scrip."""
+        if not self._ensure_authenticated():
+            return None
+
+        payload = {
+            "exchange": str(exchange).upper(),
+            "scripcode": int(scripcode)
+        }
+        response = self._make_request("POST", self.endpoints["ltp"], payload)
+        if not response:
+            logger.warning(f"LTP data request failed for {exchange}:{scripcode}")
+        return response
+
+    def get_index_data(self, exchange: str):
+        """Retrieves index master information for the given exchange."""
+        if not self._ensure_authenticated():
+            return None
+
+        payload = {"exchangename": str(exchange).upper()}
+        response = self._make_request("POST", self.endpoints["index_master"], payload)
+        if not response:
+            logger.warning(f"Index data request failed for exchange {exchange}")
+        return response
+
+    def get_bulk_eod_data(self, exchange: str):
+        """Fetches bulk end-of-day price data for the given exchange."""
+        if not self._ensure_authenticated():
+            return None
+
+        payload = {"exchangename": str(exchange).upper()}
+        response = self._make_request("POST", self.endpoints["bulk_eod"], payload)
+        if not response:
+            logger.warning(f"Bulk EOD data request failed for exchange {exchange}")
+        return response
 
     # --- WebSocket Methods ---
     def connect_websocket(self, on_message, on_open, on_close, on_error):

@@ -1,11 +1,11 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter as Router } from 'react-router-dom';
-import App from '@/App.jsx';
-import { AuthProvider } from '@/context/AuthContext.jsx';
-import { DataProvider } from '@/context/DataContext.jsx';
-import { SocketProvider } from '@/context/SocketContext.jsx';
-import '@/index.css';
+import App from './App.jsx';
+import { AuthProvider } from './context/AuthContext.jsx';
+import { DataProvider } from './context/DataContext.jsx';
+import { SocketProvider } from './context/SocketContext.jsx';
+import './index.css';
 
 /**
  * The root of the React application.

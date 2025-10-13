@@ -1,132 +1,175 @@
 import { useEffect, useState } from "react";
-import { fetchOrders } from "@/services/api";
-import { Skeleton } from "@/assets/ui/skeleton";
-import { Card, CardContent } from "@/assets/ui/card";
 import { motion } from "framer-motion";
+import { toast } from "react-hot-toast";
+import * as api from "../services/api.js";
+import { Card, CardContent } from "../assets/ui/card.jsx";
+import { Skeleton } from "../assets/ui/skeleton.jsx";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../assets/ui/Tabs.jsx";
+import { Scroll, History } from "lucide-react";
 
-const Orders = () => {
-  const [executedOrders, setExecutedOrders] = useState([]);
-  const [pendingOrders, setPendingOrders] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+const OrdersPage = () => {
+  const [orders, setOrders] = useState({ executed: [], pending: [] });
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     const loadOrders = async () => {
-      setLoading(true);
-      setError("");
-
+      setIsLoading(true);
+      setError(null);
       try {
-        const data = await fetchOrders();
-        const executed = data?.executed_orders ?? [];
-        const pending = data?.pending_orders ?? [];
-
-        setExecutedOrders(executed);
-        setPendingOrders(pending);
-
-        if ((executed.length + pending.length) === 0) {
-          setError("You haven't placed any orders yet.");
+        const data = await api.fetchOrders();
+        if (data.success) {
+          setOrders({
+            executed: data.executed || [],
+            pending: data.pending || [],
+          });
+        } else {
+          throw new Error(data.message || "Failed to fetch orders.");
         }
       } catch (err) {
-        const apiMessage = err?.response?.data?.error;
-        setError(apiMessage || "Failed to fetch orders. Please try again later.");
+        const errorMessage = err.message || "Could not load your order history.";
+        setError(errorMessage);
+        toast.error(errorMessage);
       } finally {
-        setLoading(false);
+        setIsLoading(false);
       }
     };
 
     loadOrders();
   }, []);
 
-  if (loading) {
-    return (
-      <div className="flex flex-col items-center justify-center min-h-screen bg-white gap-4">
-        {[...Array(3)].map((_, index) => (
-          <Skeleton key={index} className="w-96 h-24" />
-        ))}
-      </div>
-    );
-  }
+  return (
+    <div className="p-4 md:p-8 max-w-7xl mx-auto">
+      <header className="mb-6">
+        <h1 className="text-3xl font-bold text-gray-900">Order History</h1>
+        <p className="text-gray-500">Review your executed and pending trades.</p>
+      </header>
 
-  if (error) {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-white">
-        <p className="text-red-600 font-medium">{error}</p>
-      </div>
-    );
-  }
-
-  const renderOrderCard = (order, index) => (
-    <motion.div
-      key={order.id || `${order.symbol}-${index}`}
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5, delay: index * 0.05 }}
-    >
-      <Card className="p-4 bg-gray-100 rounded-lg shadow-md">
-        <CardContent className="space-y-2">
-          <p className="font-semibold">Symbol: {order.symbol || "N/A"}</p>
-          <p
-            className={`font-bold ${
-              order.action?.toLowerCase() === "buy" ? "text-green-600" : "text-red-600"
-            }`}
-          >
-            {order.action?.toUpperCase() || "N/A"}
-          </p>
-          <p className="text-gray-700">Quantity: {order.quantity ?? "N/A"}</p>
-          {order.price !== undefined && order.price !== null && (
-            <p className="text-gray-700">Price: ₹{Number(order.price).toFixed(2)}</p>
-          )}
-          {order.limit_price !== undefined && order.limit_price !== null && (
-            <p className="text-gray-700">Limit: ₹{Number(order.limit_price).toFixed(2)}</p>
-          )}
-          {order.stop_loss !== undefined && order.stop_loss !== null && (
-            <p className="text-gray-700">Stop Loss: ₹{Number(order.stop_loss).toFixed(2)}</p>
-          )}
-          <p className="text-gray-500">
-            Date: {order.date ? new Date(order.date).toLocaleString() : "N/A"}
-          </p>
-          <p className="text-sm text-gray-500">Type: {order.order_type?.toUpperCase() || "N/A"}</p>
+      <Card className="shadow-lg">
+        <CardContent className="p-4">
+          <Tabs defaultValue="executed">
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="executed">
+                <History className="w-4 h-4 mr-2" />
+                Executed ({orders.executed.length})
+              </TabsTrigger>
+              <TabsTrigger value="pending">
+                <Scroll className="w-4 h-4 mr-2" />
+                Pending ({orders.pending.length})
+              </TabsTrigger>
+            </TabsList>
+            
+            <TabsContent value="executed" className="mt-4">
+              <OrderList orders={orders.executed} isLoading={isLoading} error={error} type="executed" />
+            </TabsContent>
+            
+            <TabsContent value="pending" className="mt-4">
+                <OrderList orders={orders.pending} isLoading={isLoading} error={error} type="pending" />
+            </TabsContent>
+          </Tabs>
         </CardContent>
       </Card>
-    </motion.div>
-  );
-
-  return (
-    <div className="p-8 bg-white">
-      <motion.h2
-        className="text-2xl font-semibold mb-6 text-center"
-        initial={{ opacity: 0, y: -10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-      >
-        Orders
-      </motion.h2>
-
-      <div className="space-y-8">
-        <section>
-          <h3 className="text-xl font-semibold mb-4">Executed Orders</h3>
-          {executedOrders.length === 0 ? (
-            <p className="text-gray-500">No executed orders yet.</p>
-          ) : (
-            <div className="grid gap-4">
-              {executedOrders.map((order, index) => renderOrderCard(order, index))}
-            </div>
-          )}
-        </section>
-
-        <section>
-          <h3 className="text-xl font-semibold mb-4">Pending Orders</h3>
-          {pendingOrders.length === 0 ? (
-            <p className="text-gray-500">No pending orders at the moment.</p>
-          ) : (
-            <div className="grid gap-4">
-              {pendingOrders.map((order, index) => renderOrderCard(order, index))}
-            </div>
-          )}
-        </section>
-      </div>
     </div>
   );
 };
 
-export default Orders;
+const OrderList = ({ orders, isLoading, error, type }) => {
+    if (isLoading) {
+        return (
+            <div className="space-y-4">
+                {[...Array(3)].map((_, i) => <OrderCardSkeleton key={i} />)}
+            </div>
+        );
+    }
+
+    if (error && orders.length === 0) {
+        return <div className="text-center py-12 text-red-500">{error}</div>;
+    }
+
+    if (orders.length === 0) {
+        return <div className="text-center py-12 text-gray-500">No {type} orders found.</div>;
+    }
+
+    return (
+        <div className="space-y-4">
+            {orders.map((order, index) => (
+                <OrderCard key={order.id || index} order={order} index={index} />
+            ))}
+        </div>
+    );
+};
+
+
+const OrderCard = ({ order, index }) => {
+  const isBuy = order.action === "BUY";
+  
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3, delay: index * 0.05 }}
+    >
+      <Card className="hover:shadow-md transition-shadow">
+        <CardContent className="p-4 grid grid-cols-2 md:grid-cols-4 gap-4 items-center">
+          <div>
+            <p className="text-sm text-gray-500">Symbol</p>
+            <p className="font-bold text-lg">{order.symbol}</p>
+          </div>
+          <div>
+            <p className="text-sm text-gray-500">Action</p>
+            <p className={`font-semibold ${isBuy ? "text-green-600" : "text-red-600"}`}>
+              {order.action}
+            </p>
+          </div>
+          <div>
+            <p className="text-sm text-gray-500">Quantity</p>
+            <p className="font-semibold">{order.quantity}</p>
+          </div>
+          <div>
+            <p className="text-sm text-gray-500">Price</p>
+            <p className="font-semibold">₹{order.price.toFixed(2)}</p>
+          </div>
+          <div>
+            <p className="text-sm text-gray-500">Order Type</p>
+            <p className="font-semibold">{order.order_type}</p>
+          </div>
+           <div>
+            <p className="text-sm text-gray-500">Status</p>
+            <p className="font-semibold capitalize">{order.status}</p>
+          </div>
+          <div className="col-span-2 md:col-span-1">
+            <p className="text-sm text-gray-500">Date</p>
+            <p className="font-semibold text-xs">{new Date(order.date).toLocaleString()}</p>
+          </div>
+        </CardContent>
+      </Card>
+    </motion.div>
+  );
+};
+
+const OrderCardSkeleton = () => (
+    <Card>
+        <CardContent className="p-4 grid grid-cols-2 md:grid-cols-4 gap-4 items-center">
+            <div>
+                <Skeleton className="h-4 w-1/2 mb-1" />
+                <Skeleton className="h-6 w-3/4" />
+            </div>
+             <div>
+                <Skeleton className="h-4 w-1/2 mb-1" />
+                <Skeleton className="h-5 w-1/4" />
+            </div>
+             <div>
+                <Skeleton className="h-4 w-1/2 mb-1" />
+                <Skeleton className="h-5 w-1/2" />
+            </div>
+            <div>
+                <Skeleton className="h-4 w-1/2 mb-1" />
+                <Skeleton className="h-5 w-3/4" />
+            </div>
+        </CardContent>
+    </Card>
+);
+
+
+export default OrdersPage;
+

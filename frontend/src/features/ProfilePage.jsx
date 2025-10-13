@@ -1,167 +1,170 @@
 import { useEffect, useState } from "react";
-import { fetchProfile as fetchProfileApi, updateProfile } from "@/services/api";
-import { isAuthenticatedSync } from "@/services/auth";
-import { Input } from "@/assets/ui/input";
-import { Button } from "@/assets/ui/button";
-import { Card, CardContent } from "@/assets/ui/card";
-import { Skeleton } from "@/assets/ui/skeleton";
 import { motion } from "framer-motion";
-import { useDataContext } from "@/context/DataContext";
+import { toast } from "react-hot-toast";
+import * as api from "../services/api.js";
+import { useDataContext } from "../context/DataContext.jsx";
+import { Skeleton } from "../assets/ui/skeleton.jsx";
+import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx";
+import { Input } from "../assets/ui/input.jsx";
+import { Button } from "../assets/ui/button.jsx";
+import { Label } from "../assets/ui/label.jsx";
+import { User, Mail, Smartphone, Loader2 } from "lucide-react";
 
 const ProfilePage = () => {
-  const [profile, setProfile] = useState({ email: "", mobile: "" });
-  const [loading, setLoading] = useState(true);
-  const [updating, setUpdating] = useState(false);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
-  const { getProfile: getProfileFromContext } = useDataContext();
+  const { profileData: initialProfile, refreshProfile } = useDataContext();
+  const [profile, setProfile] = useState({ username: "", email: "", mobile: "" });
+  const [initialData, setInitialData] = useState({ username: "", email: "", mobile: "" });
+  const [isLoading, setIsLoading] = useState(true);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
-    const fetchProfile = async () => {
-      setLoading(true);
-      setError("");
+    if (initialProfile) {
+      // The mobile number from backend includes +91, remove it for editing
+      const mobileForInput = initialProfile.mobile ? initialProfile.mobile.replace(/^\+91/, '') : '';
+      const data = {
+        username: initialProfile.username || '',
+        email: initialProfile.email || '',
+        mobile: mobileForInput,
+      };
+      setProfile(data);
+      setInitialData(data); // Store initial state to compare against
+      setIsLoading(false);
+    }
+  }, [initialProfile]);
 
-      // Check if user is authenticated
-      if (!isAuthenticatedSync()) {
-        setError("User not authenticated. Please log in.");
-        setLoading(false);
+  const hasChanges = () => {
+    return (
+      profile.username !== initialData.username ||
+      profile.email !== initialData.email ||
+      profile.mobile !== initialData.mobile
+    );
+  };
+
+  const handleChange = (e) => {
+    setProfile({ ...profile, [e.target.name]: e.target.value });
+    setError(null); // Clear previous errors on change
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!hasChanges() || isUpdating) return;
+    
+    // Frontend validation
+    if (!/^\d{10}$/.test(profile.mobile)) {
+        toast.error("Mobile number must be 10 digits.");
+        setError("Mobile number must be 10 digits.");
         return;
-      }
-
-      try {
-        const response = await fetchProfileApi();
-        setProfile(response);
-      } catch (err) {
-        console.error("Profile fetch error:", err);
-        setError(err.error || "Failed to fetch profile");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchProfile();
-  }, []);
-
-  const handleUpdateProfile = async () => {
-    setUpdating(true);
-    setError("");
-    setSuccess("");
-
-    // ✅ Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(profile.email)) {
-      setError("Invalid email format");
-      setUpdating(false);
-      return;
+    }
+     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profile.email)) {
+        toast.error("Please enter a valid email address.");
+        setError("Please enter a valid email address.");
+        return;
     }
 
-    // ✅ Validate mobile number format (Assuming 10-digit)
-    const mobileRegex = /^\d{10}$/;
-    if (!mobileRegex.test(profile.mobile)) {
-      setError("Invalid mobile number (10 digits required)");
-      setUpdating(false);
-      return;
-    }
+    setIsUpdating(true);
+    setError(null);
 
     try {
-      // Check if user is authenticated
-      if (!isAuthenticatedSync()) {
-        throw new Error("User not authenticated");
-      }
+      // Add back the +91 prefix before sending to the backend
+      const payload = { ...profile, mobile: `+91${profile.mobile}` };
+      const response = await api.updateProfile(payload);
 
-      await updateProfile(profile);
-      setSuccess("Profile updated successfully!");
-
-      try {
-        let refreshedProfile = null;
-        if (typeof getProfileFromContext === "function") {
-          refreshedProfile = await getProfileFromContext(true);
-        } else {
-          refreshedProfile = await fetchProfileApi();
-        }
-        if (refreshedProfile) {
-          setProfile(refreshedProfile);
-        }
-      } catch (refreshError) {
-        console.warn("Profile refresh after update failed:", refreshError);
+      if (response.success) {
+        toast.success("Profile updated successfully!");
+        // Refresh the global context and local state
+        await refreshProfile();
+      } else {
+        throw new Error(response.message || "Failed to update profile.");
       }
     } catch (err) {
-      console.error("Profile update error:", err);
-      setError(err.error || "Failed to update profile");
+      setError(err.message);
+      toast.error(`Update failed: ${err.message}`);
     } finally {
-      setUpdating(false);
+      setIsUpdating(false);
     }
   };
 
-  if (loading) {
+  if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-white">
-        <Skeleton className="w-96 h-32" aria-label="Loading profile..." />
-      </div>
+        <div className="p-4 sm:p-6 lg:p-8 space-y-4">
+            <Skeleton className="h-8 w-48" />
+            <Skeleton className="h-64 w-full max-w-lg" />
+        </div>
     );
   }
 
   return (
-    <div className="p-8 bg-white flex flex-col items-center">
-      <motion.h2
-        className="text-2xl font-semibold mb-6"
-        initial={{ opacity: 0, y: -10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-      >
-        Profile
-      </motion.h2>
-
-      {error && <p className="text-red-600 mb-4 font-medium">{error}</p>}
-      {success && <p className="text-green-600 mb-4 font-medium">{success}</p>}
-
-      <motion.div
-        className="w-full max-w-md"
-        initial={{ opacity: 0, scale: 0.9 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.5 }}
-      >
-        <Card className="p-6 bg-gray-100 rounded-lg shadow-md">
-          <CardContent className="space-y-4">
-            <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700">
-                Email
-              </label>
+    <motion.div
+      className="p-4 sm:p-6 lg:p-8"
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+    >
+      <Card className="max-w-lg mx-auto">
+        <CardHeader>
+          <CardTitle className="text-2xl font-bold flex items-center gap-2">
+            <User />
+            My Profile
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+            <div className="text-sm bg-blue-50 border border-blue-200 text-blue-800 rounded-lg p-3 mb-6">
+                <strong>Client ID:</strong> {initialProfile?.client_id || 'N/A'} <br/>
+                <strong>Account Balance:</strong> ₹{initialProfile?.balance?.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) || '0.00'}
+            </div>
+            
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {error && <p className="text-sm text-red-600 bg-red-50 p-3 rounded-md">{error}</p>}
+            
+            <div className="space-y-2">
+              <Label htmlFor="username" className="flex items-center gap-2"><User size={16} /> Username</Label>
+              <Input
+                id="username"
+                name="username"
+                type="text"
+                value={profile.username}
+                onChange={handleChange}
+              />
+            </div>
+            
+            <div className="space-y-2">
+              <Label htmlFor="email" className="flex items-center gap-2"><Mail size={16} /> Email</Label>
               <Input
                 id="email"
+                name="email"
                 type="email"
-                placeholder="Enter your email"
                 value={profile.email}
-                onChange={(e) => setProfile({ ...profile, email: e.target.value })}
-                aria-label="Email input"
+                onChange={handleChange}
               />
             </div>
-            <div>
-              <label htmlFor="mobile" className="block text-sm font-medium text-gray-700">
-                Mobile
-              </label>
-              <Input
-                id="mobile"
-                type="tel"
-                placeholder="Enter your mobile number"
-                value={profile.mobile}
-                onChange={(e) => setProfile({ ...profile, mobile: e.target.value })}
-                aria-label="Mobile input"
-              />
+
+            <div className="space-y-2">
+              <Label htmlFor="mobile" className="flex items-center gap-2"><Smartphone size={16} /> Mobile Number</Label>
+              <div className="flex items-center">
+                <span className="inline-flex items-center px-3 rounded-l-md border border-r-0 border-gray-300 bg-gray-50 text-gray-500 text-sm h-10">
+                    +91
+                </span>
+                <Input
+                    id="mobile"
+                    name="mobile"
+                    type="tel"
+                    className="rounded-l-none"
+                    value={profile.mobile}
+                    onChange={handleChange}
+                    maxLength="10"
+                />
+              </div>
             </div>
-            <Button
-              className="bg-black text-white w-full"
-              onClick={handleUpdateProfile}
-              disabled={updating}
-              aria-label="Update Profile Button"
-            >
-              {updating ? "Updating..." : "Update Profile"}
+
+            <Button type="submit" className="w-full" disabled={isUpdating || !hasChanges()}>
+              {isUpdating ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Updating...</> : "Save Changes"}
             </Button>
-          </CardContent>
-        </Card>
-      </motion.div>
-    </div>
+          </form>
+        </CardContent>
+      </Card>
+    </motion.div>
   );
 };
 
 export default ProfilePage;
+

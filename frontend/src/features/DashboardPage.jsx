@@ -1,851 +1,217 @@
-"use client"
+import { useEffect, useState, useMemo } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { motion } from "framer-motion";
+import { toast } from "react-hot-toast";
 
-import { useEffect, useState, useMemo, useCallback } from "react"
-import { useNavigate } from "react-router-dom"
-import { fetchPortfolio, fetchPerformance, fetchWatchlistStocks } from "@/services/api"
-import { useDataContext } from "@/context/DataContext"
-import priceUpdateService from "@/services/priceUpdateService"
-import { useSocketContext } from "@/context/SocketContext"
-import { fetchBatchStockData } from "@/services/api"
-import { Card, CardHeader, CardContent, CardTitle } from "@/assets/ui/card"
-import { Button } from "@/assets/ui/button"
-import { isAuthenticatedSync as isAuthenticated, getClientId } from "@/services/auth"
-import {
-  ChevronLeft,
-  ChevronRight,
-  Star,
-  BarChart3,
-  TrendingUp,
-  TrendingDown,
-  IndianRupee,
-  RefreshCw,
-} from "lucide-react"
-import { motion } from "framer-motion"
-import Navbar from "@/features/Navbar"
-import "@/assets/css/DashboardCss.css"
+import * as api from "../services/api.js";
+import priceUpdateService from "../services/priceUpdateService.js";
+import { useAuth } from "../context/AuthContext.jsx";
+import { useDataContext } from "../context/DataContext.jsx";
 
-const Dashboard = () => {
-  const [loading, setLoading] = useState(true)
-  const [initialLoad, setInitialLoad] = useState(true) // Track initial load
-  const [componentsLoaded, setComponentsLoaded] = useState({
-    portfolio: false,
-    performance: false,
-    watchlist: false,
-    indices: false,
-  })
-  const [componentErrors, setComponentErrors] = useState({
-    portfolio: null,
-    performance: null,
-    watchlist: null,
-    indices: null,
-  })
-  const [retryingComponent, setRetryingComponent] = useState(null)
-  const [error, setError] = useState(null)
-  const [portfolio, setPortfolio] = useState(null)
-  const [performance, setPerformance] = useState(null)
-  const [watchlist, setWatchlist] = useState(null)
-  const [watchlistStocks, setWatchlistStocks] = useState([])
-  const [realTimePrices, setRealTimePrices] = useState({})
-  const [priceUpdateStatus, setPriceUpdateStatus] = useState({
-    isConnected: false,
-    lastUpdate: null,
-    updateCount: 0
-  })
-  const [portfolioPage, setPortfolioPage] = useState(0)
-  const [watchlistPage, setWatchlistPage] = useState(0)
-  const [pollTrigger, setPollTrigger] = useState(0)
-  const [profile, setProfile] = useState({ name: "Client Name", clientId: "TR123456" })
-  const [indices, setIndices] = useState([])
-  const navigate = useNavigate()
-  const { isConnected } = useSocketContext()
-  
-  // Get shared context data
-  const { getProfile, getIndices, getWatchlists } = useDataContext()
+import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx";
+import { Skeleton } from "../assets/ui/skeleton.jsx";
+import { Button } from "../assets/ui/button.jsx";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../assets/ui/table.jsx";
+import { BarChart, PieChart, TrendingUp, TrendingDown, ArrowRight } from "lucide-react";
 
-  const portfolioItemsPerPage = 2
-  const watchlistItemsPerPage = 3
+const DashboardPage = () => {
+    const { isAuthenticated } = useAuth();
+    const { getWatchlists } = useDataContext();
+    const navigate = useNavigate();
 
-  const containerVariants = {
-    hidden: { opacity: 1 },
-    visible: {
-      opacity: 1,
-      transition: {
-        staggerChildren: 0.2,
-      },
-    },
-  }
-
-  const itemVariants = {
-    hidden: { y: 20, opacity: 0 },
-    visible: {
-      y: 0,
-      opacity: 1,
-      transition: {
-        duration: 0.5,
-        ease: "easeOut",
-      },
-    },
-  }
-
-  // Individual component retry functions
-  const retryComponent = async (componentName) => {
-    setRetryingComponent(componentName)
-    setComponentErrors((prev) => ({ ...prev, [componentName]: null }))
-
-    try {
-      let data
-      switch (componentName) {
-        case "portfolio":
-          data = await fetchPortfolio()
-          setPortfolio(data)
-          break
-        case "performance":
-          data = await fetchPerformance()
-          setPerformance(data)
-          break
-        case "watchlist":
-          data = await getWatchlists(true) // Force refresh
-          setWatchlist(data)
-          break
-        case "indices":
-          data = await getIndices(true) // Force refresh
-          setIndices(data)
-          break
-      }
-      setComponentsLoaded((prev) => ({ ...prev, [componentName]: true }))
-    } catch (error) {
-      setComponentErrors((prev) => ({
-        ...prev,
-        [componentName]: error?.message || `Failed to fetch ${componentName}`,
-      }))
-    } finally {
-      setRetryingComponent(null)
-    }
-  }
-
-  // Flag to prevent duplicate API calls in React's StrictMode
-  const [hasFetchedData, setHasFetchedData] = useState(false)
-  
-  useEffect(() => {
-    const fetchData = async () => {
-      // Skip if already fetched data (prevents StrictMode double-fetch)
-      if (hasFetchedData) return
-      
-      try {
-        if (!isAuthenticated()) {
-          navigate("/login")
-          return
-        }
-
-        setLoading(true)
-        document.body.classList.add('loading')
-
-        const profileData = await getProfile()
-        if (profileData) {
-          setProfile({
-            name: profileData.name || "Client Name",
-            clientId: getClientId() || "TR123456",
-          })
-        }
-
-        // Fetch data with individual error handling - no dummy data fallback
-        const portfolioPromise = fetchPortfolio()
-          .then((data) => {
-            setPortfolio(data)
-            setComponentsLoaded((prev) => ({ ...prev, portfolio: true }))
-            return data
-          })
-          .catch((error) => {
-            setComponentErrors((prev) => ({ ...prev, portfolio: error?.message || "Failed to fetch portfolio" }))
-            throw error
-          })
-
-        const performancePromise = fetchPerformance()
-          .then((data) => {
-            setPerformance(data)
-            setComponentsLoaded((prev) => ({ ...prev, performance: true }))
-            return data
-          })
-          .catch((error) => {
-            setComponentErrors((prev) => ({ ...prev, performance: error?.message || "Failed to fetch performance" }))
-            throw error
-          })
-
-        const watchlistPromise = getWatchlists()
-          .then(async (data) => {
-            if (data && !data.error) {
-              // Find the 'Stocks' watchlist and fetch its stocks
-              const stocksWatchlist = data.find(w => w.name === "Stocks")
-              if (stocksWatchlist) {
-                const stocksData = await fetchWatchlistStocks(stocksWatchlist.name)
-                if (stocksData && !stocksData.error) {
-                  const normalized = (stocksData.stocks || []).map(s => ({
-                    symbol: s.symbol,
-                    name: s.name,
-                    price: s.current_price ?? s.price ?? 0,
-                    change: s.change ?? 0,
-                    percent_change: s.percent_change ?? 0,
-                  }))
-                  setWatchlistStocks(normalized)
-                  setWatchlist({ data: normalized })
-                }
-              }
-            }
-            setComponentsLoaded((prev) => ({ ...prev, watchlist: true }))
-            return data
-          })
-          .catch((error) => {
-            setComponentErrors((prev) => ({ ...prev, watchlist: error?.message || "Failed to fetch watchlist" }))
-            throw error
-          })
-
-        const indicesPromise = getIndices()
-          .then((data) => {
-            setIndices(data)
-            setComponentsLoaded((prev) => ({ ...prev, indices: true }))
-            return data
-          })
-          .catch((error) => {
-            setComponentErrors((prev) => ({ ...prev, indices: error?.message || "Failed to fetch indices" }))
-            throw error
-          })
-
-        await Promise.allSettled([portfolioPromise, performancePromise, watchlistPromise, indicesPromise])
-      } catch (error) {
-        setError(error?.message || "Failed to fetch data")
-      } finally {
-        setLoading(false)
-        setInitialLoad(false)
-        document.body.classList.remove('loading')
-        document.body.classList.add('loaded')
-        setHasFetchedData(true)
-      }
-    }
-
-    fetchData()
-  }, [navigate])
-
-  // Price update subscription effect - optimized to prevent excessive re-renders
-  useEffect(() => {
-    let unsubscribe = null
+    const [portfolio, setPortfolio] = useState(null);
+    const [watchlistStocks, setWatchlistStocks] = useState([]);
+    const [livePrices, setLivePrices] = useState({});
+    const [isLoading, setIsLoading] = useState({ portfolio: true, watchlist: true });
     
-    // Only subscribe if we have watchlist stocks
-    if (watchlistStocks.length > 0) {
-      unsubscribe = priceUpdateService.subscribe((pricePayload) => {
-        const {
-          allPrices,
-          changedPrices = {},
-          isConnected: priceFeedConnected = false,
-          isStreamingPaused = false,
-          connectionEvent = null,
-          error,
-          isMarketOpen,
-        } = pricePayload
-
-        setPriceUpdateStatus(prev => ({
-          isConnected: priceFeedConnected,
-          lastUpdate: priceFeedConnected && Object.keys(changedPrices).length > 0
-            ? new Date().toLocaleTimeString()
-            : prev.lastUpdate,
-          updateCount: priceFeedConnected && Object.keys(changedPrices).length > 0
-            ? prev.updateCount + 1
-            : prev.updateCount
-        }))
-
-        if (connectionEvent === 'reconnected') {
-          setPollTrigger(Date.now())
+    // Fetch initial data
+    useEffect(() => {
+        if (!isAuthenticated) {
+            navigate('/login');
+            return;
         }
 
-        if (!isStreamingPaused && allPrices && Object.keys(allPrices).length > 0) {
-          // Update watchlist stocks with new prices
-          setWatchlistStocks(prevStocks => {
-            const updatedStocks = prevStocks.map(stock => {
-              const newPriceData = allPrices[stock.symbol]
-              if (newPriceData) {
-                return {
-                  ...stock,
-                  price: newPriceData.ltp,
-                  change: newPriceData.change,
-                  percent_change: newPriceData.percent_change,
-                  last_updated: newPriceData.last_updated
-                }
-              }
-              return stock
-            })
-            
-            // Also update the watchlist.data state for display
-            setWatchlist(prev => ({
-              ...prev,
-              data: updatedStocks
-            }))
-            
-            return updatedStocks
-          })
-          
-          // Update real-time prices state
-          setRealTimePrices(allPrices)
-        }
-        
-        if (error && isMarketOpen) {
-          console.warn('Dashboard: Price update service error:', error)
-        }
-      })
-    }
+        const fetchData = async () => {
+            try {
+                // Fetch portfolio
+                setIsLoading(prev => ({ ...prev, portfolio: true }));
+                const portfolioData = await api.fetchPortfolio();
+                if(portfolioData.success) setPortfolio(portfolioData);
 
-    // Cleanup subscription on unmount or when stocks change
-    return () => {
-      if (unsubscribe) {
-        unsubscribe()
-      }
-    }
-  }, [watchlistStocks.length]) // Only depend on watchlist length, not the entire array
-
-  // Batch polling to update prices based on socket connection (market hours proxy)
-  useEffect(() => {
-    if (watchlistStocks.length === 0) return
-    let timer = null
-    const poll = async () => {
-      try {
-        const symbols = Array.from(new Set(watchlistStocks.map(s => (s.symbol || "").split(".")[0]).filter(Boolean)))
-        if (symbols.length === 0) return
-        const res = await fetchBatchStockData(symbols)
-        const data = res?.data || {}
-        // Update state (convert paise -> rupees for UI)
-        setWatchlistStocks(prev => prev.map(stk => {
-          const base = (stk.symbol || "").split(".")[0]
-          const nd = data[base]
-          if (nd && !nd.error) {
-            return {
-              ...stk,
-              price: (nd.ltp != null ? nd.ltp : stk.price),
-              change: (nd.change != null ? nd.change : stk.change),
-              percent_change: (nd.p_change ?? stk.percent_change),
-              last_updated: new Date().toISOString()
+            } catch (error) {
+                toast.error("Failed to load portfolio.");
+            } finally {
+                setIsLoading(prev => ({ ...prev, portfolio: false }));
             }
-          }
-          return stk
-        }))
-        // Notify service for other listeners
-        const priceMap = {}
-        Object.keys(data).forEach(base => {
-          const nd = data[base]
-          if (!nd || nd.error) return
-          // Find full symbol key used in UI (prefer .NS)
-          const full = (watchlistStocks.find(s => s.symbol.split(".")[0] === base)?.symbol) || base
-          priceMap[full] = { ltp: nd.ltp, change: nd.change, percent_change: nd.p_change, last_updated: new Date().toISOString() }
-        })
-        if (Object.keys(priceMap).length > 0) {
-          priceUpdateService.updatePrices(priceMap)
-        }
-        priceUpdateService.setConnected(!!isConnected)
-        priceUpdateService.setMarketHours(!!isConnected)
-      } catch (e) {
-        // ignore transient errors
-      }
-    }
-    // Start immediately, then interval
-    poll()
-    const intervalMs = isConnected ? 4000 : 30000
-    timer = setInterval(poll, intervalMs)
-    return () => { if (timer) clearInterval(timer) }
-  }, [watchlistStocks.map(s => s.symbol).join(','), isConnected, pollTrigger])
+            
+            try {
+                // Fetch watchlist
+                setIsLoading(prev => ({ ...prev, watchlist: true }));
+                const watchlistData = await getWatchlists();
+                 if (watchlistData && watchlistData.watchlists) {
+                    const defaultWatchlist = watchlistData.watchlists.find(w => !w.is_deletable) || watchlistData.watchlists[0];
+                    if (defaultWatchlist) {
+                        setWatchlistStocks(defaultWatchlist.stocks || []);
+                    }
+                }
+            } catch (error) {
+                toast.error("Failed to load watchlist.");
+            } finally {
+                setIsLoading(prev => ({ ...prev, watchlist: false }));
+            }
+        };
 
-  const formatCurrency = useCallback((amount) => {
-    if (amount === null || amount === undefined) {
-      return "₹0.00"
-    }
-    return amount.toLocaleString("en-IN", {
-      style: "currency",
-      currency: "INR",
-      minimumFractionDigits: 2,
-    })
-  }, [])
+        fetchData();
+    }, [isAuthenticated, navigate, getWatchlists]);
+    
+    // Subscribe to price updates
+    useEffect(() => {
+        const unsubscribe = priceUpdateService.subscribe(data => {
+            setLivePrices(data.allPrices);
+        });
+        return () => unsubscribe();
+    }, []);
 
-  const handlePortfolioNext = useCallback(() => {
-    const maxPage = Math.ceil((portfolio?.holdings?.length || 0) / portfolioItemsPerPage) - 1
-    setPortfolioPage((prev) => Math.min(prev + 1, maxPage))
-  }, [portfolio?.holdings?.length, portfolioItemsPerPage])
+    const watchlistWithLiveData = useMemo(() => {
+        return watchlistStocks.map(stock => {
+            if (!stock) return null;
+            const liveData = livePrices[stock.symbol];
+            return liveData ? { ...stock, ...liveData } : stock;
+        }).filter(Boolean);
+    }, [watchlistStocks, livePrices]);
 
-  const handlePortfolioPrev = useCallback(() => {
-    setPortfolioPage((prev) => Math.max(prev - 1, 0))
-  }, [])
-
-  const handleWatchlistNext = useCallback(() => {
-    const maxPage = Math.ceil((watchlist?.data?.length || 0) / watchlistItemsPerPage) - 1
-    setWatchlistPage((prev) => Math.min(prev + 1, maxPage))
-  }, [watchlist?.data?.length, watchlistItemsPerPage])
-
-  const handleWatchlistPrev = useCallback(() => {
-    setWatchlistPage((prev) => Math.max(prev - 1, 0))
-  }, [])
-
-  // Memoized calculations to prevent unnecessary re-renders
-  const paginatedPortfolio = useMemo(() => 
-    portfolio?.holdings?.slice(portfolioPage * portfolioItemsPerPage, (portfolioPage + 1) * portfolioItemsPerPage) || []
-  , [portfolio?.holdings, portfolioPage, portfolioItemsPerPage])
-
-  const paginatedWatchlist = useMemo(() => 
-    watchlist?.data?.slice(
-      watchlistPage * watchlistItemsPerPage,
-      (watchlistPage + 1) * watchlistItemsPerPage,
-    ) || []
-  , [watchlist?.data, watchlistPage, watchlistItemsPerPage])
-
-  // Component Loading Skeleton
-  const ComponentSkeleton = ({ title, rows = 3 }) => (
-    <div className="skeleton-container">
-      {Array.from({ length: rows }).map((_, index) => (
-        <div key={index} className="skeleton-row">
-          <div className="skeleton-item skeleton-circle"></div>
-          <div className="skeleton-item skeleton-text"></div>
-          <div className="skeleton-item skeleton-number"></div>
-        </div>
-      ))}
-    </div>
-  )
-
-  // Skeleton for Overview Cards
-  const OverviewSkeleton = () => (
-    <div className="overview-grid">
-      {Array.from({ length: 3 }).map((_, index) => (
-        <div key={index} className="overview-card">
-          <div className="overview-card-content">
-            <div className="overview-header">
-              <div className="skeleton-item skeleton-text" style={{ width: "80px" }}></div>
-              <div className="skeleton-item skeleton-circle" style={{ width: "20px", height: "20px" }}></div>
-            </div>
-            <div className="skeleton-item skeleton-text" style={{ width: "120px", height: "32px" }}></div>
-            <div className="skeleton-item skeleton-text" style={{ width: "100px", height: "16px" }}></div>
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-
-  // Skeleton for Watchlist
-  const WatchlistSkeleton = () => (
-    <div className="watchlist-grid">
-      {Array.from({ length: 3 }).map((_, index) => (
-        <div key={index} className="watchlist-item">
-          <div className="watchlist-header">
-            <div className="watchlist-symbol-group">
-              <div className="skeleton-item skeleton-circle" style={{ width: "16px", height: "16px" }}></div>
-              <div className="skeleton-item skeleton-text" style={{ width: "60px", height: "20px" }}></div>
-            </div>
-            <div className="skeleton-item skeleton-text" style={{ width: "40px", height: "16px" }}></div>
-          </div>
-          <div className="skeleton-item skeleton-text" style={{ width: "80px", height: "24px" }}></div>
-          <div className="skeleton-item skeleton-text" style={{ width: "40px", height: "12px" }}></div>
-        </div>
-      ))}
-    </div>
-  )
-
-  // Component Error State
-  const ComponentError = ({ error, onRetry, componentName }) => (
-    <div className="component-error">
-      <div className="error-content">
-        <p className="error-message">{error}</p>
-        <Button className="error-retry-button" onClick={onRetry} disabled={retryingComponent === componentName}>
-          {retryingComponent === componentName ? (
-            <>
-              <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
-              Retrying...
-            </>
-          ) : (
-            <>
-              <RefreshCw className="h-4 w-4 mr-2" />
-              Retry
-            </>
-          )}
-        </Button>
-      </div>
-    </div>
-  )
-
-  // Clean symbol function to remove exchange suffixes
-  const cleanSymbol = (symbol) => {
-    return symbol.replace(/\.(NSE|BSE|NS|BO)$/, "")
-  }
-
-  // Define loading animation variants
-  const loaderVariants = {
-    hidden: { opacity: 0, scale: 0.8 },
-    visible: { 
-      opacity: 1, 
-      scale: 1,
-      transition: { duration: 0.5, ease: "easeOut" }
-    }
-  };
-
-  const spinnerVariants = {
-    animate: {
-      rotate: 360,
-      transition: { 
-        duration: 1.5, 
-        ease: "linear", 
-        repeat: Infinity 
-      }
-    }
-  };
-
-  const pulseVariants = {
-    animate: {
-      scale: [1, 1.05, 1],
-      opacity: [0.7, 1, 0.7],
-      transition: { 
-        duration: 2, 
-        ease: "easeInOut", 
-        repeat: Infinity 
-      }
-    }
-  };
-
-  // Full-site loader
-  if (loading) {
     return (
-      <div className="full-site-loader">
-        <div className="loader-spinner">
-          <div className="spinner-ring"></div>
-          <div className="spinner-ring"></div>
-          <div className="spinner-ring"></div>
+        <div className="p-4 md:p-8 space-y-8">
+             <header>
+                <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
+                <p className="text-gray-500">Welcome back! Here&#39;s your market snapshot.</p>
+            </header>
+
+            <PortfolioSummary portfolio={portfolio} isLoading={isLoading.portfolio} />
+            <WatchlistPreview stocks={watchlistWithLiveData.slice(0, 5)} isLoading={isLoading.watchlist} />
         </div>
-        <p className="loader-text">Loading your dashboard...</p>
-      </div>
     );
-  }
+};
 
-  if (error && initialLoad) {
+
+// --- Sub-components ---
+
+const PortfolioSummary = ({ portfolio, isLoading }) => {
+    const summary = portfolio?.summary;
+    const formatCurrency = (val) => val?.toLocaleString('en-IN', { style: 'currency', currency: 'INR' }) || '₹0.00';
+    
+    if (isLoading) return <PortfolioSummarySkeleton />;
+
+    if (!summary) return null;
+
+    const isPnlPositive = summary.total_pnl >= 0;
+
     return (
-      <div className="dashboard-error">
-        <div className="error-content">
-          <p className="error-message">{error}</p>
-          <Button className="error-retry-button" onClick={() => window.location.reload()}>
-            Retry
-          </Button>
+        <Card className="shadow-lg">
+            <CardHeader>
+                <CardTitle className="flex items-center justify-between">
+                    <span>Portfolio Overview</span>
+                     <Link to="/portfolio">
+                        <Button variant="ghost" size="sm">View All <ArrowRight className="w-4 h-4 ml-2"/></Button>
+                    </Link>
+                </CardTitle>
+            </CardHeader>
+            <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                 <SummaryCard title="Portfolio Value" value={formatCurrency(summary.total_portfolio_value)} icon={BarChart} />
+                 <SummaryCard title="Total Investment" value={formatCurrency(summary.total_investment)} icon={PieChart} />
+                 <SummaryCard 
+                    title="Total P&L" 
+                    value={formatCurrency(summary.total_pnl)} 
+                    icon={isPnlPositive ? TrendingUp : TrendingDown}
+                    valueClassName={isPnlPositive ? 'text-green-600' : 'text-red-600'}
+                />
+            </CardContent>
+        </Card>
+    );
+};
+
+const SummaryCard = ({ icon: Icon, title, value, valueClassName }) => (
+    <div className="p-4 bg-gray-50 rounded-lg">
+        <div className="flex items-center text-gray-500">
+             <Icon className="w-4 h-4 mr-2" />
+            <span className="text-sm font-medium">{title}</span>
         </div>
-      </div>
+        <p className={`text-2xl font-bold mt-1 ${valueClassName}`}>{value}</p>
+    </div>
+);
+
+
+const WatchlistPreview = ({ stocks, isLoading }) => {
+    if (isLoading) return <WatchlistPreviewSkeleton />;
+    
+    return (
+         <Card className="shadow-lg">
+            <CardHeader>
+                <CardTitle className="flex items-center justify-between">
+                    <span>Watchlist Preview</span>
+                     <Link to="/watchlist">
+                        <Button variant="ghost" size="sm">View All <ArrowRight className="w-4 h-4 ml-2"/></Button>
+                    </Link>
+                </CardTitle>
+            </CardHeader>
+            <CardContent>
+                 <Table>
+                    <TableHeader>
+                        <TableRow>
+                            <TableHead>Symbol</TableHead>
+                            <TableHead className="text-right">LTP (₹)</TableHead>
+                            <TableHead className="text-right">Change (%)</TableHead>
+                        </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                         {stocks.length > 0 ? stocks.map(stock => {
+                            const change = stock.percent_change || 0;
+                            const isPositive = change >= 0;
+                            return (
+                                <TableRow key={stock.symbol}>
+                                    <TableCell className="font-medium">{stock.symbol}</TableCell>
+                                    <TableCell className="text-right font-semibold">₹{(stock.ltp || 0).toFixed(2)}</TableCell>
+                                    <TableCell className={`text-right font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                                        {isPositive ? '+' : ''}{change.toFixed(2)}%
+                                    </TableCell>
+                                </TableRow>
+                            )
+                         }) : (
+                             <TableRow>
+                                <TableCell colSpan={3} className="text-center py-8 text-gray-500">Your watchlist is empty.</TableCell>
+                             </TableRow>
+                         )}
+                    </TableBody>
+                </Table>
+            </CardContent>
+        </Card>
     )
-  }
-
-  return (
-    <>
-      <Navbar />
-
-      <main className="dashboard-main">
-        <motion.div
-          className="dashboard-content"
-          variants={containerVariants}
-          initial="hidden"
-          animate="visible"
-        >
-          {/* Portfolio Overview Cards */}
-          <motion.div className="overview-grid" variants={itemVariants}>
-            <div className="overview-card">
-              <div className="overview-card-content">
-                <div className="overview-header">
-                  <h3 className="overview-title">Portfolio Value</h3>
-                  <BarChart3 className="overview-icon" />
-                </div>
-                <p className="overview-value">{formatCurrency(portfolio?.portfolio_value)}</p>
-                <p className="overview-subtitle">Current market value</p>
-              </div>
-            </div>
-
-            <div className="overview-card">
-              <div className="overview-card-content">
-                <div className="overview-header">
-                  <h3 className="overview-title">Total Investment</h3>
-                  <IndianRupee className="overview-icon" />
-                </div>
-                <p className="overview-value">{formatCurrency(portfolio?.total_investment)}</p>
-                <p className="overview-subtitle">Amount invested</p>
-              </div>
-            </div>
-
-            <div className="overview-card">
-              <div className="overview-card-content">
-                <div className="overview-header">
-                  <h3 className="overview-title">Total P&L</h3>
-                  {Number.parseFloat(portfolio?.total_profit_loss) >= 0 ? (
-                    <TrendingUp className="overview-icon profit" />
-                  ) : (
-                    <TrendingDown className="overview-icon loss" />
-                  )}
-                </div>
-                <p
-                  className={`overview-value ${
-                    Number.parseFloat(portfolio?.total_profit_loss) >= 0 ? "profit" : "loss"
-                  }`}
-                >
-                  {formatCurrency(portfolio?.total_profit_loss)}
-                </p>
-                <p className="overview-subtitle">Profit & Loss</p>
-              </div>
-            </div>
-          </motion.div>
-
-          {/* Dashboard Grid Section */}
-          <motion.div className="dashboard-grid" variants={itemVariants}>
-            {/* Portfolio Holdings Section */}
-            <Card className="dashboard-card clickable-card" onClick={() => navigate("/portfolio")}>
-              <CardHeader className="dashboard-card-header">
-                <div className="card-header-content">
-                  <CardTitle className="dashboard-card-title">Portfolio Holdings</CardTitle>
-                  <div className="pagination-controls" onClick={(e) => e.stopPropagation()}>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        if (portfolioPage > 0) {
-                          handlePortfolioPrev()
-                        }
-                      }}
-                      disabled={portfolioPage === 0}
-                      className="pagination-button"
-                    >
-                      <ChevronLeft className="pagination-icon" />
-                    </Button>
-                    <span className="pagination-info">
-                      {portfolioPage * portfolioItemsPerPage + 1}-
-                      {Math.min((portfolioPage + 1) * portfolioItemsPerPage, portfolio?.holdings?.length || 0)} of{" "}
-                      {portfolio?.holdings?.length || 0}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        const maxPage = Math.ceil((portfolio?.holdings?.length || 0) / portfolioItemsPerPage) - 1
-                        if (portfolioPage < maxPage) {
-                          handlePortfolioNext()
-                        }
-                      }}
-                      disabled={(portfolioPage + 1) * portfolioItemsPerPage >= (portfolio?.holdings?.length || 0)}
-                      className="pagination-button"
-                    >
-                      <ChevronRight className="pagination-icon" />
-                    </Button>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="dashboard-card-content">
-                {componentErrors.portfolio ? (
-                  <ComponentError
-                    error={componentErrors.portfolio}
-                    onRetry={() => retryComponent("portfolio")}
-                    componentName="portfolio"
-                  />
-                ) : !componentsLoaded.portfolio ? (
-                  <ComponentSkeleton title="" rows={2} />
-                ) : (
-                  <div className="holdings-container">
-                    {paginatedPortfolio.length > 0 ? (
-                      paginatedPortfolio.map((holding, index) => (
-                        <div
-                          key={`${holding.symbol}-${portfolioPage}-${index}`}
-                          className="holding-card"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            navigate(`/stock/overview/${cleanSymbol(holding.symbol)}`)
-                          }}
-                        >
-                          <div className="holding-header">
-                            <h4 className="holding-symbol">{cleanSymbol(holding.symbol)}</h4>
-                            <div
-                              className={`holding-percentage ${
-                                Number.parseFloat(holding.profit_loss) >= 0 ? "profit" : "loss"
-                              }`}
-                            >
-                              {Number.parseFloat(holding.profit_loss_percentage) >= 0 ? "+" : ""}
-                              {Number.parseFloat(holding.profit_loss_percentage).toFixed(2)}%
-                            </div>
-                          </div>
-                          <div className="holding-details">
-                            <div className="holding-detail-group">
-                              <p className="holding-detail">
-                                Quantity: <span className="holding-value">{holding.quantity}</span>
-                              </p>
-                              <p className="holding-detail">
-                                Avg Price: <span className="holding-value">{formatCurrency(holding.average_price)}</span>
-                              </p>
-                              <p className="holding-detail">
-                                Current Price:{" "}
-                                <span className="holding-value">{formatCurrency(holding.current_price)}</span>
-                              </p>
-                            </div>
-                            <div className="holding-detail-group">
-                              <p className="holding-detail">
-                                Investment:{" "}
-                                <span className="holding-value">{formatCurrency(holding.investment_value)}</span>
-                              </p>
-                              <p className="holding-detail">
-                                Current Value:{" "}
-                                <span className="holding-value">{formatCurrency(holding.current_value)}</span>
-                              </p>
-                              <p className="holding-detail">
-                                P&L:{" "}
-                                <span
-                                  className={`holding-value ${
-                                    Number.parseFloat(holding.profit_loss) >= 0 ? "profit" : "loss"
-                                  }`}
-                                >
-                                  {formatCurrency(holding.profit_loss)}
-                                </span>
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="empty-state">
-                        <p className="empty-message">No holdings available</p>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Performance Section - Clickable to /performance */}
-            <Card className="dashboard-card clickable-card" onClick={() => navigate("/performance")}>
-              <CardHeader className="dashboard-card-header">
-                <CardTitle className="dashboard-card-title">Performance Metrics</CardTitle>
-              </CardHeader>
-              <CardContent className="dashboard-card-content">
-                {componentErrors.performance ? (
-                  <ComponentError
-                    error={componentErrors.performance}
-                    onRetry={() => retryComponent("performance")}
-                    componentName="performance"
-                  />
-                ) : !componentsLoaded.performance ? (
-                  <ComponentSkeleton title="" rows={4} />
-                ) : (
-                  <div className="performance-container">
-                    {/* Total Holdings is now a highlighted metric at the top */}
-                    <div className="performance-metric highlight">
-                      <p className="metric-label">Total Holdings</p>
-                      <p className="metric-value">{portfolio?.total_holdings ?? 0}</p>
-                    </div>
-
-                    <div className="performance-overview">
-                      {/* Swapped: Invested Amount on left, Current Value on right */}
-                      <div className="performance-metric">
-                        <p className="metric-label">Invested Amount</p>
-                        <p className="metric-value">{formatCurrency(performance?.invested_amount)}</p>
-                      </div>
-                      <div className="performance-metric">
-                        <p className="metric-label">Current Value</p>
-                        <p className="metric-value">{formatCurrency(performance?.current_value)}</p>
-                      </div>
-                    </div>
-
-                    <div className="performance-details">
-                      <div className="performance-item">
-                        <span className="performance-label">Realized P&L</span>
-                        <span
-                          className={`performance-value ${
-                            Number.parseFloat(performance?.realized_profit_loss) >= 0 ? "profit" : "loss"
-                          }`}
-                        >
-                          {formatCurrency(performance?.realized_profit_loss)}
-                        </span>
-                      </div>
-                      <div className="performance-item">
-                        <span className="performance-label">Unrealized P&L</span>
-                        <span
-                          className={`performance-value ${
-                            Number.parseFloat(performance?.unrealized_profit_loss) >= 0 ? "profit" : "loss"
-                          }`}
-                        >
-                          {formatCurrency(performance?.unrealized_profit_loss)}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </motion.div>
-
-          {/* Watchlist Section */}
-          <motion.div variants={itemVariants}>
-            <Card className="dashboard-card">
-              <CardHeader className="dashboard-card-header">
-                <div className="card-header-content">
-                  <CardTitle className="dashboard-card-title">Watchlist</CardTitle>
-                  <div className="watchlist-controls">
-                    <div className="pagination-controls">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleWatchlistPrev}
-                        disabled={watchlistPage === 0}
-                        className="pagination-button"
-                      >
-                        <ChevronLeft className="pagination-icon" />
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleWatchlistNext}
-                        disabled={(watchlistPage + 1) * watchlistItemsPerPage >= watchlist?.data?.length || 0}
-                        className="pagination-button"
-                      >
-                        <ChevronRight className="pagination-icon" />
-                      </Button>
-                    </div>
-                    <Button className="view-all-button" onClick={() => navigate("/watchlist")}>
-                      View All
-                      <ChevronRight className="button-icon" />
-                    </Button>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="dashboard-card-content">
-                {componentErrors.watchlist ? (
-                  <ComponentError
-                    error={componentErrors.watchlist}
-                    onRetry={() => retryComponent("watchlist")}
-                    componentName="watchlist"
-                  />
-                ) : !componentsLoaded.watchlist ? (
-                  <WatchlistSkeleton />
-                ) : (
-                  <div className="watchlist-grid">
-                    {paginatedWatchlist.map((stock, index) => (
-                      <div
-                        key={`${stock.symbol}-${watchlistPage}-${index}`}
-                        className="watchlist-item"
-                        onClick={() => navigate(`/stock/overview/${cleanSymbol(stock.symbol)}`)}
-                      >
-                        <div className="watchlist-header">
-                          <div className="watchlist-symbol-group">
-                            <Star className="watchlist-star" />
-                            <h3 className="watchlist-symbol">{cleanSymbol(stock.symbol)}</h3>
-                          </div>
-                          <span className={`watchlist-change ${(stock.percent_change || 0) >= 0 ? "profit" : "loss"}`}>
-                            {(stock.percent_change === 0 || stock.percent_change === null || stock.percent_change === undefined) ? "-.--%" : 
-                             `${(stock.percent_change || 0) >= 0 ? "+" : ""}${isNaN(Number(stock.percent_change)) ? "-.--" : Number(stock.percent_change || 0).toFixed(2)}%`}
-                          </span>
-                        </div>
-                        <p className="watchlist-price">
-                          ₹{(stock.price === 0 || stock.price === null || stock.price === undefined || isNaN(Number(stock.price))) ? "-.--" : Number(stock.price || 0).toFixed(2)}
-                        </p>
-                        <div className="watchlist-exchange">NSE</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </motion.div>
-        </motion.div>
-      </main>
-    </>
-  )
 }
 
-export default Dashboard
+// --- Skeletons ---
+const PortfolioSummarySkeleton = () => (
+     <Card>
+        <CardHeader><Skeleton className="h-6 w-1/3" /></CardHeader>
+        <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-20 w-full" />
+        </CardContent>
+    </Card>
+);
+
+const WatchlistPreviewSkeleton = () => (
+    <Card>
+        <CardHeader><Skeleton className="h-6 w-1/3" /></CardHeader>
+        <CardContent>
+            <div className="space-y-2">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+            </div>
+        </CardContent>
+    </Card>
+);
+
+export default DashboardPage;
+

@@ -1,102 +1,74 @@
-"use client"
-
-import { useState, useEffect, useCallback } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/assets/ui/card";
-import { Button } from "@/assets/ui/button";
-import { Skeleton } from "@/assets/ui/skeleton";
-import Navbar from "@/features/Navbar";
-import { motion } from "framer-motion";
-import { ArrowUpCircle, ArrowDownCircle, AlertTriangle } from "lucide-react";
-import "@/assets/css/IndicesCss.css";
-
-import { useDataContext } from "@/context/DataContext";
-import { useSocketContext } from "@/context/SocketContext";
+import React, { useState, useEffect } from 'react';
+import { motion } from 'framer-motion';
+import { useDataContext } from '../context/DataContext.jsx';
+import { useSocket } from '../context/SocketContext.jsx';
+import priceUpdateService from '../services/priceUpdateService.js';
+import { Card, CardContent, CardHeader, CardTitle } from '../assets/ui/card.jsx';
+import { Skeleton } from '../assets/ui/skeleton.jsx';
+import { AlertTriangle } from 'lucide-react';
+import { Button } from '../assets/ui/button.jsx';
 
 const Indices = () => {
-  const { isConnected } = useSocketContext();
-  // --- Consume new error state and retry function from context ---
-  const { indicesData, isLoadingIndices, indicesError, getInitialIndices } = useDataContext();
-
-  const [processedIndices, setProcessedIndices] = useState([]);
-  const [sortBy, setSortBy] = useState('gainers');
-  const [sortOrder, setSortOrder] = useState('desc');
-
-  // --- Removed the client-side `calculateChange` function ---
-
-  const processIndices = useCallback((allIndices = []) => {
-    const indexMap = new Map();
-    
-    allIndices.forEach((idx) => {
-      // The backend now provides all necessary data, so we just need to deduplicate.
-      const name = (idx.name || "").toLowerCase();
-      const exchange = (idx.exchange || "").toUpperCase();
-      let normalizedName = name;
-      
-      // Normalize common index names
-      if (name.includes('nifty 50')) normalizedName = 'nifty50';
-      else if (name.includes('sensex')) normalizedName = 'sensex';
-      // Add other normalizations as needed...
-      
-      const existing = indexMap.get(normalizedName);
-      if (!existing || (exchange === 'NSE' && existing.exchange === 'BSE')) {
-        indexMap.set(normalizedName, idx);
-      }
-    });
-    
-    const filtered = Array.from(indexMap.values());
-    
-    const sorted = [...filtered].sort((a, b) => {
-      // --- Use the new `percent_change_intraday` field for sorting ---
-      const changeA = a.percent_change_intraday || 0;
-      const changeB = b.percent_change_intraday || 0;
-
-      if (sortBy === 'gainers') {
-        if (changeA > 0 && changeB <= 0) return -1;
-        if (changeB > 0 && changeA <= 0) return 1;
-        return sortOrder === 'desc' ? changeB - changeA : changeA - changeB;
-      } 
-      if (sortBy === 'losers') {
-        if (changeA < 0 && changeB >= 0) return -1;
-        if (changeB < 0 && changeA >= 0) return 1;
-        return sortOrder === 'desc' ? changeA - changeB : changeB - changeA;
-      }
-      return a.name.localeCompare(b.name);
-    });
-    
-    setProcessedIndices(sorted);
-  }, [sortBy, sortOrder]);
+  const { indicesData: initialIndices, isLoadingIndices, indicesError, getInitialIndices } = useDataContext();
+  const { isConnected } = useSocket();
+  const [indices, setIndices] = useState([]);
 
   useEffect(() => {
-    if (indicesData && Array.isArray(indicesData)) {
-      processIndices(indicesData);
+    // Set initial data from context
+    if (initialIndices && initialIndices.length > 0) {
+      setIndices(initialIndices);
     }
-  }, [indicesData, processIndices]);
+  }, [initialIndices]);
 
-  const formatNumber = (value, decimalPlaces = 2) => {
-    return value !== undefined && !isNaN(value) ? parseFloat(value).toFixed(decimalPlaces) : "N/A";
+  useEffect(() => {
+    // Subscribe to real-time updates
+    const onPriceUpdate = (data) => {
+      setIndices(prevIndices => {
+        const updatedIndices = { ...data.allPrices };
+        // Create a map for efficient lookups
+        const indexMap = new Map(prevIndices.map(i => [i.symbol, i]));
+
+        // Update based on incoming data
+        for (const symbol in updatedIndices) {
+            if (indexMap.has(symbol)) {
+                indexMap.set(symbol, { ...indexMap.get(symbol), ...updatedIndices[symbol] });
+            }
+        }
+        return Array.from(indexMap.values());
+      });
+    };
+
+    const unsubscribe = priceUpdateService.subscribe(onPriceUpdate);
+    return () => unsubscribe();
+  }, []);
+
+  const formatNumber = (value) => {
+    const num = parseFloat(value);
+    if (isNaN(num)) return '0.00';
+    return num.toFixed(2);
+  };
+  
+  const getChangeColor = (change) => {
+    const numChange = parseFloat(change);
+    if (numChange > 0) return 'text-green-600';
+    if (numChange < 0) return 'text-red-600';
+    return 'text-gray-600';
   };
 
-  const handleSortChange = (newSortBy) => {
-    if (sortBy === newSortBy) {
-      setSortOrder(sortOrder === 'desc' ? 'asc' : 'desc');
-    } else {
-      setSortBy(newSortBy);
-      setSortOrder('desc');
-    }
-  };
-
-  // --- Function to render main content based on loading, error, or data state ---
   const renderContent = () => {
-    if (isLoadingIndices && processedIndices.length === 0) {
+    if (isLoadingIndices && indices.length === 0) {
       return (
-        <div className="indices-skeleton">
-          {[...Array(6)].map((_, idx) => (
-            <div key={idx} className="index-item" style={{ minHeight: "96px" }}>
-              <Skeleton className="h-4 w-3/4 mb-2" />
-              <Skeleton className="h-3 w-full mb-1" />
-              <Skeleton className="h-3 w-1/2 mb-1" />
-              <Skeleton className="h-3 w-5/6" />
-            </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+          {[...Array(6)].map((_, i) => (
+            <Card key={i}>
+              <CardHeader>
+                <Skeleton className="h-5 w-3/4" />
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <Skeleton className="h-6 w-1/2" />
+                <Skeleton className="h-4 w-full" />
+              </CardContent>
+            </Card>
           ))}
         </div>
       );
@@ -104,104 +76,57 @@ const Indices = () => {
 
     if (indicesError) {
       return (
-        <div className="error-container">
-            <AlertTriangle className="h-12 w-12 text-red-500" />
-            <h3 className="error-title">Failed to Load Market Data</h3>
-            <p className="error-message">{indicesError}</p>
-            <Button onClick={() => getInitialIndices(true)} variant="destructive">
-              Click to Retry
-            </Button>
+        <div className="text-center py-10">
+          <AlertTriangle className="mx-auto h-12 w-12 text-red-400" />
+          <h3 className="mt-2 text-lg font-medium text-gray-900 dark:text-white">Could not load market data</h3>
+          <p className="mt-1 text-sm text-gray-500">{indicesError}</p>
+          <div className="mt-6">
+            <Button onClick={() => getInitialIndices(true)}>Retry</Button>
+          </div>
         </div>
       );
     }
 
     return (
-        <div className="indices-sections">
-            <div className="indices-section">
-                <h3 className="section-title">Market Indices</h3>
-                <motion.div
-                    className="indices-grid"
-                    variants={{ visible: { transition: { staggerChildren: 0.06 } } }}
-                    initial="hidden"
-                    animate="visible"
-                >
-                    {processedIndices.map((idx) => (
-                        <motion.div
-                            key={idx.symbol}
-                            className="index-item"
-                            variants={{ hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0 } }}
-                            whileHover={{ scale: 1.03, y: -2 }}
-                        >
-                            <p className="index-name">{idx.name}</p>
-              <p className="index-meta">
-                {idx.exchange} | LTP: {formatNumber(idx.ltp || idx.price)}
-              </p>
-                            <p className="index-price-details">
-                                O: {formatNumber(idx.open)} | H: {formatNumber(idx.high)} | L: {formatNumber(idx.low)} | C: {formatNumber(idx.close)}
-                            </p>
-                            <p className={`index-change ${idx.change_intraday >= 0 ? "profit" : "loss"}`}>
-                                {idx.change_intraday >= 0 ? "+" : ""}
-                                {formatNumber(idx.change_intraday)} ({formatNumber(idx.percent_change_intraday)}%)
-                            </p>
-                            <p className="index-meta">
-                                Last Updated:{" "}
-                                {idx.last_updated ? new Date(idx.last_updated).toLocaleTimeString() : "Live"}
-                            </p>
-                        </motion.div>
-                    ))}
-                </motion.div>
-            </div>
-        </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        {indices.map((index, i) => (
+          <motion.div
+            key={index.symbol}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, delay: i * 0.05 }}
+          >
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base font-medium truncate">{index.name}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-2xl font-bold">{formatNumber(index.price)}</p>
+                <p className={`text-sm font-semibold ${getChangeColor(index.change)}`}>
+                  {index.change > 0 ? '+' : ''}
+                  {formatNumber(index.change)} ({index.percent_change > 0 ? '+' : ''}{formatNumber(index.percent_change)}%)
+                </p>
+              </CardContent>
+            </Card>
+          </motion.div>
+        ))}
+      </div>
     );
   };
 
   return (
-    <div className="indices-container">
-      <Navbar />
-      <main className="indices-main">
-        <motion.div
-          className="indices-content"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-        >
-          <Card className="indices-card">
-            <CardHeader className="indices-card-header">
-              <div className="indices-header-row">
-                <CardTitle className="indices-title">Market Indices</CardTitle>
-                <div className="header-actions">
-                  <div className="connection-status">
-                    <span className={`status-indicator ${isConnected ? 'connected' : 'disconnected'}`}></span>
-                    <span className="status-text">{isConnected ? 'Live' : 'Offline'}</span>
-                  </div>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent className="indices-card-content">
-              <div className="sorting-controls-section">
-                <div className="sorting-buttons">
-                  <Button 
-                    variant={sortBy === 'gainers' ? 'default' : 'outline'} 
-                    onClick={() => handleSortChange('gainers')}
-                  >
-                    <ArrowUpCircle className="h-4 w-4 mr-1" /> 
-                    Gainers {sortBy === 'gainers' && (sortOrder === 'desc' ? '↓' : '↑')}
-                  </Button>
-                  <Button 
-                    variant={sortBy === 'losers' ? 'default' : 'outline'} 
-                    onClick={() => handleSortChange('losers')}
-                  >
-                    <ArrowDownCircle className="h-4 w-4 mr-1" /> 
-                    Losers {sortBy === 'losers' && (sortOrder === 'desc' ? '↓' : '↑')}
-                  </Button>
-                </div>
-              </div>
-              {renderContent()}
-            </CardContent>
-          </Card>
-        </motion.div>
-      </main>
+    <div className="p-4 sm:p-6 lg:p-8">
+       <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Market Overview</h1>
+         <div className="flex items-center gap-2">
+           <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} title={isConnected ? 'Live connection' : 'Disconnected'}></div>
+           <span className="text-sm font-medium text-gray-600 dark:text-gray-300">{isConnected ? 'Live' : 'Offline'}</span>
+        </div>
+      </div>
+      {renderContent()}
     </div>
   );
 };
 
 export default Indices;
+

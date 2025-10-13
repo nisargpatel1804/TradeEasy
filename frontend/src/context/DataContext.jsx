@@ -1,158 +1,103 @@
-import React, { createContext, useState, useContext, useCallback, useEffect } from 'react';
-import { fetchProfile, fetchIndices, fetchWatchlists } from '../services/api';
-import { useSocketContext } from './SocketContext';
+import React, { createContext, useState, useEffect, useContext, useCallback } from 'react';
+import { useAuth } from './AuthContext.jsx';
+import * as api from '../services/api.js';
 
-const DataContext = createContext();
+const DataContext = createContext(null);
 
-export function DataProvider({ children }) {
-  const [profileData, setProfileData] = useState(null);
-  const [watchlistsData, setWatchlistsData] = useState(null);
-  const [indicesData, setIndicesData] = useState([]);
-  const [isLoadingIndices, setIsLoadingIndices] = useState(true);
-  const [hasReceivedInitialData, setHasReceivedInitialData] = useState(false);
-  const [lastWatchlistsFetch, setLastWatchlistsFetch] = useState(0);
-  const [lastProfileFetch, setLastProfileFetch] = useState(0);
-  
-  // --- New state for handling user-facing errors ---
-  const [indicesError, setIndicesError] = useState(null);
+/**
+ * Custom hook to easily access the DataContext from any component.
+ * @returns {object} The data context value.
+ */
+export const useData = () => {
+  const context = useContext(DataContext);
+  if (!context) {
+    throw new Error('useData must be used within a DataProvider');
+  }
+  return context;
+};
 
-  const { socket } = useSocketContext();
+export const useDataContext = useData;
 
-  useEffect(() => {
-    if (!socket) return;
+/**
+ * The DataProvider component fetches, caches, and provides application-wide
+ * data to all its children. It is dependent on the AuthContext.
+ */
+export const DataProvider = ({ children }) => {
+  const { isAuthenticated } = useAuth();
+  const [profile, setProfile] = useState(null);
+  const [watchlists, setWatchlists] = useState([]);
+  const [indices, setIndices] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState(null);
 
-    const handleInitialData = (initialData) => {
-        setIndicesData(initialData);
-        setIsLoadingIndices(false);
-        setHasReceivedInitialData(true);
-        setIndicesError(null); // Clear error on successful data receipt
+  /**
+   * Fetches all essential application data from the backend.
+   * This is typically called once after the user logs in.
+   */
+  const fetchInitialData = useCallback(async () => {
+    if (!isAuthenticated) {
+        // Clear data when user logs out
+        setProfile(null);
+        setWatchlists([]);
+        setIndices([]);
+        return;
     };
 
-    const handleIndexUpdate = (updatedIndex) => {
-      setIsLoadingIndices(false); 
-      setIndicesData(prevIndices => {
-        const indexExists = prevIndices.some(idx => idx.symbol === updatedIndex.symbol);
-        if (indexExists) {
-          return prevIndices.map(idx =>
-            idx.symbol === updatedIndex.symbol ? { ...idx, ...updatedIndex } : idx
-          );
-        } else {
-          return [...prevIndices, updatedIndex];
-        }
-      });
-    };
-
-    socket.on('initial_indices', handleInitialData);
-    socket.on('index_update', handleIndexUpdate);
-
-    return () => {
-      socket.off('initial_indices', handleInitialData);
-      socket.off('index_update', handleIndexUpdate);
-    };
-  }, [socket]);
-
-  const getInitialIndices = useCallback(async (force = false) => {
-    if ((indicesData.length > 0 || hasReceivedInitialData) && !force) return;
-
-    // Set loading state for retries
-    setIsLoadingIndices(true);
-    setIndicesError(null);
+    setIsLoading(true);
+    setError(null);
 
     try {
-      const data = await fetchIndices();
-      if (indicesData.length === 0 && !hasReceivedInitialData) {
-        setIndicesData(data);
-        setIndicesError(null); // Clear error on success
-      }
-    } catch (error) {
-      if (error?.code === 'SESSION_EXPIRED') {
-        console.info('[DataContext] Skipping HTTP indices fallback because the session is inactive.');
-        // No need to show a user-facing error when the user is simply logged out.
-        setIndicesError(null);
-      } else {
-        console.error('Failed to fetch initial indices via HTTP:', error);
-        // --- Set a user-friendly error message ---
-        setIndicesError('Could not connect to market data service. Please check your connection and try again.');
-      }
+      // Fetch all data in parallel for better performance
+      const [profileData, watchlistsData, indicesData] = await Promise.all([
+        api.getProfile(),
+        api.getWatchlists(),
+        api.getMarketIndices(),
+      ]);
+
+      setProfile(profileData.profile);
+      setWatchlists(watchlistsData.watchlists);
+      setIndices(indicesData.indices);
+      
+    } catch (err) {
+      console.error("Failed to fetch initial application data:", err);
+      setError(err.message || "Could not load data.");
     } finally {
-        setIsLoadingIndices(false);
+      setIsLoading(false);
     }
-  }, [indicesData.length, hasReceivedInitialData]);
+  }, [isAuthenticated]);
 
+  // Effect to trigger the initial data fetch when the user's authentication state changes.
   useEffect(() => {
-      if (indicesData.length === 0 && !hasReceivedInitialData) {
-        getInitialIndices();
-      }
-  }, [getInitialIndices, indicesData.length, hasReceivedInitialData]);
+    fetchInitialData();
+  }, [fetchInitialData]);
 
-  const getProfile = useCallback(async (forceRefresh = false) => {
-    const now = Date.now();
-    if (!forceRefresh && profileData && now - lastProfileFetch < 15000) {
-      return profileData;
-    }
-    const data = await fetchProfile();
-    setProfileData(data);
-    setLastProfileFetch(now);
-    return data;
-  }, [profileData, lastProfileFetch]);
-
-  const refreshProfile = useCallback(async () => {
-    setLastProfileFetch(0);
+  /**
+   * Provides a function to manually refetch the watchlists.
+   * Useful after a user creates a new watchlist or adds a stock.
+   */
+  const refetchWatchlists = async () => {
     try {
-      return await getProfile(true);
-    } catch (error) {
-      console.error('[DataContext] Failed to refresh profile cache:', error);
-      throw error;
+  const watchlistsData = await api.getWatchlists();
+      setWatchlists(watchlistsData.watchlists);
+    } catch (err) {
+      console.error("Failed to refetch watchlists:", err);
     }
-  }, [getProfile]);
+  };
 
-  const getWatchlists = useCallback(async (forceRefresh = false) => {
-    const now = Date.now();
-    if (!forceRefresh && watchlistsData && now - lastWatchlistsFetch < 10000) {
-      return watchlistsData;
-    }
-    const data = await fetchWatchlists();
-    setWatchlistsData(data);
-    setLastWatchlistsFetch(now);
-    return data;
-  }, [watchlistsData, lastWatchlistsFetch]);
-
-  useEffect(() => {
-    const handleProfileUpdated = async () => {
-      try {
-        await refreshProfile();
-      } catch (error) {
-        // Already logged inside refreshProfile
-      }
-    };
-
-    window.addEventListener('profile:updated', handleProfileUpdated);
-    return () => window.removeEventListener('profile:updated', handleProfileUpdated);
-  }, [refreshProfile]);
-
-  const contextValue = React.useMemo(() => ({
-    profileData,
-    indicesData,
-    watchlistsData,
-    isLoadingIndices,
-    indicesError,
-    getProfile,
-    getWatchlists,
-    getInitialIndices,
-    refreshProfile,
-  }), [profileData, indicesData, watchlistsData, isLoadingIndices, indicesError, getProfile, getWatchlists, getInitialIndices, refreshProfile]);
+  const contextValue = {
+    profile,
+    watchlists,
+    indices,
+    isLoading,
+    error,
+    refetchWatchlists,
+    // We will add functions here later to update indices from WebSocket data
+  };
 
   return (
     <DataContext.Provider value={contextValue}>
       {children}
     </DataContext.Provider>
   );
-}
-
-export const useDataContext = () => {
-  const context = useContext(DataContext);
-  if (context === undefined) {
-    throw new Error('useDataContext must be used within a DataProvider');
-  }
-  return context;
 };
+

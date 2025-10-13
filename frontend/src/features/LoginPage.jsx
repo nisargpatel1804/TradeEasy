@@ -1,90 +1,84 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
 import { Input } from "../assets/ui/input.jsx";
 import { Button } from "../assets/ui/button.jsx";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../assets/ui/card.jsx";
 import { Label } from "../assets/ui/label.jsx";
+import { useToast } from "../assets/ui/use-toast.js";
 import { Loader2 } from "lucide-react";
-import { useToast } from "@/assets/ui/use-toast";
 
-const LOGIN_ERROR_MESSAGES = {
-  400: "Client ID and password are required.",
-  401: "Invalid client ID or password.",
-  403: "Your account is inactive. Please contact support to reactivate it.",
-  429: "Too many login attempts. Please wait a moment before trying again.",
-  500: "We're experiencing issues right now. Please try again shortly.",
-  default: "Login failed. Please check your credentials.",
-};
-
-const Login = () => {
+/**
+ * LoginPage component for user authentication.
+ * It uses the AuthContext to handle the login process.
+ */
+const LoginPage = () => {
   const [formData, setFormData] = useState({ client_id: "", password: "" });
-  const [loading, setLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
-  const { login } = useAuth(); // Get the login function from our AuthContext
+  const { login } = useAuth(); // The login function from AuthContext does all the heavy lifting.
+  const navigate = useNavigate();
   const { toast } = useToast();
 
   const handleChange = (e) => {
-    setFormData({ ...formData, [e.target.name]: e.target.value });
+    const { name, value } = e.target;
+    // Convert Client ID to uppercase as the user types for better UX
+    const processedValue = name === 'client_id' ? value.toUpperCase().trim() : value;
+    setFormData((prev) => ({ ...prev, [name]: processedValue }));
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setLoading(true);
     setError("");
 
+    if (!formData.client_id || !formData.password) {
+      setError("Client ID and password are required.");
+      return;
+    }
+
+    setIsLoading(true);
+
     try {
-      // Use the context's login function. It handles the API call,
-      // state update, and navigation on success.
-      const response = await login(formData);
-
-      if (response?.success) {
-        const description = response.message || "Logged in successfully.";
-        toast({
-          title: "Login successful",
-          description,
-        });
-        setError("");
-      }
-    } catch (err) {
-      const status = err?.status;
-  const fallback = LOGIN_ERROR_MESSAGES[status] || LOGIN_ERROR_MESSAGES.default;
-  const hasServerMessage = typeof err?.message === "string" && err.message.trim().length > 0;
-  const description = hasServerMessage ? err.message : fallback;
-      const toastTitle =
-        status === 403
-          ? "Account inactive"
-          : status === 429
-            ? "Too many attempts"
-            : "Login failed";
-
-      setError(description);
-
-      toast({
-        title: toastTitle,
-        description,
-        variant: "destructive",
+      // Call the login function from the context.
+      // It will handle the API call, update global state, and navigate on success.
+      await login({
+        client_id: formData.client_id,
+        password: formData.password,
       });
 
-      if (status === 401) {
-        setFormData({ client_id: "", password: "" });
-      }
+      // On successful login, AuthContext will navigate to '/dashboard'.
+      // A toast provides immediate feedback.
+      toast({
+        title: "Login Successful!",
+        description: "Welcome back to TradeEasy.",
+      });
+
+    } catch (err) {
+      // The AuthContext's login function rejects with an error on failure.
+      const errorMessage = err.message || "Invalid credentials. Please try again.";
+      setError(errorMessage);
+      toast({
+        title: "Login Failed",
+        description: errorMessage,
+        variant: "destructive",
+      });
     } finally {
-      setLoading(false);
+      setIsLoading(false);
     }
   };
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-50 p-4">
-      <Card className="w-full max-w-md shadow-lg border-gray-200">
+    <div className="flex items-center justify-center min-h-screen bg-gray-100 p-4">
+      <Card className="w-full max-w-md shadow-xl border-gray-200">
         <CardHeader className="text-center">
-          <CardTitle className="text-2xl font-bold">Welcome Back</CardTitle>
-          <CardDescription>Enter your Client ID and password to access your account.</CardDescription>
+          <CardTitle className="text-3xl font-bold">Welcome Back</CardTitle>
+          <CardDescription>Log in to access your dashboard.</CardDescription>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
-            {error && <p className="text-red-500 text-center text-sm font-medium">{error}</p>}
-            <div className="space-y-2">
+            {error && <p className="text-red-600 bg-red-50 p-3 rounded-md text-center text-sm font-semibold">{error}</p>}
+            
+            <div className="space-y-1.5">
               <Label htmlFor="client_id">Client ID</Label>
               <Input
                 id="client_id"
@@ -96,32 +90,35 @@ const Login = () => {
                 required
               />
             </div>
-            <div className="space-y-2">
+            
+            <div className="space-y-1.5">
               <Label htmlFor="password">Password</Label>
               <Input
                 id="password"
                 name="password"
                 type="password"
+                placeholder="••••••••"
                 value={formData.password}
                 onChange={handleChange}
                 required
               />
             </div>
-            <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? <Loader2 className="animate-spin w-5 h-5" /> : "Log In"}
+            
+            <Button type="submit" className="w-full font-semibold" disabled={isLoading}>
+              {isLoading ? <Loader2 className="animate-spin w-5 h-5" /> : "Log In"}
             </Button>
           </form>
-          <div className="mt-4 text-center text-sm">
+          <p className="mt-6 text-center text-sm text-gray-600">
             Don&apos;t have an account?{" "}
-            <Link to="/signup" className="underline font-medium">
-              Sign up
+            <Link to="/signup" className="font-semibold text-blue-600 hover:underline">
+              Sign Up
             </Link>
-          </div>
+          </p>
         </CardContent>
       </Card>
     </div>
   );
 };
 
-export default Login;
+export default LoginPage;
 

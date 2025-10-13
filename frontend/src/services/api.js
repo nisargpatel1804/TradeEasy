@@ -1,11 +1,12 @@
 import axios from "axios";
 
-// Load API base URL from .env, with a fallback for development
+// Load API base URL from environment variables, with a fallback for local development.
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
 
 /**
  * The configured Axios instance for all backend communication.
- * It includes the base URL and settings for handling credentials (cookies).
+ * It includes the base URL and settings for handling credentials (cookies),
+ * which is essential for flask-login session management.
  */
 export const apiClient = axios.create({
   baseURL: `${API_BASE_URL}/api`,
@@ -14,120 +15,34 @@ export const apiClient = axios.create({
 
 /**
  * Centralized API error handler.
- * If a 401 Unauthorized error is received, it dispatches an 'unauthorized' event
- * for the AuthContext to handle, preventing circular dependencies.
- * Exception: 401 errors from logout and check-auth endpoints are handled gracefully without triggering logout loops.
+ * This interceptor catches errors from all API responses.
  * @param {object} error - The Axios error object.
  */
 const handleApiError = (error) => {
-  // Ignore request cancellation or throttling errors
-  if (axios.isCancel(error) || error.message === 'Request throttled') {
-    return Promise.reject(error);
+  // If the session has expired (401 Unauthorized), dispatch a global event.
+  // The AuthContext will listen for this event to trigger a global logout,
+  // preventing circular dependencies between this service and the context.
+  // We ignore 401s from the '/check-auth' endpoint to avoid logout loops on initial load.
+  if (error.response?.status === 401 && !error.config.url.endsWith('/check-auth')) {
+    window.dispatchEvent(new CustomEvent('unauthorized'));
   }
 
-  // Handle network errors (server is down, etc.)
-  if (error.code === 'ERR_NETWORK') {
-    return Promise.reject(new Error("Network Error: Could not connect to the server."));
-  }
-
-  // If session has expired (401), notify the application to handle logout
-  // BUT: Don't trigger unauthorized event for logout, login, and signup endpoint failures
-  if (error.response?.status === 401) {
-    const isAuthRequest = error.config?.url?.includes('/auth/login') ||
-                         error.config?.url?.includes('/auth/signup') ||
-                         error.config?.url?.includes('/auth/logout');
-
-    if (!isAuthRequest) {
-      const requestUrl = error.config?.url ?? null;
-      let fullUrl = null;
-      try {
-        if (requestUrl) {
-          fullUrl = error.config?.baseURL
-            ? new URL(requestUrl, error.config.baseURL).toString()
-            : new URL(requestUrl, window.location.origin).toString();
-        }
-      } catch (urlError) {
-        fullUrl = requestUrl;
-      }
-
-      const eventDetail = {
-        reason: 'SESSION_EXPIRED',
-        endpoint: requestUrl,
-        method: error.config?.method ?? null,
-        status: error.response?.status ?? null,
-        fullUrl,
-        timestamp: Date.now(),
-      };
-
-      const unauthorizedEvent = typeof window.CustomEvent === 'function'
-        ? new CustomEvent('unauthorized', { detail: eventDetail })
-        : (() => {
-            const fallbackEvent = new Event('unauthorized');
-            fallbackEvent.detail = eventDetail;
-            return fallbackEvent;
-          })();
-
-      // Only dispatch unauthorized event for non-auth 401 errors
-      window.dispatchEvent(unauthorizedEvent);
-
-      const sessionError = new Error("You're signed out. Please log in to continue.");
-      sessionError.code = 'SESSION_EXPIRED';
-      sessionError.status = 401;
-      if (requestUrl) {
-        sessionError.endpoint = requestUrl;
-      }
-      if (error.config?.method) {
-        sessionError.method = error.config.method;
-      }
-
-      return Promise.reject(sessionError);
-    }
-    // For auth requests, fall through to return the backend error message
-  }
-
-  // Extract a clear error message from the backend response, or provide a default
+  // For all other errors, extract the specific message from the backend response
+  // or provide a generic one.
   const errorMessage =
-    error.response?.data?.error ||
     error.response?.data?.message ||
-    "An unexpected error occurred.";
+    "An unexpected error occurred. Please try again.";
 
-  const apiError = new Error(errorMessage);
-  apiError.status = error.response?.status ?? null;
-  apiError.code = error.response?.data?.code ?? error.response?.status ?? 'API_ERROR';
-  if (error.response?.headers) {
-    apiError.headers = error.response.headers;
-    const retryAfter = error.response.headers['retry-after'];
-    if (retryAfter !== undefined) {
-      const retrySeconds = Number.parseInt(retryAfter, 10);
-      if (!Number.isNaN(retrySeconds)) {
-        apiError.retryAfter = retrySeconds;
-      }
-    }
-    const remaining = error.response.headers['x-ratelimit-remaining'];
-    if (remaining !== undefined) {
-      const remainingInt = Number.parseInt(remaining, 10);
-      if (!Number.isNaN(remainingInt)) {
-        apiError.rateLimitRemaining = remainingInt;
-      }
-    }
-  }
-
-  return Promise.reject(apiError);
+  return Promise.reject(new Error(errorMessage));
 };
 
-// Attach the centralized error handler as an interceptor
+// Attach the centralized error handler to the Axios instance.
 apiClient.interceptors.response.use(
   (response) => response,
   handleApiError
 );
 
-// --- Generic Data Fetcher ---
-/**
- * A generic function to fetch data from the API.
- * @param {string} endpoint - The API endpoint to fetch from (e.g., "/portfolio").
- * @param {object} options - Optional Axios request config (e.g., params).
- * @returns {Promise<any>} - The response data.
- */
+// A generic function to simplify GET requests and extract the data.
 const fetchData = (endpoint, options = {}) => {
   return apiClient.get(endpoint, options).then(res => res.data);
 };
@@ -135,152 +50,59 @@ const fetchData = (endpoint, options = {}) => {
 // =========================================================================
 //                           API Service Functions
 // =========================================================================
-// All authentication functions (login, signup, logout) have been moved to
-// 'src/services/auth.js' to act as the single source of truth.
-// =========================================================================
 
+// --- Auth ---
+export const signup = (credentials) => apiClient.post('/auth/signup', credentials).then(res => res.data);
+export const login = (credentials) => apiClient.post('/auth/login', credentials).then(res => res.data);
+export const logout = () => apiClient.post('/auth/logout').then(res => res.data);
+export const checkAuth = () => fetchData('/auth/check-auth');
 
-// --- Profile API ---
-/** Fetches the current user's profile data. */
-export const fetchProfile = () => {
-  // Updated to use the correct endpoint after backend route fix
-  return fetchData("/profile");
-};
+// --- Profile ---
+export const getProfile = () => fetchData('/profile');
+export const updateProfile = (profileData) => apiClient.put('/profile', profileData).then(res => res.data);
 
-/** Updates the user's profile. */
-export const updateProfile = (profileData) => {
-  return apiClient.put("/profile/update", profileData).then(res => {
-    const payload = res.data;
-    if (payload?.success && typeof window !== 'undefined') {
-      const eventDetail = { profile: payload.profile ?? null };
-      const profileUpdatedEvent = typeof window.CustomEvent === 'function'
-        ? new CustomEvent('profile:updated', { detail: eventDetail })
-        : (() => {
-            const fallbackEvent = new Event('profile:updated');
-            fallbackEvent.detail = eventDetail;
-            return fallbackEvent;
-          })();
+// --- Portfolio ---
+export const getPortfolio = () => fetchData('/portfolio');
+export const fetchPortfolio = getPortfolio;
 
-      window.dispatchEvent(profileUpdatedEvent);
-    }
-    return payload;
-  });
-};
+// --- Orders ---
+export const getOrders = () => fetchData('/orders');
+export const fetchOrders = getOrders;
 
+// --- Markets ---
+export const getMarketIndices = () => fetchData('/indices');
+export const fetchMarketIndices = getMarketIndices;
+export const fetchMarketStocks = (marketName) => fetchData(`/markets/${marketName}`);
 
-// --- Portfolio & Performance API ---
-/** Fetches the user's portfolio holdings. */
-export const fetchPortfolio = () => fetchData("/portfolio");
+// --- Stock ---
+export const getStockDetails = (symbol) => fetchData(`/stock/${symbol}`);
+export const getStockData = getStockDetails;
+export const fetchStockData = getStockDetails;
+export const batchGetStockData = (symbols) => fetchData('/stocks/batch', { params: { symbols: symbols.join(',') } });
 
-/** Fetches the user's performance data. */
-export const fetchPerformance = () => fetchData("/performance");
-
-
-// --- Market & Stock Data API ---
-/** Fetches detailed data for a single stock symbol. */
-export const getStockData = (symbol) => fetchData(`/stocks/${symbol}`);
-
-/** Fetches overview data for a single stock. */
-export const getStockOverview = (symbol) => {
-  const formattedSymbol = symbol.replace(/\.(NS|NSE|BO|BSE)$/i, '');
-  return fetchData(`/stock/overview/${encodeURIComponent(formattedSymbol)}`);
-};
-
-/** Searches for stocks based on a query. */
+// --- Search ---
+// The backend expects the query parameter 'q'.
 export const searchStocks = (query) => {
-  if (!query || !query.trim()) return Promise.resolve([]);
-  return fetchData("/stocks/search", { params: { query } });
+    if (!query || query.trim().length < 2) {
+        return Promise.resolve([]); // Return empty for short queries, matching backend logic
+    }
+    return fetchData('/search', { params: { q: query } });
 };
 
-/** Fetches market indices (e.g., Nifty 50, Sensex). */
-export const fetchIndices = (options = {}) => {
-  // ✅ FIX: The backend now returns { indices: [], metadata: {} }.
-  // This extracts the array so the DataContext fallback works correctly.
-  return fetchData("/indices", options).then(data => data.indices || []);
-};
-
-/**
- * ✅ NEW: Fetches all stocks for a specific market index (e.g., Nifty 50).
- * This supports the MarketPage component.
- * Assumes a backend endpoint like GET /api/markets/nifty50
- * @param {string} marketName - The name of the market index to fetch (e.g., "nifty50").
- */
-export const fetchMarketStocks = (marketName = 'nifty50') => {
-  return fetchData(`/markets/${marketName}`);
-};
-
-/** Fetches top market gainers. */
-export const getTopGainers = () => fetchData('/markets/gainers');
-
-/** Fetches top market losers. */
-export const getTopLosers = () => fetchData('/markets/losers');
-
-
-// --- Watchlist API ---
-/** Fetches all of the user's watchlists. */
-export const fetchWatchlists = () => fetchData("/watchlists");
-
-/** Creates a new watchlist. */
-export const createWatchlist = (name) => {
-  return apiClient.post("/watchlists", { name }).then(res => res.data);
-};
-
-/** Deletes a watchlist by its name. */
-export const deleteWatchlist = (watchlistName) => {
-  return apiClient.delete(`/watchlists/${encodeURIComponent(watchlistName)}`).then(res => res.data);
-};
-
-// --- THIS FUNCTION IS UPDATED ---
-/** * Adds a stock to a specific watchlist (by name).
- * Includes the scripcode, which is essential for the backend to trigger
- * a real-time WebSocket subscription for the newly added stock.
- */
-export const addStockToWatchlist = (watchlistName, symbol, name, scripcode) => {
-  return apiClient.post(`/watchlists/${encodeURIComponent(watchlistName)}/stocks`, { symbol, name, scripcode }).then(res => res.data);
-};
-
-/** Removes a stock from a specific watchlist (by name). */
-export const removeStockFromWatchlist = (watchlistName, symbol) => {
-  return apiClient.delete(`/watchlists/${encodeURIComponent(watchlistName)}/stocks/${encodeURIComponent(symbol)}`).then(res => res.data);
-};
-
-/** Fetches stocks in a specific watchlist (by name). */
-export const fetchWatchlistStocks = (watchlistName) => {
-  return fetchData(`/watchlists/${encodeURIComponent(watchlistName)}/stocks`);
-};
-
-// --- Batch Stock Data ---
-/** Fetches batch LTP data for multiple symbols. Symbols may include .NS/.NSE suffixes. */
-export const fetchBatchStockData = (symbols = []) => {
-  if (!Array.isArray(symbols) || symbols.length === 0) return Promise.resolve({ data: {} });
-  return fetchData(`/stocks/batch`, { params: { symbols: symbols.join(',') } });
-};
-
-
-// --- Order & Trade API ---
-/** Fetches all of the user's orders. */
-export const fetchOrders = () => fetchData("/orders");
-
-/** Fetches details for a specific order. */
-export const fetchOrderDetail = (orderId) => fetchData(`/orders/${orderId}`);
-
-/** Places a trade order (buy/sell). */
-export const placeTrade = (tradeData = {}) => {
-  const action = (tradeData.action || 'buy').toLowerCase();
-  const endpoint = action === 'sell' ? '/trade/sell' : '/trade/buy';
-  const payload = {
-    symbol: tradeData.symbol,
-    quantity: Number(tradeData.quantity),
-    orderType: tradeData.orderType,
-    price: tradeData.price,
-    client_id: tradeData.client_id,
-  };
-
-  if (payload.orderType !== 'limit') {
-    delete payload.price;
+// --- Trade ---
+export const placeBuyOrder = (tradeData) => apiClient.post('/buy', tradeData).then(res => res.data);
+export const placeSellOrder = (tradeData) => apiClient.post('/sell', tradeData).then(res => res.data);
+export const placeTrade = (tradeData) => {
+  const action = tradeData?.action?.toUpperCase();
+  if (action === 'SELL') {
+    return placeSellOrder(tradeData);
   }
-
-  return apiClient.post(endpoint, payload).then(res => res.data);
+  return placeBuyOrder(tradeData);
 };
 
-export default apiClient;
+// --- Watchlists ---
+export const getWatchlists = () => fetchData('/watchlists');
+export const createWatchlist = (name) => apiClient.post('/watchlists', { name }).then(res => res.data);
+export const deleteWatchlist = (watchlistName) => apiClient.delete(`/watchlists/${watchlistName}`).then(res => res.data);
+export const addStockToWatchlist = (watchlistName, stockData) => apiClient.post(`/watchlists/${watchlistName}/stocks`, stockData).then(res => res.data);
+export const removeStockFromWatchlist = (watchlistName, symbol) => apiClient.delete(`/watchlists/${watchlistName}/stocks/${symbol}`).then(res => res.data);

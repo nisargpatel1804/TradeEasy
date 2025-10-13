@@ -1,14 +1,14 @@
-import { useState, useEffect } from "react";
+import React, { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { useAuth } from "@/context/AuthContext.jsx";
-import { Button } from "@/assets/ui/button.jsx";
+import { useAuth } from "../context/AuthContext.jsx";
+import { Button } from "../assets/ui/button.jsx";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/assets/ui/dropdown-menu.jsx";
+} from "../assets/ui/dropdown-menu.jsx";
 import {
   TrendingUp,
   Menu,
@@ -21,15 +21,15 @@ import {
 } from "lucide-react";
 
 // The words to animate in the hero section
-const words = ["stock", "investor", "analyst", "opportunity"];
+const words = ["trader", "investor", "analyst", "enthusiast"];
 const MotionLink = motion(Link);
 
-export default function LandingPage() {
+const LandingPage = () => {
   // State for the animated hero text
   const [wordIndex, setWordIndex] = useState(0);
 
   // Get authentication state and logout function from the AuthContext
-  const { isLoggedIn, logout } = useAuth();
+  const { isAuthenticated, logout } = useAuth();
 
   // Effect to cycle through the animated words
   useEffect(() => {
@@ -38,11 +38,6 @@ export default function LandingPage() {
     }, 2500);
     return () => clearInterval(interval);
   }, []);
-
-  const handleLogout = () => {
-    // The logout function from AuthContext handles API call, state change, and redirection.
-    logout();
-  };
 
   return (
     <div className="bg-white text-gray-800">
@@ -56,12 +51,12 @@ export default function LandingPage() {
 
           {/* Desktop Navigation */}
           <div className="hidden md:flex items-center gap-4">
-            {isLoggedIn ? (
+            {isAuthenticated ? (
               <>
                 <Button asChild variant="ghost">
                   <Link to="/dashboard">Dashboard</Link>
                 </Button>
-                <Button onClick={handleLogout} variant="destructive">
+                <Button onClick={logout} variant="secondary">
                   Logout
                 </Button>
               </>
@@ -86,12 +81,12 @@ export default function LandingPage() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                {isLoggedIn ? (
+                {isAuthenticated ? (
                   <>
                     <DropdownMenuItem asChild>
                       <Link to="/dashboard">Dashboard</Link>
                     </DropdownMenuItem>
-                    <DropdownMenuItem onClick={handleLogout} className="text-red-600">
+                    <DropdownMenuItem onClick={logout} className="text-red-600">
                       Logout
                     </DropdownMenuItem>
                   </>
@@ -116,7 +111,7 @@ export default function LandingPage() {
         {/* Hero Section */}
         <section className="pt-32 pb-20 text-center bg-gray-50">
           <div className="container mx-auto px-6">
-            <motion.h1 
+            <motion.h1
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.8 }}
@@ -140,7 +135,7 @@ export default function LandingPage() {
               <br />
               needs a great platform.
             </motion.h1>
-            <motion.p 
+            <motion.p
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.8, delay: 0.2 }}
@@ -149,8 +144,8 @@ export default function LandingPage() {
               Practice trading with virtual money in real market conditions.
               Learn, strategize, and master the art of trading without risking real capital.
             </motion.p>
-            {!isLoggedIn && (
-              <motion.div 
+            {!isAuthenticated && (
+              <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.8, delay: 0.4 }}
@@ -176,7 +171,7 @@ export default function LandingPage() {
             </div>
             <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
               {features.map((feature, index) => (
-                <motion.div 
+                <motion.div
                   key={index}
                   initial={{ opacity: 0, y: 30 }}
                   whileInView={{ opacity: 1, y: 0 }}
@@ -239,4 +234,6 @@ const features = [
     icon: Target,
   },
 ];
+
+export default LandingPage;
 

@@ -1,13 +1,9 @@
 import logging
 import sys
-import os
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from datetime import datetime
 from mongoengine.errors import NotUniqueError
-
-# Ensure the app's root directory is in the Python path for correct module imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.moapi.mo_api import MotilalOswalAPI
 from app.models import AQScrip
@@ -182,5 +178,5 @@ if __name__ == '__main__':
             print(f"Error setting up Flask app context: {e}")
             sys.exit(1)
     else:
-        print("Usage: python app/data_management/db_scrips_populate.py populate")
+        print("Usage: python -m app.db_scrips_populate populate")
         print("Ensure you run this command from the root 'backend' directory.")

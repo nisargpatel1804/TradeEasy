@@ -71,7 +71,7 @@ def create_app():
     # --- Register Blueprints for API Routes ---
     # Grouping blueprint imports and registrations for better organization
     from .routes import auth, markets, orders, portfolio, profile, search, stock, trade, watchlist
-    from .data_management import db_scrips_populate
+    from .db_scrips_populate import data_management_bp
     
     app.register_blueprint(auth.auth_bp, url_prefix='/api/auth')
     app.register_blueprint(markets.markets_bp, url_prefix='/api/markets')
@@ -82,7 +82,7 @@ def create_app():
     app.register_blueprint(stock.stock_bp, url_prefix='/api/stock')
     app.register_blueprint(trade.trade_bp, url_prefix='/api/trade')
     app.register_blueprint(watchlist.watchlist_bp, url_prefix='/api/watchlist')
-    app.register_blueprint(db_scrips_populate.data_management_bp, url_prefix='/api/data')
+    app.register_blueprint(data_management_bp, url_prefix='/api/data')
 
     # --- Health Check Endpoint ---
     @app.route('/')
