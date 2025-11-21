@@ -9,6 +9,10 @@ from app.socket_manager import MO_WebSocket_Manager
 logger = logging.getLogger(__name__)
 stock_bp = Blueprint('stock', __name__)
 
+# Module-level cache for bulk EOD data to avoid redundant API calls
+_eod_cache = {}
+EOD_CACHE_TTL = 300  # 5 minutes
+
 # --- Helper Functions ---
 
 def format_symbol(symbol: str) -> str:
@@ -19,6 +23,65 @@ def format_symbol(symbol: str) -> str:
         return clean_symbol.split('.')[0]
     return clean_symbol
 
+def _get_cached_eod_data(mo_api, exchange: str) -> list:
+    """Fetches and caches bulk EOD data for an exchange to minimize API calls."""
+    cache_key = f"eod_bulk_{exchange}"
+    now = time.time()
+    
+    if cache_key in _eod_cache:
+        cached_data, timestamp = _eod_cache[cache_key]
+        if now - timestamp < EOD_CACHE_TTL:
+            logger.debug(f"EOD cache HIT for {exchange}")
+            return cached_data
+    
+    logger.info(f"EOD cache MISS for {exchange}, fetching from API")
+    response = mo_api.get_eod_data(exchange)
+    if response and response.get("status") == "SUCCESS":
+        eod_data = response.get("data", [])
+        _eod_cache[cache_key] = (eod_data, now)
+        return eod_data
+    
+    return []
+
+# --- Helper Functions ---
+
+def format_symbol(symbol: str) -> str:
+    """Cleans and standardizes a stock symbol by removing exchange suffixes."""
+    if not isinstance(symbol, str): return ""
+    clean_symbol = symbol.strip().upper()
+    if '.' in clean_symbol:
+        return clean_symbol.split('.')[0]
+    return clean_symbol
+
+def extract_price_with_fallback(api_data: dict) -> tuple[float, str]:
+    """
+    Extracts the best available price from API response data, falling back to
+    close/prevClose when ltp is zero (market closed scenario).
+    
+    Returns:
+        tuple[float, str]: (price_in_rupees, source_field)
+        source_field is one of: 'ltp', 'close', 'prevClose', or 'unavailable'
+    """
+    if not api_data or not isinstance(api_data, dict):
+        return (0.0, 'unavailable')
+    
+    # Try ltp first (live trading price)
+    ltp_paisa = api_data.get('ltp', 0)
+    if ltp_paisa and ltp_paisa > 0:
+        return (float(ltp_paisa) / 100.0, 'ltp')
+    
+    # Fallback to close (previous day's close or latest EOD)
+    close_paisa = api_data.get('close', 0)
+    if close_paisa and close_paisa > 0:
+        return (float(close_paisa) / 100.0, 'close')
+    
+    # Last resort: prevClose (some APIs use this field)
+    prev_close_paisa = api_data.get('prevClose', 0)
+    if prev_close_paisa and prev_close_paisa > 0:
+        return (float(prev_close_paisa) / 100.0, 'prevClose')
+    
+    return (0.0, 'unavailable')
+
 # --- Core Data Fetching Logic ---
 
 @lru_cache(maxsize=512)
@@ -26,6 +89,7 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
     """
     The centralized, cached function to fetch comprehensive stock data for a given symbol.
     It resolves the scripcode and uses the authenticated MO API instance.
+    Falls back to EOD bulk data when LTP is unavailable (market closed).
     """
     clean_symbol = format_symbol(symbol)
     if not clean_symbol:
@@ -53,13 +117,51 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
             logger.warning(f"No valid LTP data from API for {clean_symbol} ({scripcode})")
             return None
 
-        # --- Step 3: Format and Return Data ---
+        # --- Step 3: Extract Price with Fallback Logic ---
         data = response["data"]
-        ltp = float(data.get('ltp', 0)) / 100.0
-        prev_close = float(data.get('close', 0)) / 100.0
         
-        change = ltp - prev_close if prev_close > 0 else 0.0
-        percent_change = (change / prev_close * 100.0) if prev_close > 0 else 0.0
+        ltp, price_source = extract_price_with_fallback(data)
+        
+        # If still zero, try fetching from bulk EOD data as final fallback
+        if ltp <= 0:
+            logger.info(f"LTP is zero for {clean_symbol}, attempting bulk EOD fallback")
+            eod_data_list = _get_cached_eod_data(mo_api, exchange)
+            
+            # Find our scripcode in the bulk response
+            for eod_entry in eod_data_list:
+                if str(eod_entry.get("scripcode")) == str(scripcode):
+                    ltp, price_source = extract_price_with_fallback(eod_entry)
+                    if ltp > 0:
+                        data = eod_entry  # Use EOD entry for remaining fields
+                        logger.info(f"✓ Found {clean_symbol} in bulk EOD: ₹{ltp} (source: {price_source})")
+                        break
+        
+        if ltp <= 0:
+            logger.warning(f"No valid price available for {clean_symbol} ({scripcode}) - all fields zero")
+            return None
+        
+        # Get the actual previous day's close for accurate change calculation
+        # The field hierarchy matters:
+        # - 'prevClose' or 'prevclose' = actual previous trading day's close
+        # - 'close' = current day's close (which might be same as ltp during market hours)
+        # We should prioritize prevClose to avoid showing 0% change when using close as LTP fallback
+        prev_close = float(data.get('prevClose', 0)) / 100.0
+        if prev_close <= 0:
+            prev_close = float(data.get('prevclose', 0)) / 100.0
+        if prev_close <= 0:
+            # Only use 'close' as last resort for prev_close
+            prev_close = float(data.get('close', 0)) / 100.0
+        
+        # Calculate change and percent change
+        # If we can't find prev_close and using fallback price, set change to 0
+        if prev_close > 0:
+            change = ltp - prev_close
+            percent_change = (change / prev_close * 100.0)
+        else:
+            # No previous close available - show 0 change
+            prev_close = ltp
+            change = 0.0
+            percent_change = 0.0
 
         return {
             'symbol': clean_symbol,
@@ -73,6 +175,7 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
             'low': float(data.get('low', 0)) / 100.0,
             'close': prev_close,
             'volume': int(data.get('volume', 0)),
+            'price_source': price_source,  # 'ltp', 'close', or 'prevClose'
             'last_updated': int(time.time() * 1000)
         }
 

@@ -56,8 +56,25 @@ const StockSearch = () => {
     debouncedSearch(query);
   }, [query, debouncedSearch]);
 
+  const isStockInWatchlist = (stock) => {
+    if (!watchlistsData?.watchlists) return false;
+    return watchlistsData.watchlists.some(watchlist =>
+      watchlist.stocks.some(s => s.symbol === stock.symbol || s.scripcode === stock.scripcode)
+    );
+  };
+
   const handleAddStock = async (e, stock) => {
     e.stopPropagation(); // Prevent dropdown from closing
+    
+    // Check if stock is already in any watchlist
+    if (isStockInWatchlist(stock)) {
+      toast.error(`${stock.symbol} is already in your watchlist`, {
+        duration: 2000,
+        icon: "ℹ️"
+      });
+      return;
+    }
+    
     const defaultWatchlist = watchlistsData?.watchlists.find(w => !w.is_deletable);
     if (!defaultWatchlist) {
       toast.error("Default watchlist not found.");
@@ -75,7 +92,15 @@ const StockSearch = () => {
       getWatchlists(true); // Refresh watchlists data
       setQuery(""); // Clear search after adding
     } catch (error) {
-      toast.error(error.message || `Failed to add ${stock.symbol}`, { id: toastId });
+      // Handle specific error cases
+      if (error.status === 409) {
+        toast.error(`${stock.symbol} is already in your watchlist`, { 
+          id: toastId,
+          icon: "ℹ️" 
+        });
+      } else {
+        toast.error(error.message || `Failed to add ${stock.symbol}`, { id: toastId });
+      }
     }
   };
   
@@ -114,21 +139,35 @@ const StockSearch = () => {
                     {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}
                 </div>
             ) : results.length > 0 ? (
-              results.map((stock) => (
-                <div
-                  key={stock.symbol}
-                  className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b dark:border-gray-700 last:border-b-0 flex items-center justify-between cursor-pointer"
-                  onClick={() => handleSelectStock(stock)}
-                >
-                  <div>
-                    <div className="font-medium">{stock.symbol}</div>
-                    <div className="text-sm text-gray-600 dark:text-gray-400 truncate">{stock.name}</div>
+              results.map((stock) => {
+                const alreadyAdded = isStockInWatchlist(stock);
+                return (
+                  <div
+                    key={stock.symbol}
+                    className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b dark:border-gray-700 last:border-b-0 flex items-center justify-between cursor-pointer"
+                    onClick={() => handleSelectStock(stock)}
+                  >
+                    <div className="flex-1">
+                      <div className="font-medium">{stock.symbol}</div>
+                      <div className="text-sm text-gray-600 dark:text-gray-400 truncate">{stock.name}</div>
+                    </div>
+                    {alreadyAdded ? (
+                      <div className="text-xs text-green-600 dark:text-green-400 font-medium px-2">
+                        Added ✓
+                      </div>
+                    ) : (
+                      <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        onClick={(e) => handleAddStock(e, stock)}
+                      >
+                        <Plus className="h-4 w-4" />
+                      </Button>
+                    )}
                   </div>
-                  <Button variant="ghost" size="icon" onClick={(e) => handleAddStock(e, stock)}>
-                    <Plus className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))
+                );
+              })
+            )
             ) : (
               <div className="p-4 text-center text-sm text-gray-500">
                 {query.length > 1 ? "No results found." : "Type to search..."}

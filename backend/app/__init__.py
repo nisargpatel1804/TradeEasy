@@ -14,9 +14,45 @@ from bson import ObjectId
 # Best practice to load this at the very top
 load_dotenv()
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Parse truthy environment flags with sensible defaults."""
+    value = os.getenv(name, str(default)).strip().lower()
+    return value in {"1", "true", "t", "y", "yes"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "Invalid integer for %s=%s. Falling back to %s.",
+            name,
+            value,
+            default,
+        )
+        return default
+
+
 # --- Configure Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logging.getLogger('werkzeug').setLevel(logging.WARNING)  # Quiets the default Flask request logger
+
+SUPPRESS_SOCKET_LOGS = _env_flag('SUPPRESS_SOCKET_LOGS', default=True)
+
+if SUPPRESS_SOCKET_LOGS:
+    for logger_name, level in (
+        ('app.socket_manager', logging.WARNING),
+        ('app.moapi.mo_api', logging.WARNING),
+        ('websocket', logging.WARNING),
+        ('engineio', logging.ERROR),
+        ('socketio', logging.ERROR),
+        ('werkzeug', logging.CRITICAL),  # Suppress werkzeug WSGI errors (including disconnect race conditions)
+    ):
+        logging.getLogger(logger_name).setLevel(level)
+else:
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)  # Quiets the default Flask request logger
 logger = logging.getLogger(__name__)
 
 # --- Initialize Flask Extensions ---
@@ -24,7 +60,19 @@ logger = logging.getLogger(__name__)
 db = MongoEngine()
 login_manager = LoginManager()
 bcrypt = Bcrypt()
-socketio = SocketIO()
+SOCKETIO_PING_INTERVAL = _env_int('SOCKETIO_PING_INTERVAL', 25)
+SOCKETIO_PING_TIMEOUT = _env_int('SOCKETIO_PING_TIMEOUT', 90)
+SOCKETIO_MAX_HTTP_BUFFER = _env_int('SOCKETIO_MAX_HTTP_BUFFER', 2 * 1024 * 1024)
+socketio = SocketIO(
+    logger=not SUPPRESS_SOCKET_LOGS,
+    engineio_logger=not SUPPRESS_SOCKET_LOGS,
+    async_mode='threading',
+    ping_interval=SOCKETIO_PING_INTERVAL,
+    ping_timeout=SOCKETIO_PING_TIMEOUT,
+    max_http_buffer_size=SOCKETIO_MAX_HTTP_BUFFER,
+    always_connect=True,
+    cors_allowed_origins='*',
+)
 
 # --- Application Factory ---
 
@@ -47,12 +95,24 @@ def create_app():
     # --- CORS Configuration ---
     # Configure CORS for both standard HTTP requests and WebSocket connections
     frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
-    socketio.init_app(app, cors_allowed_origins=[frontend_url, "http://127.0.0.1:5173"])
-    CORS(
+    socketio.init_app(
         app,
-        resources={r"/api/*": {"origins": [frontend_url, "http://127.0.0.1:5173"]}},
-        supports_credentials=True
+        cors_allowed_origins='*',
+        ping_interval=SOCKETIO_PING_INTERVAL,
+        ping_timeout=SOCKETIO_PING_TIMEOUT,
+        max_http_buffer_size=SOCKETIO_MAX_HTTP_BUFFER,
+        always_connect=True,
     )
+    
+    # Allow CORS for API routes - more permissive in development
+    if app.config.get('DEBUG', False):
+        CORS(app, supports_credentials=True, origins='*')
+    else:
+        CORS(
+            app,
+            resources={r"/api/*": {"origins": [frontend_url, "http://127.0.0.1:5173"]}},
+            supports_credentials=True
+        )
 
     # --- Singleton WebSocket Manager Initialization ---
     with app.app_context():
@@ -60,7 +120,8 @@ def create_app():
         
         # Instantiate the singleton manager and pass the socketio server to it
         # This allows the manager's background threads to emit data to clients
-        socket_manager = MO_WebSocket_Manager(socketio_server=socketio)
+        # force_connect=True enables WebSocket connection even when markets are closed
+        socket_manager = MO_WebSocket_Manager(socketio_server=socketio, force_connect=True)
         socket_manager.start()
 
         # --- Initialize Task Scheduler for Background Jobs ---
@@ -118,6 +179,38 @@ def create_app():
             "message": "Authentication required. Please log in."
         }), 401
 
+    # --- Session Idle Timeout Middleware ---
+    @app.before_request
+    def check_session_timeout():
+        """Check if the session has been idle for too long."""
+        from flask_login import current_user
+        from flask import session
+        from datetime import datetime
+        
+        if current_user.is_authenticated:
+            last_activity = session.get('last_activity')
+            now = datetime.utcnow()
+            
+            if last_activity:
+                from datetime import datetime as dt
+                if isinstance(last_activity, str):
+                    last_activity = dt.fromisoformat(last_activity)
+                
+                idle_duration = now - last_activity
+                if idle_duration > app.config['SESSION_IDLE_TIMEOUT']:
+                    logger.info(f"Session expired due to inactivity for user {current_user.client_id}")
+                    from flask_login import logout_user
+                    logout_user()
+                    session.clear()
+                    return jsonify({
+                        "success": False,
+                        "message": "Session expired due to inactivity. Please log in again."
+                    }), 401
+            
+            # Update last activity timestamp
+            session['last_activity'] = now.isoformat()
+            session.modified = True
+
     # --- Configure SocketIO Event Handlers ---
     @socketio.on('connect')
     def handle_connect():
@@ -125,35 +218,41 @@ def create_app():
         Handles new client connections by sending the latest cached data
         to immediately populate their UI and registering their watchlist stocks.
         """
-        from flask_login import current_user
-        
-        logger.info(f"Client connected: {request.sid}")
-        
-        # Get the singleton instance of the manager
-        manager = MO_WebSocket_Manager()
-        
-        # If user is authenticated, register their watchlist stocks for real-time updates
-        if current_user.is_authenticated:
-            try:
-                manager.register_user_watchlist_stocks(current_user.id)
-            except Exception as e:
-                logger.error(f"Error registering watchlist stocks for user {current_user.id}: {e}")
-        
-        # Send the latest cached index data to the newly connected client
-        latest_indices = manager.get_latest_indices_data()
-        if latest_indices:
-            emit('initial_indices', latest_indices, room=request.sid)
-        latest_stock_prices = manager.get_latest_stock_data()
-        if latest_stock_prices:
-            emit('initial_stock_prices', latest_stock_prices, room=request.sid)
-        # Inform client of current market status
-        market_open = manager.mo_api.market_hours.is_market_open()
-        emit('market_status', {"isOpen": market_open}, room=request.sid)
+        try:
+            from flask_login import current_user
+            
+            logger.info(f"Client connected: {request.sid}")
+            
+            # Get the singleton instance of the manager
+            manager = MO_WebSocket_Manager()
+            
+            # If user is authenticated, register their watchlist stocks for real-time updates
+            if current_user.is_authenticated:
+                try:
+                    manager.register_user_watchlist_stocks(current_user.id)
+                except Exception as e:
+                    logger.error(f"Error registering watchlist stocks for user {current_user.id}: {e}")
+            
+            # Send the latest cached index data to the newly connected client
+            latest_indices = manager.get_latest_indices_data()
+            if latest_indices:
+                emit('initial_indices', latest_indices, room=request.sid)
+            latest_stock_prices = manager.get_latest_stock_data()
+            if latest_stock_prices:
+                emit('initial_stock_prices', latest_stock_prices, room=request.sid)
+            # Inform client of current market status
+            market_open = manager.mo_api.market_hours.is_market_open()
+            emit('market_status', {"isOpen": market_open}, room=request.sid)
+        except Exception as e:
+            logger.error(f"Error in connect handler: {e}", exc_info=True)
 
     @socketio.on('disconnect')
     def handle_disconnect():
         """Logs when a client disconnects."""
-        logger.info(f"Client disconnected: {request.sid}")
+        try:
+            logger.info(f"Client disconnected: {request.sid}")
+        except Exception as e:
+            logger.error(f"Error in disconnect handler: {e}", exc_info=True)
 
     logger.info("Flask application created and configured successfully.")
     return app

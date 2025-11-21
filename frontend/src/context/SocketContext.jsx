@@ -57,8 +57,9 @@ export const SocketProvider = ({ children }) => {
       reconnectionAttempts: Infinity,
       reconnectionDelay: 2000,
       reconnectionDelayMax: 8000,
-      transports: ['polling'],
-      upgrade: false,
+      timeout: 60000,
+      transports: ['websocket', 'polling'],
+      upgrade: true,
     });
 
     let isShuttingDown = false;

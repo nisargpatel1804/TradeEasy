@@ -1,6 +1,8 @@
 import logging
 import re
 import time
+import secrets
+from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify, session
 from flask_login import login_user, logout_user, login_required, current_user
 from mongoengine.errors import NotUniqueError
@@ -153,3 +155,92 @@ def check_auth():
             "username": current_user.username
         }
     }), 200
+
+@auth_bp.route('/forgot-password', methods=['POST'])
+def forgot_password():
+    """
+    Initiates password reset process by generating a secure token.
+    In production, this would send an email. For now, it returns the token.
+    """
+    try:
+        data = request.get_json()
+        if not data or not data.get('email'):
+            return jsonify({"success": False, "message": "Email is required."}), 400
+        
+        email = data.get('email').strip().lower()
+        user = User.objects(email=email).first()
+        
+        if not user:
+            # Don't reveal if email exists - security best practice
+            return jsonify({
+                "success": True,
+                "message": "If this email exists, a reset link has been sent."
+            }), 200
+        
+        # Generate secure reset token
+        reset_token = secrets.token_urlsafe(32)
+        user.reset_token = reset_token
+        user.reset_token_expiry = datetime.utcnow() + timedelta(hours=1)
+        user.save()
+        
+        logger.info(f"Password reset requested for user: {user.client_id}")
+        
+        # TODO: Send email with reset link in production
+        # For development, return the token (remove this in production)
+        return jsonify({
+            "success": True,
+            "message": "If this email exists, a reset link has been sent.",
+            "reset_token": reset_token  # Remove this in production!
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error during password reset request: {e}", exc_info=True)
+        return jsonify({"success": False, "message": "An internal server error occurred."}), 500
+
+@auth_bp.route('/reset-password', methods=['POST'])
+def reset_password():
+    """
+    Resets user password using a valid reset token.
+    """
+    try:
+        data = request.get_json()
+        if not data or not all([data.get('token'), data.get('password')]):
+            return jsonify({"success": False, "message": "Token and new password are required."}), 400
+        
+        token = data.get('token')
+        new_password = data.get('password')
+        
+        # Validate password strength
+        if len(new_password) < PASSWORD_MIN_LENGTH:
+            return jsonify({
+                "success": False,
+                "message": f"Password must be at least {PASSWORD_MIN_LENGTH} characters."
+            }), 400
+        
+        # Find user with valid token
+        user = User.objects(
+            reset_token=token,
+            reset_token_expiry__gte=datetime.utcnow()
+        ).first()
+        
+        if not user:
+            return jsonify({
+                "success": False,
+                "message": "Invalid or expired reset token."
+            }), 400
+        
+        # Update password and clear reset token
+        user.password = bcrypt.generate_password_hash(new_password).decode('utf-8')
+        user.reset_token = None
+        user.reset_token_expiry = None
+        user.save()
+        
+        logger.info(f"Password reset successful for user: {user.client_id}")
+        return jsonify({
+            "success": True,
+            "message": "Password reset successful. Please log in with your new password."
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error during password reset: {e}", exc_info=True)
+        return jsonify({"success": False, "message": "An internal server error occurred."}), 500

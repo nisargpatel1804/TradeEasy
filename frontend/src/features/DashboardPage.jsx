@@ -180,10 +180,17 @@ const WatchlistPreview = ({ stocks, isLoading }) => {
                          {stocks.length > 0 ? stocks.map(stock => {
                             const change = stock.percent_change || 0;
                             const isPositive = change >= 0;
+                            const priceSource = stock.price_source || 'ltp';
+                            const isFallbackPrice = priceSource !== 'ltp';
                             return (
                                 <TableRow key={stock.symbol}>
                                     <TableCell className="font-medium">{stock.symbol}</TableCell>
-                                    <TableCell className="text-right font-semibold">₹{(stock.ltp || 0).toFixed(2)}</TableCell>
+                                    <TableCell className="text-right">
+                                        <div className="font-semibold">₹{(stock.ltp || 0).toFixed(2)}</div>
+                                        {isFallbackPrice && (
+                                            <div className="text-xs text-gray-400">Prev Close</div>
+                                        )}
+                                    </TableCell>
                                     <TableCell className={`text-right font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
                                         {isPositive ? '+' : ''}{change.toFixed(2)}%
                                     </TableCell>

@@ -5,6 +5,7 @@ from mongoengine.errors import NotUniqueError
 
 from app.models import User, Stock, Watchlist
 from app.socket_manager import MO_WebSocket_Manager
+from app.utils.cache import cached_route, cache as app_cache
 # Import the centralized, cached function for resolving stock data
 from .stock import get_stock_data_from_api, format_symbol
 
@@ -16,26 +17,52 @@ watchlist_bp = Blueprint('watchlist', __name__)
 MAX_WATCHLISTS_PER_USER = 10
 MAX_STOCKS_PER_WATCHLIST = 50
 
+# --- Helper Functions ---
+
+def _serialize_stock(stock: Stock | None) -> dict | None:
+    if not stock:
+        return None
+    return {
+        "symbol": stock.symbol,
+        "name": stock.name,
+        "exchange": stock.exchange,
+        "scripcode": stock.scripcode,
+    }
+
+
+def _serialize_watchlist(watchlist: Watchlist) -> dict:
+    return {
+        "name": watchlist.name,
+        "is_deletable": watchlist.is_deletable,
+        "stocks": [
+            stock_payload
+            for stock_payload in (
+                _serialize_stock(stock)
+                for stock in getattr(watchlist, "stocks", [])
+            )
+            if stock_payload
+        ],
+    }
+
+
+def _is_stock_tracked_elsewhere(stock: Stock) -> bool:
+    """Checks whether the given stock is still referenced in any watchlist."""
+    # Use only('id') to minimize the fields pulled back from MongoDB.
+    return User.objects(watchlists__stocks=stock).only("id").first() is not None
+
+
 # --- API Routes ---
 
 @watchlist_bp.route('/watchlists', methods=['GET'])
 @login_required
+@cached_route(ttl=30)  # Cache for 30 seconds
 def get_watchlists():
     """Fetches all watchlists and the symbols of the stocks they contain."""
     try:
-        watchlists_data = []
-        for watchlist in current_user.watchlists:
-            # For efficiency, only return the essential data. The frontend will
-            # receive live price updates via the WebSocket connection.
-            stocks_data = [
-                {"symbol": stock.symbol, "name": stock.name}
-                for stock in watchlist.stocks if stock
-            ]
-            watchlists_data.append({
-                "name": watchlist.name,
-                "is_deletable": watchlist.is_deletable,
-                "stocks": stocks_data
-            })
+        watchlists_data = [
+            _serialize_watchlist(watchlist)
+            for watchlist in current_user.watchlists
+        ]
         return jsonify({"success": True, "watchlists": watchlists_data}), 200
     except Exception as e:
         logger.error(f"Error fetching watchlists for user {current_user.client_id}: {e}", exc_info=True)
@@ -61,11 +88,15 @@ def create_watchlist():
         new_watchlist = Watchlist(name=name, is_deletable=True)
         user.watchlists.append(new_watchlist)
         user.save()
+        
+        # Invalidate watchlist cache
+        app_cache.invalidate_pattern(f"route:get_watchlists:user:{current_user.id}")
+        
         logger.info(f"User {user.client_id} created new watchlist: '{name}'")
         return jsonify({
             "success": True,
             "message": "Watchlist created successfully.",
-            "watchlist": {"name": name, "is_deletable": True, "stocks": []}
+            "watchlist": _serialize_watchlist(new_watchlist)
         }), 201
     except Exception as e:
         logger.error(f"Error creating watchlist for user {user.client_id}: {e}", exc_info=True)
@@ -149,7 +180,13 @@ def add_stock_to_watchlist(watchlist_name):
         )
         
         logger.info(f"User {user.client_id} added {stock.symbol} to watchlist '{watchlist_name}'")
-        return jsonify({"success": True, "message": "Stock added successfully."}), 201
+        updated_watchlist = _serialize_watchlist(target_watchlist)
+        return jsonify({
+            "success": True,
+            "message": "Stock added successfully.",
+            "stock": _serialize_stock(stock),
+            "watchlist": updated_watchlist
+        }), 201
 
     except Exception as e:
         logger.error(f"Error adding stock to watchlist '{watchlist_name}': {e}", exc_info=True)
@@ -175,13 +212,24 @@ def remove_stock_from_watchlist(watchlist_name, symbol):
     
         # --- Unsubscribe from the real-time feed ---
         socket_manager = MO_WebSocket_Manager()
-        socket_manager.unregister_scrip(
-            exchange=stock_to_remove.exchange, 
-            scripcode=stock_to_remove.scripcode
-        )
+        if not _is_stock_tracked_elsewhere(stock_to_remove):
+            socket_manager.unregister_scrip(
+                exchange=stock_to_remove.exchange, 
+                scripcode=stock_to_remove.scripcode
+            )
+        else:
+            logger.info(
+                "Skipping unsubscription for %s; still tracked in other watchlists.",
+                stock_to_remove.symbol
+            )
 
         logger.info(f"User {user.client_id} removed {symbol} from watchlist '{watchlist_name}'")
-        return jsonify({"success": True, "message": "Stock removed successfully."}), 200
+        updated_watchlist = _serialize_watchlist(target_watchlist)
+        return jsonify({
+            "success": True,
+            "message": "Stock removed successfully.",
+            "watchlist": updated_watchlist
+        }), 200
         
     except Exception as e:
         logger.error(f"Error removing stock from watchlist '{watchlist_name}': {e}", exc_info=True)

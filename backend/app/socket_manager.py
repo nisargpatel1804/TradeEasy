@@ -45,9 +45,30 @@ class MO_WebSocket_Manager:
         self.stop_event = threading.Event()
         self.data_lock = threading.Lock()
         
+        # Circuit breaker state
+        self.circuit_state = 'closed'  # closed, open, half_open
+        self.failure_count = 0
+        self.circuit_open_time = None
+        self.circuit_threshold = 5  # Open circuit after 5 failures
+        self.circuit_timeout = 300  # Try to reconnect after 5 minutes
+        
+        # Heartbeat tracking
+        self.last_heartbeat_sent = None
+        self.last_heartbeat_received = None
+        self.heartbeat_interval = 30  # Send heartbeat every 30 seconds
+        self.heartbeat_timeout = 90  # Disconnect if no response in 90 seconds
+        
+        # Message batching
+        self.pending_stock_updates = {}
+        self.pending_index_updates = {}
+        self.batch_interval = 0.5  # Batch updates every 500ms
+        self.last_batch_time = time.time()
+        self.batch_lock = threading.Lock()
+        
         # Background threads
         self.manager_thread = None
         self.heartbeat_thread = None
+        self.batch_thread = None
         
         # Data caches and mappings
         self.latest_indices_data = {}
@@ -79,6 +100,10 @@ class MO_WebSocket_Manager:
         if not self.heartbeat_thread or not self.heartbeat_thread.is_alive():
             self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, name="WSHeartbeatThread", daemon=True)
             self.heartbeat_thread.start()
+        
+        if not self.batch_thread or not self.batch_thread.is_alive():
+            self.batch_thread = threading.Thread(target=self._batch_emitter_loop, name="BatchEmitterThread", daemon=True)
+            self.batch_thread.start()
 
     def shutdown(self):
         """Gracefully shuts down the WebSocket manager and all background threads."""
@@ -118,6 +143,7 @@ class MO_WebSocket_Manager:
         """
         Adds a scrip to the subscription list. If already connected, it subscribes
         immediately. Otherwise, it will be subscribed upon the next connection.
+        Also fetches and caches the initial price data including prev_close.
         """
         composite_key = f"{exchange.upper()}:{exchange_type.upper()}:{int(scripcode)}"
         self.scrip_to_symbol_map[f"{exchange.upper()}:{int(scripcode)}"] = symbol
@@ -125,6 +151,19 @@ class MO_WebSocket_Manager:
         if composite_key not in self.registered_scrips:
             self.registered_scrips.add(composite_key)
             logger.info(f"Queued subscription for {symbol} ({composite_key})")
+            
+            # Fetch initial price data and cache prev_close for accurate % change calculation
+            try:
+                from app.models import Stock
+                stock = Stock.objects(symbol=symbol).first()
+                if stock and self.mo_api.auth_token:
+                    payload = self._fetch_initial_stock_payload(stock, exchange.upper(), int(scripcode))
+                    if payload:
+                        with self.data_lock:
+                            self.latest_stock_data[symbol] = payload
+                        logger.info(f"Cached initial data for {symbol}: LTP={payload.get('ltp')}, prev_close stored")
+            except Exception as e:
+                logger.warning(f"Could not fetch initial data for {symbol} during registration: {e}")
             
             if self.is_connected and self.ws_authed:
                 self.mo_api.register_scrip(exchange, int(scripcode), exchange_type)
@@ -140,20 +179,51 @@ class MO_WebSocket_Manager:
         self.scrip_to_symbol_map.pop(f"{exchange.upper()}:{int(scripcode)}", None)
 
     def _run(self):
-        """Main loop that maintains the WebSocket connection with exponential backoff."""
+        """Main loop that maintains the WebSocket connection with exponential backoff and circuit breaker."""
+        retry_count = 0
+        max_retry_delay = 300  # 5 minutes max delay
+        base_delay = 15
+        
         while not self.stop_event.is_set():
             try:
-                if not self.mo_api.market_hours.is_market_open() and not self.force_connect:
-                    logger.info("Market is closed. Will attempt connection during market hours.")
+                # Circuit breaker logic
+                if self.circuit_state == 'open':
+                    elapsed = time.time() - self.circuit_open_time
+                    if elapsed < self.circuit_timeout:
+                        logger.info(f"🔴 Circuit breaker OPEN. Waiting {int(self.circuit_timeout - elapsed)}s before retry...")
+                        self.stop_event.wait(min(60, self.circuit_timeout - elapsed))
+                        continue
+                    else:
+                        logger.info("🟡 Circuit breaker entering HALF-OPEN state. Attempting connection...")
+                        self.circuit_state = 'half_open'
+                
+                # Check market hours
+                market_open = self.mo_api.market_hours.is_market_open()
+                
+                if not market_open and not self.force_connect:
+                    logger.info("⏰ Market is closed. Waiting for market hours (9:15 AM - 3:30 PM IST)...")
+                    retry_count = 0  # Reset retry count when market is closed
+                    self.failure_count = 0  # Reset circuit breaker
+                    self.circuit_state = 'closed'
                     self.stop_event.wait(300) # Wait 5 minutes before re-checking
                     continue
+                
+                # Log status for testing mode
+                if not market_open and self.force_connect:
+                    logger.info("🧪 Testing mode: Connecting despite market being closed (force_connect=True)")
 
                 if not self.mo_api.auth_token and not self.mo_api.login():
-                    logger.warning("API login failed. Retrying in 60 seconds.")
+                    logger.warning("⚠️ API login failed. Will retry in 60 seconds.")
+                    logger.info("💡 Hint: If TOTP errors persist, check system time sync: w32tm /resync")
+                    self._handle_connection_failure()
                     self.stop_event.wait(60)
                     continue
                 
-                logger.info("Attempting to establish WebSocket connection...")
+                status_msg = f"Attempting to establish WebSocket connection... (attempt {retry_count + 1})"
+                if not market_open:
+                    status_msg += " [Market Closed - Testing Mode]"
+                logger.info(status_msg)
+                
                 self.mo_api.connect_websocket(
                     on_message=self._on_message, on_open=self._on_open,
                     on_close=self._on_close, on_error=self._on_error
@@ -163,13 +233,52 @@ class MO_WebSocket_Manager:
                 if self.mo_api.ws_thread:
                     self.mo_api.ws_thread.join()
                 
-                logger.warning("WebSocket connection lost. Will attempt to reconnect...")
+                # Connection was lost
+                self._handle_connection_failure()
+                retry_count += 1
+                retry_delay = min(base_delay * (2 ** min(retry_count - 1, 4)), max_retry_delay)
+                
+                market_status = "" if self.mo_api.market_hours.is_market_open() else " (Expected - Market is closed)"
+                logger.warning(f"🔄 WebSocket connection lost{market_status}. Retry #{retry_count} in {retry_delay}s...")
+                
+                if self.socketio:
+                    self.socketio.emit('market_status', {
+                        "status": "reconnecting",
+                        "retry_count": retry_count,
+                        "retry_in": retry_delay,
+                        "market_open": self.mo_api.market_hours.is_market_open(),
+                        "circuit_state": self.circuit_state
+                    })
 
             except Exception as e:
                 logger.error(f"Error in manager run loop: {e}", exc_info=True)
+                self._handle_connection_failure()
+                retry_count += 1
+                retry_delay = min(base_delay * (2 ** min(retry_count - 1, 4)), max_retry_delay)
             
             # Exponential backoff on failure before retrying the loop
-            self.stop_event.wait(15)
+            self.stop_event.wait(retry_delay if 'retry_delay' in locals() else base_delay)
+    
+    def _handle_connection_failure(self):
+        """Handle connection failures with circuit breaker pattern."""
+        self.failure_count += 1
+        if self.failure_count >= self.circuit_threshold:
+            self.circuit_state = 'open'
+            self.circuit_open_time = time.time()
+            logger.warning(f"🔴 Circuit breaker OPEN after {self.failure_count} failures")
+        elif self.circuit_state == 'half_open':
+            # Failed in half-open state, go back to open
+            self.circuit_state = 'open'
+            self.circuit_open_time = time.time()
+            logger.warning("🔴 Circuit breaker reopened after failed half-open attempt")
+    
+    def _handle_connection_success(self):
+        """Handle successful connection with circuit breaker reset."""
+        if self.circuit_state != 'closed':
+            logger.info("🟢 Circuit breaker CLOSED - connection restored")
+        self.failure_count = 0
+        self.circuit_state = 'closed'
+        self.circuit_open_time = None
 
     def _on_open(self, ws):
         """Callback for when the WebSocket connection is established."""
@@ -182,17 +291,22 @@ class MO_WebSocket_Manager:
             # Step 2: Wait briefly for server to process login, then subscribe.
             time.sleep(1) 
             self.ws_authed = True
-            logger.info("WebSocket authentication successful. Subscribing to feeds...")
+            logger.info("✅ WebSocket authentication successful. Subscribing to feeds...")
             self._subscribe_all()
+            self._handle_connection_success()  # Reset circuit breaker
+            self.last_heartbeat_sent = time.time()  # Initialize heartbeat
             if self.socketio:
                 self.socketio.emit('market_status', {"status": "connected"})
         else:
-            logger.error("Failed to send binary login packet. Closing connection.")
+            logger.error("❌ Failed to send binary login packet. Closing connection.")
             ws.close()
 
     def _on_message(self, ws, message):
         """Processes incoming binary messages and emits formatted data via Socket.IO."""
         try:
+            # Update heartbeat tracker
+            self.last_heartbeat_received = time.time()
+            
             packets = MOPacketParser.parse_packet(message)
             if not packets:
                 return
@@ -216,37 +330,71 @@ class MO_WebSocket_Manager:
             logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
 
     def _process_stock_update(self, data):
-        """Formats and emits a stock LTP update."""
+        """Formats and emits a stock LTP update with price validation."""
         exchange = str(data.get('Exchange', '')).upper()
         scrip_code_str = str(data.get('Scrip Code'))
         composite_key = f"{exchange}:{scrip_code_str}" if exchange else scrip_code_str
         symbol = self.scrip_to_symbol_map.get(composite_key)
         ltp = data.get('LTP_Rate', 0.0)
 
-        if not symbol or ltp <= 0: return
+        if not symbol or ltp <= 0: 
+            return
         
+        # Price validation: Check for anomalous price movements
         prev_close = self.scrip_prev_close.get(composite_key, 0.0)
+        if prev_close > 0:
+            price_change_pct = abs((ltp - prev_close) / prev_close * 100)
+            # Flag if price moved more than 20% (circuit limit is typically 10-20%)
+            if price_change_pct > 20:
+                logger.warning(f"⚠️ Anomalous price for {symbol}: LTP={ltp}, PrevClose={prev_close}, Change={price_change_pct:.1f}%")
+                # Skip this update if it seems invalid
+                if price_change_pct > 50:  # Definitely invalid if >50% change
+                    logger.error(f"❌ Rejecting invalid price update for {symbol}")
+                    return
+        
+        # Additional sanity checks
+        if ltp > 1000000:  # No Indian stock trades above 10 lakh per share
+            logger.error(f"❌ Rejecting unrealistic price for {symbol}: {ltp}")
+            return
+        
         volume = data.get('LTP_Cumulative Qty', 0)
         payload = self._compose_stock_payload(
             symbol=symbol,
             ltp=ltp,
             prev_close=prev_close,
-            volume=volume
+            volume=volume,
+            price_source='ltp'  # Live tick always uses actual LTP
         )
 
         with self.data_lock:
             self.latest_stock_data[symbol] = payload
-        if self.socketio:
-            self.socketio.emit('stock_update', payload)
-        logger.debug(f"Emitted STOCK update for {symbol}: {payload}")
+        
+        # Add to batch instead of emitting immediately
+        with self.batch_lock:
+            self.pending_stock_updates[symbol] = payload
+        
+        logger.debug(f"Queued STOCK update for {symbol}: {payload}")
 
     def _process_index_update(self, data):
-        """Formats and emits an index data update."""
+        """Formats and emits an index data update with validation."""
         scrip_code_str = str(data.get('Scrip Code'))
         index_info = self.index_codes_map.get(scrip_code_str, {})
         ltp = data.get('Rate', 0.0)
 
         if not index_info or ltp <= 0: return
+        
+        # Validate index price ranges
+        index_name = index_info.get('name', '')
+        if 'NIFTY' in index_name and (ltp < 5000 or ltp > 50000):
+            logger.warning(f"⚠️ Unusual NIFTY index value: {ltp}")
+            if ltp < 1000 or ltp > 100000:
+                logger.error(f"❌ Rejecting invalid NIFTY value: {ltp}")
+                return
+        elif 'SENSEX' in index_name and (ltp < 20000 or ltp > 150000):
+            logger.warning(f"⚠️ Unusual SENSEX index value: {ltp}")
+            if ltp < 5000 or ltp > 200000:
+                logger.error(f"❌ Rejecting invalid SENSEX value: {ltp}")
+                return
 
         exchange_key = index_info.get('exchange', '').upper()
         prev_close = self.scrip_prev_close.get(f"{exchange_key}:{scrip_code_str}", 0.0)
@@ -259,14 +407,18 @@ class MO_WebSocket_Manager:
             'price': round(ltp, 2),
             'change': round(change, 2),
             'percent_change': round(percent_change, 2),
-            'last_updated': int(time.time() * 1000)
+            'last_updated': int(time.time() * 1000),
+            'entityType': 'index'
         }
         self.latest_indices_data[payload['symbol']] = payload
-        if self.socketio:
-            self.socketio.emit('index_update', payload)
-        logger.debug(f"Emitted INDEX update for {payload['name']}: {payload}")
+        
+        # Add to batch instead of emitting immediately
+        with self.batch_lock:
+            self.pending_index_updates[payload['symbol']] = payload
+        
+        logger.debug(f"Queued INDEX update for {payload['name']}: {payload}")
 
-    def _compose_stock_payload(self, symbol, ltp, prev_close, volume=0, timestamp=None):
+    def _compose_stock_payload(self, symbol, ltp, prev_close, volume=0, timestamp=None, price_source='ltp'):
         """Creates a normalized payload dictionary for stock updates."""
         timestamp = timestamp or int(time.time() * 1000)
         change = ltp - prev_close if prev_close and prev_close > 0 else 0.0
@@ -278,6 +430,7 @@ class MO_WebSocket_Manager:
             'change': round(change, 2),
             'percent_change': round(percent_change, 2),
             'volume': volume,
+            'price_source': price_source,
             'last_updated': timestamp
         }
 
@@ -353,17 +506,55 @@ class MO_WebSocket_Manager:
             logger.error(f"Failed to preload watchlist scrips: {e}", exc_info=True)
 
     def _fetch_initial_stock_payload(self, stock, exchange, scripcode):
-        """Fetches the latest LTP for a stock to seed cached data."""
+        """Fetches the latest LTP for a stock to seed cached data, with fallback to close price."""
         try:
+            # Import the centralized fallback helper
+            from app.routes.stock import extract_price_with_fallback, _get_cached_eod_data
+            
             response = self.mo_api.get_ltp_data(exchange, scripcode)
             if not response or response.get('status') != 'SUCCESS' or not response.get('data'):
                 return None
 
             data = response['data']
-            ltp = float(data.get('ltp', 0)) / 100.0
-            prev_close = float(data.get('close', 0)) / 100.0
+            ltp, price_source = extract_price_with_fallback(data)
+            
+            # If LTP is still zero, try bulk EOD data
+            if ltp <= 0:
+                logger.debug(f"LTP is zero for {stock.symbol}, trying bulk EOD data")
+                eod_data_list = _get_cached_eod_data(self.mo_api, exchange)
+                for eod_entry in eod_data_list:
+                    if str(eod_entry.get("scripcode")) == str(scripcode):
+                        ltp, price_source = extract_price_with_fallback(eod_entry)
+                        if ltp > 0:
+                            data = eod_entry
+                            logger.debug(f"Found {stock.symbol} in EOD data: {ltp}")
+                            break
+            
             if ltp <= 0:
                 return None
+
+            # Get the actual previous day's close for accurate change calculation
+            # Priority: prevClose/prevclose (actual previous day) before close (current day's close)
+            # This prevents showing 0% change when 'close' is used as LTP fallback
+            prev_close = float(data.get('prevClose', 0)) / 100.0
+            if prev_close <= 0:
+                prev_close = float(data.get('prevclose', 0)) / 100.0
+            if prev_close <= 0:
+                # Only use 'close' as last resort
+                prev_close = float(data.get('close', 0)) / 100.0
+            
+            # Only if we're using a fallback price AND have no prev_close, set them equal
+            # This prevents showing incorrect % change
+            if price_source in ('close', 'prevClose') and prev_close <= 0:
+                prev_close = ltp
+                logger.debug(f"Using fallback: setting prev_close = ltp for {stock.symbol}")
+            
+            # Store the previous close for future WebSocket updates
+            # Use uppercase exchange to match the format used in _process_stock_update
+            composite_key = f"{exchange.upper()}:{int(scripcode)}"
+            if prev_close > 0:
+                self.scrip_prev_close[composite_key] = prev_close
+                logger.debug(f"Stored prev_close for {stock.symbol} ({composite_key}): {prev_close}")
 
             volume = int(data.get('volume', 0))
             payload = self._compose_stock_payload(
@@ -371,11 +562,10 @@ class MO_WebSocket_Manager:
                 ltp=ltp,
                 prev_close=prev_close,
                 volume=volume,
-                timestamp=int(time.time() * 1000)
+                timestamp=int(time.time() * 1000),
+                price_source=price_source
             )
 
-            composite_key = f"{exchange}:{scripcode}"
-            self.scrip_prev_close[composite_key] = prev_close
             return payload
         except Exception as e:
             logger.warning(f"Unable to fetch initial price for {getattr(stock, 'symbol', '?')}: {e}")
@@ -385,14 +575,37 @@ class MO_WebSocket_Manager:
         """Callback for when the WebSocket connection is closed."""
         self.is_connected = False
         self.ws_authed = False
-        logger.warning(f"MO WebSocket connection closed: {close_status_code} - {close_msg}")
+        
+        # Provide more context about why the connection closed
+        if close_status_code:
+            logger.warning(f"🔌 MO WebSocket connection closed: Code={close_status_code}, Message='{close_msg}'")
+        else:
+            logger.warning(f"🔌 MO WebSocket connection closed unexpectedly. Message='{close_msg}'")
+        
         if self.socketio:
-            self.socketio.emit('market_status', {"status": "disconnected"})
+            self.socketio.emit('market_status', {
+                "status": "disconnected",
+                "reason": close_msg or "Connection closed"
+            })
 
     def _on_error(self, ws, error):
         """Callback for handling WebSocket errors."""
-        logger.error(f"MO WebSocket error: {error}")
-        self.is_connected = False # Ensure state is reset on error
+        error_msg = str(error)
+        
+        # Don't log normal disconnection as error
+        if "Connection to remote host was lost" in error_msg:
+            logger.warning(f"⚠️ MO WebSocket disconnected: {error_msg}")
+        else:
+            logger.error(f"❌ MO WebSocket error: {error_msg}")
+        
+        # Only reset connection state on actual errors, not on normal disconnects
+        if self.is_connected:
+            self.is_connected = False
+            if self.socketio:
+                self.socketio.emit('market_status', {
+                    "status": "error", 
+                    "error": error_msg
+                })
 
     def _subscribe_all(self):
         """Subscribes to all queued scrips and default indices."""
@@ -428,17 +641,69 @@ class MO_WebSocket_Manager:
         logger.info(f"Loaded {len(self.index_codes_map)} major indices for tracking.")
     
     def _heartbeat_loop(self):
-        """Periodically sends heartbeat packets to keep the WebSocket connection alive."""
+        """Monitors WebSocket connection health and sends periodic heartbeat pings."""
+        logger.info("Heartbeat monitor started")
+        
         while not self.stop_event.is_set():
             try:
                 if self.is_connected and self.ws_authed:
-                    self.mo_api.send_heartbeat()
+                    current_time = time.time()
+                    
+                    # Send heartbeat ping
+                    if self.last_heartbeat_sent and (current_time - self.last_heartbeat_sent) >= self.heartbeat_interval:
+                        try:
+                            # Send a ping via WebSocket
+                            if self.mo_api.ws:
+                                self.mo_api.ws.ping()
+                                self.last_heartbeat_sent = current_time
+                                logger.debug("Heartbeat ping sent")
+                        except Exception as e:
+                            logger.warning(f"Failed to send heartbeat ping: {e}")
+                    
+                    # Check for heartbeat timeout (no data received)
+                    if self.last_heartbeat_received:
+                        silence_duration = current_time - self.last_heartbeat_received
+                        if silence_duration > self.heartbeat_timeout:
+                            logger.error(f"❌ Heartbeat timeout: No data received for {silence_duration:.0f}s. Forcing reconnect...")
+                            if self.mo_api.ws:
+                                self.mo_api.ws.close()
+                            self.is_connected = False
+                            self.ws_authed = False
                 
-                # Wait for 30 seconds before sending the next heartbeat
-                self.stop_event.wait(30)
+                self.stop_event.wait(10)  # Check every 10 seconds
+                
             except Exception as e:
                 logger.error(f"Error in heartbeat loop: {e}", exc_info=True)
-                self.stop_event.wait(30) # Still wait to avoid a tight error loop
+                self.stop_event.wait(10)
+    
+    def _batch_emitter_loop(self):
+        """Batches multiple price updates together and emits them periodically."""
+        logger.info("Batch emitter started")
+        
+        while not self.stop_event.is_set():
+            try:
+                self.stop_event.wait(self.batch_interval)
+                
+                if not self.socketio:
+                    continue
+                
+                # Collect and emit batched updates
+                with self.batch_lock:
+                    if self.pending_stock_updates:
+                        stock_batch = list(self.pending_stock_updates.values())
+                        self.pending_stock_updates.clear()
+                        self.socketio.emit('stock_updates_batch', {'updates': stock_batch})
+                        logger.debug(f"Emitted batch of {len(stock_batch)} stock updates")
+                    
+                    if self.pending_index_updates:
+                        index_batch = list(self.pending_index_updates.values())
+                        self.pending_index_updates.clear()
+                        self.socketio.emit('index_updates_batch', {'updates': index_batch})
+                        logger.debug(f"Emitted batch of {len(index_batch)} index updates")
+                
+            except Exception as e:
+                logger.error(f"Error in batch emitter loop: {e}", exc_info=True)
+                self.stop_event.wait(1)
 
     def get_latest_indices_data(self):
         """Returns the current cached state of all tracked indices."""

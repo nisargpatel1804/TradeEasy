@@ -34,6 +34,9 @@ class Config:
     SESSION_USE_SIGNER = True
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Lax'
+    
+    # Session idle timeout (inactive sessions expire after this duration)
+    SESSION_IDLE_TIMEOUT = timedelta(minutes=int(os.getenv("SESSION_IDLE_TIMEOUT_MINUTES", 30)))
     # For Redis sessions, you would uncomment and configure the following:
     # SESSION_REDIS = redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
 
@@ -47,6 +50,10 @@ class Config:
 
     # --- API Credentials ---
     # Credentials for the Motilal Oswal API are loaded here but used in mo_api.py
+    # NOTE: For production, consider using encrypted storage or a secrets manager like:
+    # - Azure Key Vault, AWS Secrets Manager, HashiCorp Vault
+    # - Encrypted environment variables with cryptography library
+    # See SECURITY.md for credential encryption setup guide
     API_KEY = os.getenv("API_KEY")
     USER_ID = os.getenv("USER_ID")
     PASSWORD = os.getenv("PASSWORD")
@@ -55,6 +62,14 @@ class Config:
 
     if not all([API_KEY, USER_ID, PASSWORD, TWO_FA, TOTP_SECRET]):
         print("WARNING: Motilal Oswal API credentials are not fully set in the .env file. API functionality will be limited.")
+    elif TOTP_SECRET:
+        # Validate TOTP secret format (should be 32 characters, base32 encoded)
+        if len(TOTP_SECRET) != 32:
+            print(f"WARNING: TOTP_SECRET has unusual length ({len(TOTP_SECRET)} chars). Expected 32 characters.")
+        # Check if it's valid base32
+        import re
+        if not re.match(r'^[A-Z2-7]+=*$', TOTP_SECRET):
+            print("WARNING: TOTP_SECRET doesn't appear to be valid base32 encoding.")
 
 
 class DevelopmentConfig(Config):

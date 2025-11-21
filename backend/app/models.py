@@ -67,8 +67,19 @@ class User(Document, UserMixin):
     created_at = DateTimeField(default=datetime.utcnow, required=True)
     is_active = BooleanField(default=True, required=True)
     watchlists = ListField(EmbeddedDocumentField(Watchlist))
+    
+    # Password reset fields
+    reset_token = StringField(max_length=100)
+    reset_token_expiry = DateTimeField()
 
-    meta = {'collection': 'TE_User'}
+    meta = {
+        'collection': 'TE_User',
+        'indexes': [
+            'email',
+            'client_id',
+            'reset_token'
+        ]
+    }
 
     def get_id(self):
         return str(self.id)
@@ -87,7 +98,15 @@ class Transaction(Document):
     order_type = StringField(default='MARKET', required=True)
     transaction_date = DateTimeField(default=datetime.utcnow, required=True)
 
-    meta = {'collection': 'transactions', 'indexes': ['user', 'symbol']}
+    meta = {
+        'collection': 'transactions',
+        'indexes': [
+            'user',
+            'symbol',
+            {'fields': ['user', 'transaction_date']},
+            {'fields': ['user', 'symbol']}
+        ]
+    }
 
     def __repr__(self):
         return f"<Transaction {self.action} {self.symbol} x{self.quantity}>"
@@ -148,11 +167,13 @@ class AQScrip(Document):
     meta = {
         'collection': 'AQ_scrips',
         'indexes': [
-            # Compound index to speed up lookups (non-unique to match existing DB index)
-            {'fields': ('scripcode', 'exchangename')},
+            {'fields': ['exchange', 'scripcode'], 'unique': True},
+            'scripcode',
+            'exchange',
             'exchangename',
             'instrumentname',
-            'scripshortname'
+            'scripshortname',
+            {'fields': ['issuspended', 'isbanscrip']}
         ]
     }
 

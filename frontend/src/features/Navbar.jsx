@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { useDataContext } from '../context/DataContext.jsx';
 import { useSocket } from '../context/SocketContext.jsx';
 import * as api from '../services/api.js';
+import priceUpdateService from '../services/priceUpdateService.js';
 import { Button } from '../assets/ui/button.jsx';
 import { Input } from '../assets/ui/input.jsx';
 import { Avatar, AvatarFallback } from '../assets/ui/Avatar.jsx';
@@ -19,9 +20,16 @@ import { Search, LogOut, User, Menu, X, Loader2, Plus, TrendingUp } from 'lucide
 import { useToast } from '../assets/ui/use-toast.js';
 import debounce from 'lodash.debounce';
 
+const HEADLINE_INDEX_CONFIG = {
+  'NSE:26000': { label: 'Nifty 50' },
+  'BSE:999901': { label: 'Sensex' },
+};
+
+const HEADLINE_SYMBOLS = Object.keys(HEADLINE_INDEX_CONFIG);
+
 const Navbar = () => {
   const { isAuthenticated, logout, user } = useAuth();
-  const { profileData, getProfile, watchlistsData, getWatchlists } = useDataContext();
+  const { profileData, getProfile, watchlistsData, getWatchlists, indicesData } = useDataContext();
   const { isConnected, connectionStatus, isReconnecting, lastError } = useSocket();
   const navigate = useNavigate();
   const { toast } = useToast();
@@ -32,6 +40,101 @@ const Navbar = () => {
   const [isSearchLoading, setIsSearchLoading] = useState(false);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
   const searchRef = useRef(null);
+
+  const [headlineIndices, setHeadlineIndices] = useState(() =>
+    HEADLINE_SYMBOLS.reduce((acc, symbol) => {
+      acc[symbol] = null;
+      return acc;
+    }, {})
+  );
+
+  const normaliseIndexPayload = useCallback((payload = {}, symbol) => {
+    if (!payload || !symbol) {
+      return null;
+    }
+
+    const config = HEADLINE_INDEX_CONFIG[symbol] || {};
+    const coerceNumber = (value) => {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return value;
+      }
+      const parsed = parseFloat(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const price = coerceNumber(payload.price ?? payload.ltp ?? payload.last_price ?? payload.lastTradedPrice ?? payload.value);
+    const change = coerceNumber(payload.change ?? payload.net_change ?? payload.netChange ?? payload.change_amount);
+    const percentChange = coerceNumber(payload.percent_change ?? payload.percentChange ?? payload.change_percent ?? payload.pChange);
+
+    if (price === null) {
+      return null;
+    }
+
+    return {
+      symbol,
+      name: payload.name || config.label || symbol,
+      label: config.label || payload.name || symbol,
+      price,
+      change: change ?? 0,
+      percentChange: percentChange ?? 0,
+    };
+  }, []);
+
+  const updateHeadlineFromMap = useCallback((priceMap = {}) => {
+    if (!priceMap || typeof priceMap !== 'object') {
+      return;
+    }
+
+    setHeadlineIndices((prev) => {
+      let mutated = false;
+      const next = { ...prev };
+
+      HEADLINE_SYMBOLS.forEach((symbol) => {
+        const normalized = normaliseIndexPayload(priceMap[symbol], symbol);
+        if (!normalized) {
+          return;
+        }
+
+        const current = prev[symbol];
+        if (!current ||
+          current.price !== normalized.price ||
+          current.change !== normalized.change ||
+          current.percentChange !== normalized.percentChange ||
+          current.name !== normalized.name) {
+          next[symbol] = normalized;
+          mutated = true;
+        }
+      });
+
+      return mutated ? next : prev;
+    });
+  }, [normaliseIndexPayload]);
+
+  const formatNumber = (value, fractionDigits = 2) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return '--';
+    }
+    return value.toLocaleString('en-IN', {
+      minimumFractionDigits: fractionDigits,
+      maximumFractionDigits: fractionDigits,
+    });
+  };
+
+  const formatSigned = (value, fractionDigits = 2) => {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      return '--';
+    }
+    const sign = value > 0 ? '+' : value < 0 ? '-' : '';
+    const absValue = Math.abs(value).toFixed(fractionDigits);
+    return sign ? `${sign}${absValue}` : absValue;
+  };
+
+  const getTrendClass = (value) => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value === 0) {
+      return 'text-gray-500 dark:text-gray-400';
+    }
+    return value > 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400';
+  };
 
   // Fetch profile and watchlists on mount if authenticated
   useEffect(() => {
@@ -72,6 +175,33 @@ const Navbar = () => {
     debouncedSearch(searchQuery);
     return () => debouncedSearch.cancel();
   }, [searchQuery, debouncedSearch]);
+
+  useEffect(() => {
+    if (!Array.isArray(indicesData) || indicesData.length === 0) {
+      return;
+    }
+
+    const map = indicesData.reduce((acc, item = {}) => {
+      if (item.symbol) {
+        acc[item.symbol] = item;
+      }
+      return acc;
+    }, {});
+
+    updateHeadlineFromMap(map);
+  }, [indicesData, updateHeadlineFromMap]);
+
+  useEffect(() => {
+    const unsubscribe = priceUpdateService.subscribe((payload = {}) => {
+      updateHeadlineFromMap(payload.allPrices || {});
+    });
+
+    return () => {
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+    };
+  }, [updateHeadlineFromMap]);
 
   // Handle click outside of search to close results
   useEffect(() => {
@@ -125,6 +255,36 @@ const Navbar = () => {
 
   return (
     <nav className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 sticky top-0 z-50">
+      {/* Indices Header */}
+      <div className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-end gap-6 py-2">
+            {HEADLINE_SYMBOLS.map((symbol) => {
+              const config = HEADLINE_INDEX_CONFIG[symbol];
+              const data = headlineIndices[symbol];
+              const percentValue = data?.percentChange ?? null;
+
+              return (
+                <div key={symbol} className="flex flex-col items-end min-w-[140px]" title={data?.name || config.label}>
+                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
+                    {config.label}
+                  </span>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-sm font-semibold text-gray-900 dark:text-white">
+                      {formatNumber(data?.price)}
+                    </span>
+                    <span className={`text-xs font-semibold ${getTrendClass(percentValue)}`}>
+                      {formatSigned(data?.change)} ({formatSigned(percentValue)}%)
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Main Navbar Body */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-16">
           <div className="flex items-center">

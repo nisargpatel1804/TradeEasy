@@ -12,6 +12,7 @@ class PriceUpdateService {
     this._stockUpdateHandler = null;
     this._indexUpdateHandler = null;
     this._initialSnapshotHandler = null;
+  this._initialIndicesHandler = null;
   }
 
   /**
@@ -120,6 +121,32 @@ class PriceUpdateService {
     };
 
     this.socket.on('initial_stock_prices', this._initialSnapshotHandler);
+
+    this._initialIndicesHandler = (data = []) => {
+      if (!Array.isArray(data)) {
+        return;
+      }
+
+      const priceMap = {};
+      data.forEach((payload = {}) => {
+        const symbol = payload.symbol;
+        if (!symbol) {
+          return;
+        }
+
+        priceMap[symbol] = {
+          ...(payload || {}),
+          symbol,
+          entityType: 'index',
+        };
+      });
+
+      if (Object.keys(priceMap).length > 0) {
+        this.seedPrices(priceMap);
+      }
+    };
+
+    this.socket.on('initial_indices', this._initialIndicesHandler);
   }
 
   _detachSocketListeners() {
@@ -139,9 +166,14 @@ class PriceUpdateService {
       this.socket.off('initial_stock_prices', this._initialSnapshotHandler);
     }
 
+    if (this._initialIndicesHandler) {
+      this.socket.off('initial_indices', this._initialIndicesHandler);
+    }
+
     this._stockUpdateHandler = null;
     this._indexUpdateHandler = null;
     this._initialSnapshotHandler = null;
+    this._initialIndicesHandler = null;
   }
 
   /**

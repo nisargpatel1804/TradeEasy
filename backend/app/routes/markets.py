@@ -91,6 +91,7 @@ def get_market_indices():
     Provides a snapshot of major market indices by efficiently fetching and
     caching bulk data from the Motilal Oswal API.
     """
+    formatted_indices = []
     try:
         socket_manager = MO_WebSocket_Manager()
         mo_api = socket_manager.mo_api
@@ -101,43 +102,131 @@ def get_market_indices():
 
         market_status = "OPEN" if mo_api.market_hours.is_market_open() else "CLOSED"
         
-        formatted_indices = []
+        # Define major indices to fetch live prices for
+        MAJOR_INDICES = {
+            "NSE": {"26000": "NIFTY 50"},
+            "BSE": {"999901": "S&P BSE SENSEX"}
+        }
+        
         for exchange in ["NSE", "BSE"]:
-            master_resp = _get_cached_or_fetch(f"index_master_{exchange}", mo_api.get_index_data, exchange)
-            price_resp = _get_cached_or_fetch(f"eod_{exchange}", mo_api.get_eod_data, exchange)
+            try:
+                master_resp = _get_cached_or_fetch(f"index_master_{exchange}", mo_api.get_index_data, exchange)
+                
+                if not (master_resp and master_resp.get("status") == "SUCCESS"):
+                    logger.warning(f"Failed to fetch index master data for {exchange}")
+                    continue
 
-            if not (master_resp and master_resp.get("status") == "SUCCESS" and price_resp and price_resp.get("status") == "SUCCESS"):
-                continue
-
-            price_map = _normalize_price_map(price_resp.get("data"), ["indexcode", "scripcode"])
-            for index_info in master_resp.get("data", []):
-                price_data = price_map.get(str(index_info.get("indexcode")))
-                if price_data:
-                    ltp = _to_rupees(price_data.get("ltp") or price_data.get("close"))
-                    prev_close = _to_rupees(price_data.get("close"))
+                for index_info in master_resp.get("data", []):
+                    indexcode = str(index_info.get("indexcode"))
                     
-                    if ltp > 0 and prev_close > 0:
-                        change = ltp - prev_close
-                        percent_change = (change / prev_close) * 100
-                        
-                        formatted_indices.append({
-                            "symbol": f"{exchange}:{index_info.get('indexcode')}",
-                            "name": index_info.get("indexname"),
-                            "price": round(ltp, 2),
-                            "change": round(change, 2),
-                            "percent_change": round(percent_change, 2),
-                        })
+                    # For major indices, fetch live LTP
+                    if indexcode in MAJOR_INDICES.get(exchange, {}):
+                        try:
+                            cache_key = f"index_ltp_{exchange}_{indexcode}"
+                            ltp_resp = _get_cached_or_fetch(cache_key, mo_api.get_index_ltp, exchange, indexcode)
+                            
+                            if not (ltp_resp and ltp_resp.get("status") == "SUCCESS"):
+                                logger.warning(f"Failed to fetch LTP for {exchange}:{indexcode}")
+                                continue
+                            
+                            # Handle both dict and list responses
+                            raw_data = ltp_resp.get("data", {})
+                            if isinstance(raw_data, list):
+                                ltp_data = raw_data[0] if raw_data else {}
+                            else:
+                                ltp_data = raw_data
+                            
+                            if not ltp_data:
+                                logger.warning(f"Empty LTP data for {exchange}:{indexcode}")
+                                continue
+                            
+                            logger.debug(f"Processing index {exchange}:{indexcode}")
+                            
+                            ltp = _to_rupees(ltp_data.get("ltp"))
+                            if ltp <= 0:
+                                logger.warning(f"Invalid LTP for {exchange}:{indexcode}: {ltp}")
+                                continue
+                            
+                            # Try to get change and percent_change directly from API
+                            change = _to_rupees(ltp_data.get("change"))
+                            percent_change = None
+                            
+                            # Try different field names for percent change
+                            pchange_raw = ltp_data.get("pChange") or ltp_data.get("percentChange") or ltp_data.get("percent_change")
+                            if pchange_raw is not None:
+                                try:
+                                    percent_change = float(pchange_raw)
+                                except (ValueError, TypeError):
+                                    percent_change = None
+                            
+                            # If change/percent not directly available, calculate from prev close
+                            if change == 0 and percent_change is None:
+                                prev_close = _to_rupees(ltp_data.get("prevClose"))
+                                if prev_close <= 0:
+                                    prev_close = _to_rupees(ltp_data.get("prevclose"))
+                                if prev_close <= 0:
+                                    prev_close = _to_rupees(ltp_data.get("close"))
+                                
+                                logger.debug(f"Calculating change for {exchange}:{indexcode} - LTP: {ltp}, PrevClose: {prev_close}")
+                                
+                                if ltp > 0 and prev_close > 0 and ltp != prev_close:
+                                    change = ltp - prev_close
+                                    percent_change = (change / prev_close) * 100
+                                    logger.debug(f"Calculated change: {change}, percent: {percent_change}")
+                            
+                            # If still no percent_change but we have change, calculate it
+                            if percent_change is None and change != 0 and ltp > 0:
+                                prev_close = ltp - change
+                                if prev_close > 0:
+                                    percent_change = (change / prev_close) * 100
+                            
+                            # Fallback: use index_info master data if available
+                            if change == 0 and percent_change is None:
+                                master_change = _to_rupees(index_info.get("change"))
+                                master_pchange = index_info.get("pChange") or index_info.get("percentChange")
+                                if master_change != 0:
+                                    change = master_change
+                                if master_pchange is not None:
+                                    try:
+                                        percent_change = float(master_pchange)
+                                    except (ValueError, TypeError):
+                                        pass
+                            
+                            # Final safety check: ensure we have valid values
+                            if change is None:
+                                change = 0.0
+                            if percent_change is None:
+                                percent_change = 0.0
+                            
+                            formatted_indices.append({
+                                "symbol": f"{exchange}:{indexcode}",
+                                "name": index_info.get("indexname"),
+                                "price": round(ltp, 2),
+                                "change": round(change, 2),
+                                "percent_change": round(percent_change, 2),
+                                "entityType": "index",
+                            })
+                        except Exception as e:
+                            logger.error(f"Error processing index {exchange}:{indexcode}: {e}", exc_info=True)
+                            continue
+            except Exception as e:
+                logger.error(f"Error fetching indices for {exchange}: {e}", exc_info=True)
+                continue
 
         return jsonify({
             "success": True,
             "market_status": market_status,
             "indices": formatted_indices,
             "last_updated": int(time.time() * 1000)
-        })
+        }), 200
 
     except Exception as e:
         logger.error(f"Error in /indices endpoint: {e}", exc_info=True)
-        return jsonify({"success": False, "message": "An internal server error occurred."}), 500
+        return jsonify({
+            "success": False, 
+            "message": "An internal server error occurred.",
+            "indices": formatted_indices  # Return whatever we managed to fetch
+        }), 500
 
 @markets_bp.route("/markets/<string:market_name>", methods=["GET"])
 @login_required
@@ -169,7 +258,14 @@ def get_market_constituents(market_name):
             price_data = price_map.get(str(scrip.scripcode))
             if price_data:
                 ltp = _to_rupees(price_data.get("ltp") or price_data.get("close"))
-                prev_close = _to_rupees(price_data.get("close"))
+                # Use prevClose (actual previous day's close) for accurate percent change
+                prev_close = _to_rupees(price_data.get("prevClose"))
+                if prev_close <= 0:
+                    prev_close = _to_rupees(price_data.get("prevclose"))
+                if prev_close <= 0:
+                    # Fallback to close only if prevClose not available
+                    prev_close = _to_rupees(price_data.get("close"))
+                    
                 if ltp > 0 and prev_close > 0:
                     change = ltp - prev_close
                     percent_change = (change / prev_close) * 100

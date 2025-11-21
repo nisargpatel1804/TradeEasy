@@ -1,6 +1,7 @@
 import React, { createContext, useState, useEffect, useContext, useCallback, useRef } from 'react';
 import { useAuth } from './AuthContext.jsx';
 import * as api from '../services/api.js';
+import priceUpdateService from '../services/priceUpdateService.js';
 
 const DataContext = createContext(null);
 
@@ -146,6 +147,15 @@ export const DataProvider = ({ children }) => {
         const response = await api.getMarketIndices();
         const indices = Array.isArray(response?.indices) ? response.indices : [];
         updateIndicesData(indices);
+        if (indices.length > 0) {
+          const priceMap = indices.reduce((acc, item = {}) => {
+            if (item.symbol) {
+              acc[item.symbol] = { ...item, entityType: 'index' };
+            }
+            return acc;
+          }, {});
+          priceUpdateService.seedPrices(priceMap);
+        }
         return indices;
       } catch (err) {
         console.error('Failed to load indices:', err);
