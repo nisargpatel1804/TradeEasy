@@ -109,6 +109,8 @@ export const placeTrade = (tradeData) => {
   }
   return placeBuyOrder(tradeData);
 };
+export const getMarketStatus = () => fetchData('/market-status');
+export const cancelOrder = (orderId) => apiClient.delete(`/cancel-order/${orderId}`).then(res => res.data);
 
 // --- Watchlists ---
 export const getWatchlists = () => fetchData('/watchlists');

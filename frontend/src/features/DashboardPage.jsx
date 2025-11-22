@@ -89,7 +89,15 @@ const DashboardPage = () => {
         return watchlistStocks.map(stock => {
             if (!stock) return null;
             const liveData = livePrices[stock.symbol];
-            return liveData ? { ...stock, ...liveData } : stock;
+            const mergedStock = liveData ? { ...stock, ...liveData } : stock;
+            
+            // Fallback to previous_close if ltp is 0 or missing
+            if (!mergedStock.ltp || mergedStock.ltp === 0) {
+                mergedStock.ltp = mergedStock.previous_close || 0;
+                mergedStock.price_source = 'previous_close';
+            }
+            
+            return mergedStock;
         }).filter(Boolean);
     }, [watchlistStocks, livePrices]);
 

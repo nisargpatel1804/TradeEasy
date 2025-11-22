@@ -31,6 +31,8 @@ def get_profile():
             "email": current_user.email,
             "mobile": current_user.mobile,
             "balance": float(current_user.balance),
+            "reserved_balance": float(current_user.reserved_balance),
+            "available_balance": float(current_user.balance - current_user.reserved_balance),
             "member_since": current_user.created_at.strftime("%B %Y")
         }
         return jsonify({"success": True, "profile": user_data}), 200

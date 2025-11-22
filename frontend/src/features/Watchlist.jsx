@@ -185,6 +185,13 @@ const Watchlist = () => {
 
                 const liveData = livePrices[stock.symbol];
                 const merged = liveData ? { ...stock, ...liveData } : { ...stock };
+                
+                // Fallback to previous_close if ltp is 0 or missing
+                if (!merged.ltp || merged.ltp === 0) {
+                    merged.ltp = merged.previous_close || 0;
+                    merged.price_source = 'previous_close';
+                }
+                
                 return { ...merged, originalIndex: index };
             })
             .filter(Boolean);
@@ -583,6 +590,9 @@ const Watchlist = () => {
                 <DialogContent>
                     <DialogHeader>
                         <DialogTitle>{tradeAction === 'BUY' ? 'Buy' : 'Sell'} {selectedStock?.symbol}</DialogTitle>
+                        <DialogDescription>
+                            {tradeAction === 'BUY' ? 'Place a buy order for' : 'Place a sell order for'} {selectedStock?.name || selectedStock?.symbol}
+                        </DialogDescription>
                     </DialogHeader>
                     <TradeForm
                         symbol={selectedStock?.symbol}
@@ -641,8 +651,8 @@ const StockRow = ({ stock, onTrade, onRemove }) => {
                  <div className="flex items-center justify-center gap-2" onClick={e => e.stopPropagation()}>
                     <Button size="sm" variant="outline" className="text-green-600 border-green-600 hover:bg-green-50" onClick={() => onTrade(stock, 'BUY')}>Buy</Button>
                     <Button size="sm" variant="outline" className="text-red-600 border-red-600 hover:bg-red-50" onClick={() => onTrade(stock, 'SELL')}>Sell</Button>
-                    <Button size="icon" variant="ghost" className="hover:bg-red-50" onClick={onRemove}>
-                        <Trash2 className="h-4 w-4 text-gray-600 hover:text-red-600"/>
+                    <Button size="icon" variant="ghost" className="hover:bg-red-50" onClick={onRemove} title="Remove from watchlist">
+                        <Trash2 className="h-4 w-4 text-red-500 hover:text-red-700"/>
                     </Button>
                 </div>
             </TableCell>

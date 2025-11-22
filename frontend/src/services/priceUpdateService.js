@@ -87,11 +87,84 @@ class PriceUpdateService {
       this._notifySubscribers({ type: 'index', symbol });
     };
 
+    // Batch update handlers for improved performance
+    this._stockBatchUpdateHandler = (dataArray = []) => {
+      if (!Array.isArray(dataArray) || dataArray.length === 0) {
+        return;
+      }
+
+      const changedSymbols = [];
+      dataArray.forEach((data = {}) => {
+        const symbol = data.symbol;
+        if (!symbol) {
+          return;
+        }
+
+        const mergedPayload = {
+          ...(this.latestPrices[symbol] || {}),
+          ...data,
+          symbol,
+          entityType: 'stock',
+        };
+
+        this.latestPrices[symbol] = mergedPayload;
+        changedSymbols.push(symbol);
+      });
+
+      if (changedSymbols.length > 0) {
+        // Notify subscribers with batch update
+        this._notifySubscribers({ 
+          type: 'stock_batch', 
+          symbols: changedSymbols,
+          count: changedSymbols.length 
+        });
+      }
+    };
+
+    this._indexBatchUpdateHandler = (dataArray = []) => {
+      if (!Array.isArray(dataArray) || dataArray.length === 0) {
+        return;
+      }
+
+      const changedSymbols = [];
+      dataArray.forEach((data = {}) => {
+        const symbol = data.symbol;
+        if (!symbol) {
+          return;
+        }
+
+        const mergedPayload = {
+          ...(this.latestPrices[symbol] || {}),
+          ...data,
+          symbol,
+          entityType: 'index',
+        };
+
+        this.latestPrices[symbol] = mergedPayload;
+        changedSymbols.push(symbol);
+      });
+
+      if (changedSymbols.length > 0) {
+        // Notify subscribers with batch update
+        this._notifySubscribers({ 
+          type: 'index_batch', 
+          symbols: changedSymbols,
+          count: changedSymbols.length 
+        });
+      }
+    };
+
     // Listener for individual stock price ticks
     this.socket.on('stock_update', this._stockUpdateHandler);
 
     // Listener for index price ticks
     this.socket.on('index_update', this._indexUpdateHandler);
+
+    // Listener for batched stock updates (performance optimization)
+    this.socket.on('stock_updates_batch', this._stockBatchUpdateHandler);
+
+    // Listener for batched index updates (performance optimization)
+    this.socket.on('index_updates_batch', this._indexBatchUpdateHandler);
 
     this._initialSnapshotHandler = (data = {}) => {
       if (!data || typeof data !== 'object') {
@@ -162,6 +235,14 @@ class PriceUpdateService {
       this.socket.off('index_update', this._indexUpdateHandler);
     }
 
+    if (this._stockBatchUpdateHandler) {
+      this.socket.off('stock_updates_batch', this._stockBatchUpdateHandler);
+    }
+
+    if (this._indexBatchUpdateHandler) {
+      this.socket.off('index_updates_batch', this._indexBatchUpdateHandler);
+    }
+
     if (this._initialSnapshotHandler) {
       this.socket.off('initial_stock_prices', this._initialSnapshotHandler);
     }
@@ -172,6 +253,8 @@ class PriceUpdateService {
 
     this._stockUpdateHandler = null;
     this._indexUpdateHandler = null;
+    this._stockBatchUpdateHandler = null;
+    this._indexBatchUpdateHandler = null;
     this._initialSnapshotHandler = null;
     this._initialIndicesHandler = null;
   }

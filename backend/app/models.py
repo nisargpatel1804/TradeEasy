@@ -64,6 +64,7 @@ class User(Document, UserMixin):
     email = StringField(max_length=100, required=True, unique=True)
     mobile = StringField(max_length=13, required=True)
     balance = FloatField(default=1000000.00, required=True)
+    reserved_balance = FloatField(default=0.00, required=True)  # Funds committed to pending orders
     created_at = DateTimeField(default=datetime.utcnow, required=True)
     is_active = BooleanField(default=True, required=True)
     watchlists = ListField(EmbeddedDocumentField(Watchlist))
@@ -94,22 +95,49 @@ class Transaction(Document):
     action = StringField(choices=('BUY', 'SELL'), required=True)
     quantity = IntField(required=True)
     price = FloatField(required=True)
-    status = StringField(default="EXECUTED", required=True)
-    order_type = StringField(default='MARKET', required=True)
+    status = StringField(default="EXECUTED", required=True)  # EXECUTED, pending, processing, failed, cancelled
+    order_type = StringField(default='MARKET', required=True)  # MARKET, LIMIT, STOP_LOSS, STOP_LIMIT, BRACKET, TRAILING_STOP
     transaction_date = DateTimeField(default=datetime.utcnow, required=True)
+    
+    # Advanced order type fields
+    stop_loss_price = FloatField()  # Trigger price for stop-loss orders
+    target_price = FloatField()  # Target price for bracket orders
+    trailing_stop_pct = FloatField()  # Percentage for trailing stop (e.g., 2.0 for 2%)
+    trailing_stop_trigger_price = FloatField()  # Current trigger price for trailing stop (updated dynamically)
+    
+    # Product type for intraday vs delivery
+    product_type = StringField(default='CNC', choices=('CNC', 'MIS'))  # CNC=Cash & Carry (Delivery), MIS=Margin Intraday Square-off
+    
+    # Bracket order tracking
+    parent_order_id = StringField()  # For stop-loss/target legs of bracket order
+    bracket_order_type = StringField(choices=('ENTRY', 'STOP_LOSS', 'TARGET'))  # Type of leg in bracket order
+    
+    # Idempotency and execution tracking
+    idempotency_key = StringField(unique=True, sparse=True)  # Prevent duplicate executions
+    execution_date = DateTimeField()  # When pending order was actually executed
+    square_off_time = DateTimeField()  # Auto square-off timestamp for MIS orders
+    original_price = FloatField()  # Original limit/stop price (before execution price override)
 
     meta = {
         'collection': 'transactions',
         'indexes': [
             'user',
             'symbol',
+            'status',
+            'product_type',
+            'parent_order_id',
+            'idempotency_key',
             {'fields': ['user', 'transaction_date']},
-            {'fields': ['user', 'symbol']}
+            {'fields': ['user', 'symbol']},
+            {'fields': ['user', 'action', 'status']},
+            {'fields': ['user', 'status', 'product_type']},
+            {'fields': ['status', 'product_type']},
+            {'fields': ['status', 'order_type']},
         ]
     }
 
     def __repr__(self):
-        return f"<Transaction {self.action} {self.symbol} x{self.quantity}>"
+        return f"<Transaction {self.action} {self.symbol} x{self.quantity} {self.order_type}>"
 
 class Holding(Document):
     """Represents a user's current holdings of a particular stock."""
@@ -117,16 +145,65 @@ class Holding(Document):
     symbol = StringField(max_length=30, required=True)
     quantity = IntField(required=True)
     average_price = FloatField(required=True)
+    product_type = StringField(default='CNC', choices=('CNC', 'MIS'))  # Separate CNC and MIS holdings
+    reserved_quantity = IntField(default=0)  # Shares committed to pending sell orders
     
     meta = {
         'collection': 'holdings',
         'indexes': [
-            {'fields': ('user', 'symbol'), 'unique': True}
+            {'fields': ('user', 'symbol', 'product_type'), 'unique': True}
         ]
     }
     
     def __repr__(self):
-        return f"<Holding {self.user.client_id} | {self.symbol} x{self.quantity}>"
+        return f"<Holding {self.user.client_id} | {self.symbol} x{self.quantity} {self.product_type}>"
+
+class Lot(Document):
+    """Tracks individual purchase lots for FIFO/LIFO P&L calculation."""
+    user = ReferenceField(User, required=True)
+    symbol = StringField(max_length=30, required=True)
+    quantity = IntField(required=True)  # Remaining quantity in this lot
+    original_quantity = IntField(required=True)  # Original quantity purchased
+    purchase_price = FloatField(required=True)  # Price at which this lot was purchased
+    purchase_date = DateTimeField(required=True)
+    purchase_transaction = ReferenceField(Transaction)  # Link to original buy transaction
+    product_type = StringField(default='CNC', choices=('CNC', 'MIS'))
+    is_active = BooleanField(default=True)  # False when fully sold
+    
+    meta = {
+        'collection': 'lots',
+        'indexes': [
+            {'fields': ['user', 'symbol', 'is_active']},
+            {'fields': ['user', 'symbol', 'product_type', 'purchase_date']},  # For FIFO ordering
+            'purchase_transaction'
+        ]
+    }
+    
+    def __repr__(self):
+        return f"<Lot {self.symbol} x{self.quantity}/{self.original_quantity} @{self.purchase_price}>"
+
+class ShortPosition(Document):
+    """Tracks short positions for intraday trading (MIS only)."""
+    user = ReferenceField(User, required=True)
+    symbol = StringField(max_length=30, required=True)
+    quantity = IntField(required=True)  # Number of shares shorted
+    short_price = FloatField(required=True)  # Price at which shares were shorted
+    short_date = DateTimeField(default=datetime.utcnow, required=True)
+    short_transaction = ReferenceField(Transaction)  # Link to original short sell transaction
+    is_active = BooleanField(default=True)  # False when position is covered
+    square_off_time = DateTimeField()  # Auto square-off timestamp
+    
+    meta = {
+        'collection': 'short_positions',
+        'indexes': [
+            {'fields': ['user', 'symbol', 'is_active'], 'unique': True},
+            'short_transaction',
+            'square_off_time'
+        ]
+    }
+    
+    def __repr__(self):
+        return f"<ShortPosition {self.symbol} x{self.quantity} @{self.short_price}>"
 
 # --- Motilal Oswal API Data Model ---
 

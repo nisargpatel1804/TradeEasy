@@ -11,7 +11,7 @@ orders_bp = Blueprint('orders', __name__)
 
 def _format_order(order: Transaction) -> dict:
     """Formats a Transaction document into a clean dictionary for the API response."""
-    return {
+    formatted = {
         "id": str(order.id),
         "symbol": order.symbol,
         "action": order.action,
@@ -19,8 +19,21 @@ def _format_order(order: Transaction) -> dict:
         "price": float(order.price),
         "order_type": order.order_type,
         "status": order.status,
-        "date": order.transaction_date.isoformat()
+        "date": order.transaction_date.isoformat(),
+        "product_type": order.product_type if hasattr(order, 'product_type') else 'CNC'
     }
+    
+    # Add advanced order fields if present
+    if order.stop_loss_price:
+        formatted["stop_loss_price"] = float(order.stop_loss_price)
+    if order.target_price:
+        formatted["target_price"] = float(order.target_price)
+    if order.trailing_stop_pct:
+        formatted["trailing_stop_pct"] = float(order.trailing_stop_pct)
+    if order.execution_date:
+        formatted["execution_date"] = order.execution_date.isoformat()
+    
+    return formatted
 
 # --- API Route ---
 
@@ -36,12 +49,12 @@ def get_orders():
         # Sort by date in descending order to show the most recent orders first
         executed_orders = Transaction.objects(
             user=current_user,
-            status="executed"
+            status="EXECUTED"
         ).order_by('-transaction_date')
 
         pending_orders = Transaction.objects(
             user=current_user,
-            status="pending"
+            status="PENDING"
         ).order_by('-transaction_date')
 
         # Format the query results into a clean list of dictionaries
