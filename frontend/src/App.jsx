@@ -9,6 +9,7 @@ import DashboardPage from './features/DashboardPage.jsx';
 import PortfolioPage from './features/PortfolioPage.jsx';
 import Watchlist from './features/Watchlist.jsx';
 import OrdersPage from './features/OrdersPage.jsx';
+import PerformancePage from './features/PerformancePage.jsx';
 import ProfilePage from './features/ProfilePage.jsx';
 import TradeForm from './features/TradeForm.jsx';
 import StockOverview from "./features/StockSections.jsx";
@@ -66,11 +67,13 @@ function App() {
           <Route path="/portfolio" element={<ProtectedRoute><PortfolioPage /></ProtectedRoute>} />
           <Route path="/watchlist" element={<ProtectedRoute><Watchlist /></ProtectedRoute>} />
           <Route path="/orders" element={<ProtectedRoute><OrdersPage /></ProtectedRoute>} />
+          <Route path="/performance" element={<ProtectedRoute><PerformancePage /></ProtectedRoute>} />
           <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
           <Route path="/market" element={<ProtectedRoute><MarketPage /></ProtectedRoute>} />
           <Route path="/indices" element={<ProtectedRoute><Indices /></ProtectedRoute>} />
           <Route path="/trade/:symbol" element={<ProtectedRoute><TradePage /></ProtectedRoute>} />
           <Route path="/stock/overview/:symbol" element={<ProtectedRoute><StockOverview /></ProtectedRoute>} />
+          <Route path="/stock/:symbol" element={<ProtectedRoute><StockOverview /></ProtectedRoute>} />
           <Route path="/order-detail/:orderId" element={<ProtectedRoute><OrderDetail /></ProtectedRoute>} />
           
           {/* --- 404 Not Found Route --- */}

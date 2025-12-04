@@ -42,7 +42,7 @@ def _format_order(order: Transaction) -> dict:
 def get_orders():
     """
     Fetches the complete order history for the authenticated user, separated into
-    executed and pending orders.
+    executed, pending, and cancelled orders.
     """
     try:
         # Securely query for orders belonging only to the current logged-in user
@@ -57,14 +57,21 @@ def get_orders():
             status="PENDING"
         ).order_by('-transaction_date')
 
+        cancelled_orders = Transaction.objects(
+            user=current_user,
+            status="cancelled"
+        ).order_by('-transaction_date')
+
         # Format the query results into a clean list of dictionaries
         executed_list = [_format_order(order) for order in executed_orders]
         pending_list = [_format_order(order) for order in pending_orders]
+        cancelled_list = [_format_order(order) for order in cancelled_orders]
 
         return jsonify({
             "success": True,
             "executed": executed_list,
-            "pending": pending_list
+            "pending": pending_list,
+            "cancelled": cancelled_list
         }), 200
 
     except Exception as e:

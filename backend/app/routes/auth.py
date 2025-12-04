@@ -15,7 +15,7 @@ auth_bp = Blueprint('auth', __name__)
 
 # --- Constants for Validation and Security ---
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
-MOBILE_REGEX = re.compile(r"^\+91[6-9]\d{9}$") # Indian mobile number format
+MOBILE_REGEX = re.compile(r"^\+91\d{10}$")  # +91 followed by any 10 digits
 PASSWORD_MIN_LENGTH = 8
 LOGIN_ATTEMPT_WINDOW_SECONDS = 300  # 5 minutes
 LOGIN_ATTEMPT_THRESHOLD = 5

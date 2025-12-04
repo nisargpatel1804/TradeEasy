@@ -45,6 +45,11 @@ def _serialize_watchlist(watchlist: Watchlist) -> dict:
     }
 
 
+def _invalidate_watchlist_cache(user_id: str) -> None:
+    """Bust the cached response for the user's watchlists."""
+    app_cache.invalidate_pattern(f"route:get_watchlists:user:{user_id}")
+
+
 def _is_stock_tracked_elsewhere(stock: Stock) -> bool:
     """Checks whether the given stock is still referenced in any watchlist."""
     # Use only('id') to minimize the fields pulled back from MongoDB.
@@ -89,8 +94,7 @@ def create_watchlist():
         user.watchlists.append(new_watchlist)
         user.save()
         
-        # Invalidate watchlist cache
-        app_cache.invalidate_pattern(f"route:get_watchlists:user:{current_user.id}")
+        _invalidate_watchlist_cache(current_user.id)
         
         logger.info(f"User {user.client_id} created new watchlist: '{name}'")
         return jsonify({
@@ -171,6 +175,8 @@ def add_stock_to_watchlist(watchlist_name):
         target_watchlist.stocks.append(stock)
         user.save()
 
+        _invalidate_watchlist_cache(current_user.id)
+
         # --- Trigger Real-Time Subscription ---
         socket_manager = MO_WebSocket_Manager()
         socket_manager.register_scrip(
@@ -209,6 +215,7 @@ def remove_stock_from_watchlist(watchlist_name, symbol):
     try:
         target_watchlist.stocks.remove(stock_to_remove)
         user.save()
+        _invalidate_watchlist_cache(current_user.id)
     
         # --- Unsubscribe from the real-time feed ---
         socket_manager = MO_WebSocket_Manager()
@@ -256,6 +263,7 @@ def delete_watchlist(watchlist_name):
 
         user.watchlists.remove(target_watchlist)
         user.save()
+        _invalidate_watchlist_cache(current_user.id)
         
         logger.info(f"User {user.client_id} deleted watchlist: '{watchlist_name}'")
         return jsonify({"success": True, "message": "Watchlist deleted successfully."}), 200

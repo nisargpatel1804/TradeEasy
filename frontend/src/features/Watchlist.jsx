@@ -596,6 +596,7 @@ const Watchlist = () => {
                     </DialogHeader>
                     <TradeForm
                         symbol={selectedStock?.symbol}
+                        action={tradeAction}
                         onTradeSuccess={() => {
                             setShowTradeModal(false);
                         }}

@@ -6,13 +6,16 @@ import { Card, CardContent } from "../assets/ui/card.jsx";
 import { Button } from "../assets/ui/button.jsx";
 import { Skeleton } from "../assets/ui/skeleton.jsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../assets/ui/Tabs.jsx";
-import { Scroll, History, X, TrendingUp, Target, AlertCircle } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../assets/ui/dialog.jsx";
+import { Scroll, History, X, Ban, TrendingUp, Target, AlertCircle } from "lucide-react";
 
 const OrdersPage = () => {
-  const [orders, setOrders] = useState({ executed: [], pending: [] });
+  const [orders, setOrders] = useState({ executed: [], pending: [], cancelled: [] });
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [cancellingOrderId, setCancellingOrderId] = useState(null);
+  const [selectedOrder, setSelectedOrder] = useState(null);
+  const [showOrderDetail, setShowOrderDetail] = useState(false);
 
   const loadOrders = async () => {
     setIsLoading(true);
@@ -23,6 +26,7 @@ const OrdersPage = () => {
         setOrders({
           executed: data.executed || [],
           pending: data.pending || [],
+          cancelled: data.cancelled || [],
         });
       } else {
         throw new Error(data.message || "Failed to fetch orders.");
@@ -46,7 +50,6 @@ const OrdersPage = () => {
       const result = await api.cancelOrder(orderId);
       if (result.success) {
         toast.success(result.message || "Order cancelled successfully");
-        // Reload orders
         await loadOrders();
       } else {
         toast.error(result.message || "Failed to cancel order");
@@ -58,17 +61,33 @@ const OrdersPage = () => {
     }
   };
 
+  const handleOrderClick = (order) => {
+    setSelectedOrder(order);
+    setShowOrderDetail(true);
+  };
+
+  const formatCurrency = (value) => {
+    if (typeof value !== 'number') return '₹0.00';
+    return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  const getPnlColor = (value) => {
+    if (value > 0) return 'text-green-600';
+    if (value < 0) return 'text-red-600';
+    return 'text-gray-700';
+  };
+
   return (
     <div className="p-4 md:p-8 max-w-7xl mx-auto">
       <header className="mb-6">
-        <h1 className="text-3xl font-bold text-gray-900">Order History</h1>
-        <p className="text-gray-500">Review your executed and pending trades.</p>
+        <h1 className="text-3xl font-bold text-gray-900">Orders</h1>
+        <p className="text-gray-500">View and manage your orders.</p>
       </header>
 
       <Card className="shadow-lg">
         <CardContent className="p-4">
           <Tabs defaultValue="executed">
-            <TabsList className="grid w-full grid-cols-2">
+            <TabsList className="grid w-full grid-cols-3">
               <TabsTrigger value="executed">
                 <History className="w-4 h-4 mr-2" />
                 Executed ({orders.executed.length})
@@ -77,23 +96,108 @@ const OrdersPage = () => {
                 <Scroll className="w-4 h-4 mr-2" />
                 Pending ({orders.pending.length})
               </TabsTrigger>
+              <TabsTrigger value="cancelled">
+                <Ban className="w-4 h-4 mr-2" />
+                Cancelled ({orders.cancelled.length})
+              </TabsTrigger>
             </TabsList>
             
             <TabsContent value="executed" className="mt-4">
-              <OrderList orders={orders.executed} isLoading={isLoading} error={error} type="executed" />
+              <OrderList 
+                orders={orders.executed} 
+                isLoading={isLoading} 
+                error={error} 
+                type="executed" 
+                onOrderClick={handleOrderClick}
+              />
             </TabsContent>
             
             <TabsContent value="pending" className="mt-4">
-              <OrderList orders={orders.pending} isLoading={isLoading} error={error} type="pending" onCancel={handleCancelOrder} cancellingOrderId={cancellingOrderId} />
+              <OrderList 
+                orders={orders.pending} 
+                isLoading={isLoading} 
+                error={error} 
+                type="pending" 
+                onCancel={handleCancelOrder} 
+                cancellingOrderId={cancellingOrderId}
+                onOrderClick={handleOrderClick}
+              />
+            </TabsContent>
+
+            <TabsContent value="cancelled" className="mt-4">
+              <OrderList 
+                orders={orders.cancelled} 
+                isLoading={isLoading} 
+                error={error} 
+                type="cancelled"
+                onOrderClick={handleOrderClick}
+              />
             </TabsContent>
           </Tabs>
         </CardContent>
       </Card>
+
+      {/* Order Detail Dialog */}
+      {selectedOrder && (
+        <Dialog open={showOrderDetail} onOpenChange={setShowOrderDetail}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>Order Details - {selectedOrder.symbol}</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <DetailItem label="Total Shares" value={selectedOrder.quantity} />
+                <DetailItem label="Symbol" value={selectedOrder.symbol} />
+                <DetailItem label="Order Type" value={selectedOrder.order_type} />
+                <DetailItem label="Average Price" value={formatCurrency(selectedOrder.price)} />
+                <DetailItem label="Validity" value={selectedOrder.product_type === 'MIS' ? 'Intraday' : 'Delivery'} />
+                <DetailItem 
+                  label="Status" 
+                  value={selectedOrder.status}
+                  className={`capitalize ${
+                    selectedOrder.status === 'EXECUTED' ? 'text-green-600' :
+                    selectedOrder.status === 'pending' ? 'text-orange-600' :
+                    selectedOrder.status === 'cancelled' ? 'text-red-600' :
+                    'text-gray-600'
+                  }`}
+                />
+                {selectedOrder.pnl !== undefined && (
+                  <DetailItem 
+                    label="Profit/Loss" 
+                    value={formatCurrency(selectedOrder.pnl)}
+                    className={getPnlColor(selectedOrder.pnl)}
+                  />
+                )}
+                {selectedOrder.stop_loss_price && (
+                  <DetailItem label="Stop Loss" value={formatCurrency(selectedOrder.stop_loss_price)} />
+                )}
+                {selectedOrder.target_price && (
+                  <DetailItem label="Target" value={formatCurrency(selectedOrder.target_price)} />
+                )}
+                <DetailItem label="Margin Used" value={formatCurrency(selectedOrder.quantity * selectedOrder.price)} />
+                <DetailItem label="Charges" value={formatCurrency(0)} />
+                <DetailItem 
+                  label="Order Date" 
+                  value={new Date(selectedOrder.date).toLocaleString()}
+                  className="col-span-2"
+                />
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 };
 
-const OrderList = ({ orders, isLoading, error, type, onCancel, cancellingOrderId }) => {
+const DetailItem = ({ label, value, className = "" }) => (
+  <div>
+    <p className="text-sm text-gray-500">{label}</p>
+    <p className={`font-semibold ${className}`}>{value}</p>
+  </div>
+);
+
+const OrderList = ({ orders, isLoading, error, type, onCancel, cancellingOrderId, onOrderClick }) => {
     if (isLoading) {
         return (
             <div className="space-y-4">
@@ -120,14 +224,14 @@ const OrderList = ({ orders, isLoading, error, type, onCancel, cancellingOrderId
                   isPending={type === "pending"}
                   onCancel={onCancel}
                   isCancelling={cancellingOrderId === order.id}
+                  onClick={() => onOrderClick(order)}
                 />
             ))}
         </div>
     );
 };
 
-
-const OrderCard = ({ order, index, isPending = false, onCancel, isCancelling = false }) => {
+const OrderCard = ({ order, index, isPending = false, onCancel, isCancelling = false, onClick }) => {
   const isBuy = order.action === "BUY";
   
   const getOrderTypeIcon = () => {
@@ -152,7 +256,7 @@ const OrderCard = ({ order, index, isPending = false, onCancel, isCancelling = f
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3, delay: index * 0.05 }}
     >
-      <Card className="hover:shadow-md transition-shadow">
+      <Card className="hover:shadow-md transition-shadow cursor-pointer" onClick={onClick}>
         <CardContent className="p-4">
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4 items-center mb-3">
             <div>
@@ -185,7 +289,6 @@ const OrderCard = ({ order, index, isPending = false, onCancel, isCancelling = f
             </div>
           </div>
 
-          {/* Advanced order details */}
           {(order.stop_loss_price || order.target_price || order.trailing_stop_pct) && (
             <div className="grid grid-cols-3 gap-4 mb-3 p-3 bg-gray-50 rounded-md">
               {order.stop_loss_price && (
@@ -227,11 +330,14 @@ const OrderCard = ({ order, index, isPending = false, onCancel, isCancelling = f
               <p className="font-semibold text-xs">{new Date(order.date).toLocaleString()}</p>
             </div>
             {isPending && onCancel && (
-              <div className="flex justify-end">
+              <div className="flex justify-end" onClick={(e) => e.stopPropagation()}>
                 <Button
                   variant="destructive"
                   size="sm"
-                  onClick={() => onCancel(order.id)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCancel(order.id);
+                  }}
                   disabled={isCancelling}
                 >
                   {isCancelling ? (
@@ -275,6 +381,4 @@ const OrderCardSkeleton = () => (
     </Card>
 );
 
-
 export default OrdersPage;
-

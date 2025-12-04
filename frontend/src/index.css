@@ -30,29 +30,9 @@
     --transition: all 0.3s ease-in-out;
   }
 
-  /* 🌙 Dark Mode (Black Background) */
-  .dark {
-    --background: 0 0% 10%; /* Black Background */
-    --foreground: 0 0% 98%; /* White Text */
-    --card: 0 0% 15%; /* Dark Grey Cards */
-    --card-foreground: 0 0% 98%;
-    --popover: 0 0% 15%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%; /* White Buttons */
-    --primary-foreground: 0 0% 10%; /* Black Text */
-    --secondary: 0 0% 20%; /* Dark Grey Background */
-    --secondary-foreground: 0 0% 98%;
-    --muted: 0 0% 30%;
-    --muted-foreground: 0 0% 70%;
-    --accent: 0 0% 25%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 72% 51%; /* Brighter Red for Dark Mode */
-    --destructive-foreground: 0 0% 98%;
-    --constructive: 145 58% 55%; /* Brighter Green */
-    --constructive-foreground: 0 0% 10%;
-    --border: 0 0% 40%;
-    --input: 0 0% 40%;
-    --ring: 0 0% 98%;
+  .light-theme {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
   }
 }
 
@@ -68,6 +48,8 @@
     margin: 0;
     padding: 0;
     transition: var(--transition);
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
   }
 
   /* 🏠 Root Container */

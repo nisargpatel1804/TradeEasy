@@ -7,7 +7,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx"
 import { Label } from "../assets/ui/label.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../assets/ui/select.jsx";
 import { toast } from "react-hot-toast";
-import { Loader2, Clock, Info } from "lucide-react";
+import { Loader2, Clock, Info, TrendingUp, TrendingDown, AlertCircle } from "lucide-react";
+import priceUpdateService from "../services/priceUpdateService.js";
 
 const generateIdempotencyKey = () => {
   if (typeof window !== "undefined" && window.crypto?.randomUUID) {
@@ -16,26 +17,73 @@ const generateIdempotencyKey = () => {
   return `te-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 };
 
-const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose }) => {
+const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action: initialAction = "BUY" }) => {
   const { isAuthenticated } = useAuth();
-  const [action, setAction] = useState("BUY");
-  const [orderType, setOrderType] = useState("MARKET");
+  const [action, setAction] = useState(initialAction);
   const [productType, setProductType] = useState("CNC");
   const [quantity, setQuantity] = useState("");
-  const [price, setPrice] = useState("");
-  const [stopPrice, setStopPrice] = useState("");
-  const [targetPrice, setTargetPrice] = useState("");
-  const [trailingStopPct, setTrailingStopPct] = useState("");
-  const [allowShort, setAllowShort] = useState(false);
+  const [entryPrice, setEntryPrice] = useState("");
+  const [stopLoss, setStopLoss] = useState("");
+  const [target, setTarget] = useState("");
+  const [timeframe, setTimeframe] = useState("delivery");
   const [symbol, setSymbol] = useState(initialSymbol);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [marketStatus, setMarketStatus] = useState(null);
+  const [stockData, setStockData] = useState(null);
+  const [livePrice, setLivePrice] = useState(null);
+  const [portfolioData, setPortfolioData] = useState(null);
   
   // Update symbol if the initial prop changes
   useEffect(() => {
     setSymbol(initialSymbol.toUpperCase());
+    if (initialSymbol) {
+      fetchStockData(initialSymbol);
+    }
   }, [initialSymbol]);
+
+  // Fetch portfolio data on mount
+  useEffect(() => {
+    const fetchPortfolio = async () => {
+      try {
+        const data = await api.fetchPortfolio();
+        if (data.success) {
+          setPortfolioData(data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch portfolio:', err);
+      }
+    };
+    fetchPortfolio();
+  }, []);
+
+  // Subscribe to live price updates
+  useEffect(() => {
+    if (!symbol) return;
+    
+    const unsubscribe = priceUpdateService.subscribe(update => {
+      if (update?.changedPrices && update.changedPrices[symbol]) {
+        setLivePrice(update.changedPrices[symbol]);
+      } else if (update?.allPrices && update.allPrices[symbol]) {
+        setLivePrice(update.allPrices[symbol]);
+      }
+    });
+    
+    return () => unsubscribe();
+  }, [symbol]);
+
+  // Fetch stock data
+  const fetchStockData = async (stockSymbol) => {
+    try {
+      const data = await api.getStockDetails(stockSymbol);
+      if (data && data.ltp) {
+        setStockData(data);
+        setLivePrice({ ltp: data.ltp, change: data.change, percent_change: data.percent_change });
+      }
+    } catch (err) {
+      console.error('Failed to fetch stock data:', err);
+    }
+  };
 
   // Fetch market status on mount
   useEffect(() => {
@@ -59,6 +107,38 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose }) => {
     return () => clearInterval(interval);
   }, []);
 
+  // Calculate margin required and charges
+  const calculateMarginAndCharges = () => {
+    const qty = parseInt(quantity, 10) || 0;
+    const price = parseFloat(entryPrice) || (livePrice?.ltp || 0);
+    const baseAmount = qty * price;
+    
+    // For now, charges are 0 as per requirements
+    const charges = 0;
+    
+    // Margin required
+    let marginRequired = baseAmount;
+    if (action === "BUY") {
+      marginRequired = baseAmount; // Full amount for buy
+    } else if (action === "SELL") {
+      // For sell, we're receiving money, so no margin required
+      marginRequired = 0;
+    }
+    
+    return { marginRequired, charges, totalAmount: baseAmount };
+  };
+
+  // Handle timeframe change
+  const handleTimeframeChange = (value) => {
+    setTimeframe(value);
+    // Map timeframe to product type
+    if (value === "intraday") {
+      setProductType("MIS");
+    } else {
+      setProductType("CNC");
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!isAuthenticated) {
@@ -68,33 +148,72 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose }) => {
     setError(null);
     setIsLoading(true);
 
+    const qty = parseInt(quantity, 10);
+    const currentLtp = livePrice?.ltp || stockData?.ltp || 0;
+    
+    // Determine order type and price
+    let orderType = "MARKET";
+    let orderPrice = currentLtp;
+    
+    if (entryPrice && parseFloat(entryPrice) > 0) {
+      orderType = "LIMIT";
+      orderPrice = parseFloat(entryPrice);
+    }
+
+    // For SELL with MIS, check if it's a short sell
+    const isShortSell = action === "SELL" && productType === "MIS";
+    
+    if (isShortSell) {
+      // Show confirmation toast for short sell
+      const confirmShortSell = await new Promise((resolve) => {
+        toast((t) => (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-orange-600" />
+              <span className="font-semibold">Confirm Short Sell</span>
+            </div>
+            <p className="text-sm">You are placing a short sell order for {symbol}. This position must be covered by 3:25 PM.</p>
+            <div className="flex gap-2 mt-2">
+              <Button size="sm" onClick={() => { toast.dismiss(t.id); resolve(true); }}>
+                Confirm
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => { toast.dismiss(t.id); resolve(false); }}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ), { duration: 10000 });
+      });
+      
+      if (!confirmShortSell) {
+        setIsLoading(false);
+        return;
+      }
+    }
+
     const tradeData = {
       symbol,
-      quantity: parseInt(quantity, 10),
+      quantity: qty,
       order_type: orderType,
       action: action,
       product_type: productType,
-      price: orderType === "LIMIT" || orderType === "STOP_LIMIT" ? parseFloat(price) : undefined,
-      stop_loss_price: (orderType === "STOP_LOSS" || orderType === "STOP_LIMIT" || orderType === "BRACKET") && stopPrice ? parseFloat(stopPrice) : undefined,
-      target_price: orderType === "BRACKET" && targetPrice ? parseFloat(targetPrice) : undefined,
-      trailing_stop_pct: orderType === "TRAILING_STOP" && trailingStopPct ? parseFloat(trailingStopPct) : undefined,
-      allow_short: action === "SELL" && productType === "MIS" && allowShort,
+      price: orderType === "LIMIT" ? orderPrice : undefined,
+      stop_loss_price: stopLoss && parseFloat(stopLoss) > 0 ? parseFloat(stopLoss) : undefined,
+      target_price: target && parseFloat(target) > 0 ? parseFloat(target) : undefined,
+      allow_short: isShortSell,
     };
 
     const toastId = toast.loading("Placing order...");
 
     try {
-      // The `placeTrade` function in `api.js` now correctly routes to /buy or /sell.
       const requestPayload = {
         ...tradeData,
         idempotency_key: generateIdempotencyKey(),
       };
       const result = await api.placeTrade(requestPayload);
       if (result.success) {
-        // Handle different order statuses
         let successMessage = result.message || "Trade executed successfully!";
         
-        // Show different messages based on order status
         if (result.status === "PENDING" || result.status === "pending") {
           successMessage = result.message || `Order placed successfully and is pending execution.`;
           toast.success(successMessage, { id: toastId, duration: 5000 });
@@ -106,15 +225,12 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose }) => {
         
         // Reset form state after successful trade
         setQuantity("");
-        setPrice("");
-        setStopPrice("");
-        setTargetPrice("");
-        setTrailingStopPct("");
-        setAllowShort(false);
+        setEntryPrice("");
+        setStopLoss("");
+        setTarget("");
         if (onTradeSuccess) onTradeSuccess(result);
         if (onClose) onClose();
       } else {
-        // This handles validation errors returned from the backend.
         throw new Error(result.message);
       }
     } catch (err) {
@@ -152,8 +268,25 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose }) => {
     );
   };
 
+  const formatCurrency = (value) => {
+    if (typeof value !== 'number') return '₹0.00';
+    return `₹${value.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  };
+
+  const getPriceChangeColor = (change) => {
+    if (change > 0) return 'text-green-600';
+    if (change < 0) return 'text-red-600';
+    return 'text-gray-600';
+  };
+
+  const { marginRequired, charges, totalAmount } = calculateMarginAndCharges();
+  const currentLtp = livePrice?.ltp || stockData?.ltp || 0;
+  const priceChange = livePrice?.change || stockData?.change || 0;
+  const percentChange = livePrice?.percent_change || stockData?.percent_change || 0;
+  const availableBalance = portfolioData?.summary?.available_balance || portfolioData?.summary?.cash_balance || 0;
+
   return (
-    <Card className="w-full max-w-md mx-auto shadow-lg">
+    <Card className="w-full max-w-2xl mx-auto shadow-lg">
       <CardHeader>
         <div className="flex items-center justify-between">
           <CardTitle className="text-2xl font-bold">Place Order</CardTitle>
@@ -162,6 +295,7 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose }) => {
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-4">
+          {/* Buy/Sell Action Buttons */}
           <div className="grid grid-cols-2 gap-2">
             <Button
               type="button"
@@ -179,18 +313,47 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose }) => {
             </Button>
           </div>
 
+          {/* Symbol */}
           <div>
             <Label htmlFor="symbol">Symbol</Label>
             <Input
               id="symbol"
               value={symbol}
-              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+              onChange={(e) => {
+                const newSymbol = e.target.value.toUpperCase();
+                setSymbol(newSymbol);
+                if (newSymbol.length >= 2) {
+                  fetchStockData(newSymbol);
+                }
+              }}
               placeholder="e.g. RELIANCE"
               required
               disabled={!!initialSymbol}
             />
           </div>
 
+          {/* LTP with Change */}
+          {currentLtp > 0 && (
+            <div className="p-3 bg-gray-50 rounded-lg border border-gray-200">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm text-gray-500">Last Traded Price</p>
+                  <p className="text-2xl font-bold">{formatCurrency(currentLtp)}</p>
+                </div>
+                <div className="text-right">
+                  <div className={`flex items-center gap-1 ${getPriceChangeColor(priceChange)}`}>
+                    {priceChange > 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
+                    <span className="font-semibold">{formatCurrency(Math.abs(priceChange))}</span>
+                  </div>
+                  <p className={`text-sm ${getPriceChangeColor(priceChange)}`}>
+                    ({percentChange > 0 ? '+' : ''}{percentChange?.toFixed(2)}%)
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Quantity */}
           <div>
             <Label htmlFor="quantity">Quantity</Label>
             <Input
@@ -204,144 +367,109 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose }) => {
             />
           </div>
 
+          {/* Entry Price (Optional) */}
           <div>
-            <Label htmlFor="productType">Product Type</Label>
-            <Select onValueChange={setProductType} value={productType}>
-              <SelectTrigger id="productType">
-                <SelectValue placeholder="Select product" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="CNC">CNC (Delivery)</SelectItem>
-                <SelectItem value="MIS">MIS (Intraday)</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-gray-500 mt-1">
-              {productType === "MIS" ? "Auto square-off at 3:25 PM" : "No auto square-off"}
-            </p>
-          </div>
-          
-          <div>
-            <Label htmlFor="orderType">Order Type</Label>
-            <Select onValueChange={setOrderType} value={orderType}>
-              <SelectTrigger id="orderType">
-                <SelectValue placeholder="Select type" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="MARKET">Market</SelectItem>
-                <SelectItem value="LIMIT">Limit</SelectItem>
-                <SelectItem value="STOP_LOSS">Stop-Loss (SL)</SelectItem>
-                <SelectItem value="STOP_LIMIT">Stop-Limit (SL-L)</SelectItem>
-                <SelectItem value="BRACKET">Bracket Order (BO)</SelectItem>
-                <SelectItem value="TRAILING_STOP">Trailing Stop</SelectItem>
-              </SelectContent>
-            </Select>
-            {marketStatus?.session === 'POST_MARKET' && orderType === 'MARKET' && productType === 'CNC' && (
-              <p className="text-xs text-blue-600 mt-1 flex items-center gap-1">
-                <Info className="h-3 w-3" />
-                Market order will be converted to Limit order at current price for AMO
-              </p>
-            )}
-            {marketStatus?.session === 'POST_MARKET' && orderType === 'MARKET' && productType === 'MIS' && (
-              <p className="text-xs text-orange-600 mt-1 flex items-center gap-1">
-                <Info className="h-3 w-3" />
-                MIS orders not allowed in after-market session. Use CNC for AMO.
+            <Label htmlFor="entryPrice">Entry Price (Optional - Leave blank for Market Order)</Label>
+            <Input
+              id="entryPrice"
+              type="number"
+              value={entryPrice}
+              onChange={(e) => setEntryPrice(e.target.value)}
+              placeholder="Market Price"
+              min="0.01"
+              step="0.01"
+            />
+            {!entryPrice && (
+              <p className="text-xs text-gray-500 mt-1">
+                Will execute at market price: {formatCurrency(currentLtp)}
               </p>
             )}
           </div>
 
-          {(orderType === "LIMIT" || orderType === "STOP_LIMIT") && (
-            <div>
-              <Label htmlFor="price">Limit Price</Label>
-              <Input
-                id="price"
-                type="number"
-                value={price}
-                onChange={(e) => setPrice(e.target.value)}
-                placeholder="0.00"
-                required
-                min="0.01"
-                step="0.01"
-              />
-            </div>
-          )}
+          {/* Timeframe */}
+          <div>
+            <Label htmlFor="timeframe">Timeframe</Label>
+            <Select onValueChange={handleTimeframeChange} value={timeframe}>
+              <SelectTrigger id="timeframe">
+                <SelectValue placeholder="Select timeframe" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="intraday">Intraday (Auto square-off at 3:25 PM)</SelectItem>
+                {action === "BUY" && <SelectItem value="delivery">Delivery</SelectItem>}
+                {action === "SELL" && (
+                  <>
+                    <SelectItem value="delivery">Permanent (Until Exit)</SelectItem>
+                    <SelectItem value="1month">1 Month</SelectItem>
+                    <SelectItem value="1year">1 Year</SelectItem>
+                  </>
+                )}
+              </SelectContent>
+            </Select>
+          </div>
 
-          {(orderType === "STOP_LOSS" || orderType === "STOP_LIMIT" || orderType === "BRACKET") && (
-            <div>
-              <Label htmlFor="stopPrice">
-                {orderType === "BRACKET" ? "Stop-Loss Price" : "Stop Price (Trigger)"}
-              </Label>
-              <Input
-                id="stopPrice"
-                type="number"
-                value={stopPrice}
-                onChange={(e) => setStopPrice(e.target.value)}
-                placeholder="0.00"
-                required
-                min="0.01"
-                step="0.01"
-              />
-            </div>
-          )}
+          {/* Stop Loss (Optional) */}
+          <div>
+            <Label htmlFor="stopLoss">Stop Loss (Optional)</Label>
+            <Input
+              id="stopLoss"
+              type="number"
+              value={stopLoss}
+              onChange={(e) => setStopLoss(e.target.value)}
+              placeholder="0.00"
+              min="0.01"
+              step="0.01"
+            />
+          </div>
 
-          {orderType === "BRACKET" && (
-            <div>
-              <Label htmlFor="targetPrice">Target Price</Label>
-              <Input
-                id="targetPrice"
-                type="number"
-                value={targetPrice}
-                onChange={(e) => setTargetPrice(e.target.value)}
-                placeholder="0.00"
-                required
-                min="0.01"
-                step="0.01"
-              />
-              <p className="text-xs text-gray-500 mt-1 flex items-start gap-1">
-                <Info className="h-3 w-3 mt-0.5 flex-shrink-0" />
-                <span>Creates 3 orders: Entry + Stop-Loss + Target</span>
-              </p>
-            </div>
-          )}
+          {/* Target (Optional) */}
+          <div>
+            <Label htmlFor="target">Target (Optional)</Label>
+            <Input
+              id="target"
+              type="number"
+              value={target}
+              onChange={(e) => setTarget(e.target.value)}
+              placeholder="0.00"
+              min="0.01"
+              step="0.01"
+            />
+          </div>
 
-          {orderType === "TRAILING_STOP" && (
+          {/* Available Balance / Margin */}
+          <div className="grid grid-cols-2 gap-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
             <div>
-              <Label htmlFor="trailingStopPct">Trailing Stop %</Label>
-              <Input
-                id="trailingStopPct"
-                type="number"
-                value={trailingStopPct}
-                onChange={(e) => setTrailingStopPct(e.target.value)}
-                placeholder="e.g. 2.5"
-                required
-                min="0.1"
-                max="50"
-                step="0.1"
-              />
-              <p className="text-xs text-gray-500 mt-1 flex items-start gap-1">
-                <Info className="h-3 w-3 mt-0.5 flex-shrink-0" />
-                <span>Stop price adjusts automatically with market movement</span>
-              </p>
+              <p className="text-sm text-gray-600">Available Balance</p>
+              <p className="font-semibold text-lg">{formatCurrency(availableBalance)}</p>
             </div>
-          )}
+            <div>
+              <p className="text-sm text-gray-600">{action === "BUY" ? "Margin Required" : "Estimated Proceeds"}</p>
+              <p className="font-semibold text-lg">{formatCurrency(action === "BUY" ? marginRequired : totalAmount)}</p>
+            </div>
+          </div>
 
-          {action === "SELL" && productType === "MIS" && (
-            <div className="flex items-center gap-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-              <input
-                type="checkbox"
-                id="allowShort"
-                checked={allowShort}
-                onChange={(e) => setAllowShort(e.target.checked)}
-                className="h-4 w-4"
-              />
-              <Label htmlFor="allowShort" className="text-sm cursor-pointer">
-                Allow short selling (MIS only, must cover by 3:25 PM)
-              </Label>
+          {/* Charges */}
+          <div className="p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <div className="flex justify-between items-center">
+              <span className="text-sm text-gray-600">Charges</span>
+              <span className="font-semibold">{formatCurrency(charges)}</span>
+            </div>
+          </div>
+
+          {/* Warning for insufficient funds */}
+          {action === "BUY" && marginRequired > availableBalance && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2 text-red-700">
+              <AlertCircle className="h-5 w-5" />
+              <span className="text-sm">Insufficient balance. Required: {formatCurrency(marginRequired)}</span>
             </div>
           )}
           
           {error && <p className="text-sm text-red-500 text-center">{error}</p>}
 
-          <Button type="submit" className="w-full" disabled={isLoading}>
+          <Button 
+            type="submit" 
+            className="w-full" 
+            disabled={isLoading || (action === "BUY" && marginRequired > availableBalance)}
+          >
             {isLoading ? <Loader2 className="animate-spin mx-auto" /> : `Place ${action} Order`}
           </Button>
         </form>

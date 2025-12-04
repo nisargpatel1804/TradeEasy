@@ -12,7 +12,7 @@ profile_bp = Blueprint('profile', __name__)
 # --- Constants for Validation ---
 USERNAME_REGEX = re.compile(r"^[a-zA-Z0-9_]{3,20}$")
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
-MOBILE_REGEX = re.compile(r"^\+91[6-9]\d{9}$")
+MOBILE_REGEX = re.compile(r"^\+91\d{10}$")
 
 # --- API Routes ---
 

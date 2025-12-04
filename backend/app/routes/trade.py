@@ -402,7 +402,8 @@ def _execute_buy_order(user, trade_data, idempotency_key):
 
 
 def _execute_sell_order(user, trade_data, idempotency_key, allow_short=False):
-    """Execute a sell order and update holdings, lots, and balance."""
+    """Execute a sell order and update holdings, lots, and balance.
+    NOTE: Partial sells are NOT allowed - user must have enough shares or explicitly short sell."""
     symbol = trade_data['symbol']
     quantity = int(trade_data['quantity'])
     price = Decimal(str(trade_data['execution_price']))
@@ -413,17 +414,31 @@ def _execute_sell_order(user, trade_data, idempotency_key, allow_short=False):
     on_hand_qty = holding.quantity if holding else 0
     available_qty = max(0, on_hand_qty - reserved_qty)
 
-    shares_from_holding = min(quantity, available_qty)
-    short_qty = quantity - shares_from_holding
-
-    if short_qty > 0 and not (allow_short and product_type == 'MIS'):
+    # Check if this is a pure short sell (no holdings)
+    if available_qty == 0:
+        if allow_short and product_type == 'MIS':
+            # Pure short sell - all quantity goes to short position
+            short_qty = quantity
+            shares_from_holding = 0
+        else:
+            raise ValueError(f"No {symbol} shares available to sell. For short selling, use MIS (Intraday) and enable short sell option.")
+    # Check if user has enough shares
+    elif available_qty < quantity:
+        # Insufficient shares - do NOT allow partial sell
         if reserved_qty > 0:
             raise ValueError(
-                f"Only {available_qty} unreserved {symbol} shares are available (reserved {reserved_qty})."
+                f"Insufficient shares to sell. You have {on_hand_qty} {symbol} shares, but {reserved_qty} are reserved for pending orders. "
+                f"Available: {available_qty}, Required: {quantity}. Cancel pending orders or reduce quantity."
             )
-        if product_type == 'MIS':
-            raise ValueError("Insufficient MIS shares available. Enable short selling during market hours to place this order.")
-        raise ValueError("Insufficient shares to sell")
+        else:
+            raise ValueError(
+                f"Insufficient shares to sell. You have {available_qty} {symbol} shares, but trying to sell {quantity}. "
+                f"Reduce quantity to {available_qty} or less."
+            )
+    else:
+        # User has enough shares - normal sell from holdings
+        shares_from_holding = quantity
+        short_qty = 0
 
     # Sell shares backed by holdings
     if shares_from_holding > 0:

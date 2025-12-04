@@ -298,6 +298,7 @@ const Navbar = () => {
                 <Link to="/watchlist" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-md text-sm font-medium">Watchlist</Link>
                 <Link to="/portfolio" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-md text-sm font-medium">Portfolio</Link>
                 <Link to="/orders" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-md text-sm font-medium">Orders</Link>
+                <Link to="/performance" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-md text-sm font-medium">Performance</Link>
               </div>
             </div>
           </div>
@@ -404,6 +405,7 @@ const Navbar = () => {
             <Link to="/watchlist" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white block px-3 py-2 rounded-md text-base font-medium">Watchlist</Link>
             <Link to="/portfolio" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white block px-3 py-2 rounded-md text-base font-medium">Portfolio</Link>
             <Link to="/orders" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white block px-3 py-2 rounded-md text-base font-medium">Orders</Link>
+            <Link to="/performance" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white block px-3 py-2 rounded-md text-base font-medium">Performance</Link>
           </div>
         </div>
       )}

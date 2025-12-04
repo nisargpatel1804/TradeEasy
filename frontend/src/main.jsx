@@ -13,7 +13,7 @@ import './index.css';
  *
  * We wrap the entire App component with essential providers:
  * 1. <Router>: Enables client-side routing for the entire application.
- * 2. <ThemeProvider>: Manages dark/light mode theme state globally.
+ * 2. <ThemeProvider>: Ensures a consistent light theme across the app.
  * 3. <AuthProvider>: Manages and provides global authentication state (e.g., isLoggedIn).
  *    It must be inside the Router because its hooks might use navigation.
  * 4. <SocketProvider>: Manages WebSocket connections based on authentication state.
