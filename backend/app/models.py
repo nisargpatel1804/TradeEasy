@@ -117,6 +117,10 @@ class Transaction(Document):
     execution_date = DateTimeField()  # When pending order was actually executed
     square_off_time = DateTimeField()  # Auto square-off timestamp for MIS orders
     original_price = FloatField()  # Original limit/stop price (before execution price override)
+    
+    # Legacy/additional fields for backward compatibility with old database records
+    is_portfolio_exit = BooleanField()  # Legacy field - marks portfolio exit transactions
+    metadata = StringField()  # Legacy field - additional transaction metadata
 
     meta = {
         'collection': 'transactions',

@@ -88,7 +88,9 @@ class PriceUpdateService {
     };
 
     // Batch update handlers for improved performance
-    this._stockBatchUpdateHandler = (dataArray = []) => {
+    this._stockBatchUpdateHandler = (payload = {}) => {
+      // Backend sends { updates: [...] }
+      const dataArray = payload.updates || [];
       if (!Array.isArray(dataArray) || dataArray.length === 0) {
         return;
       }
@@ -121,7 +123,9 @@ class PriceUpdateService {
       }
     };
 
-    this._indexBatchUpdateHandler = (dataArray = []) => {
+    this._indexBatchUpdateHandler = (payload = {}) => {
+      // Backend sends { updates: [...] }
+      const dataArray = payload.updates || [];
       if (!Array.isArray(dataArray) || dataArray.length === 0) {
         return;
       }
@@ -316,15 +320,26 @@ class PriceUpdateService {
     return snapshot;
   }
 
-  _createBroadcastPayload({ type = 'snapshot', symbol = null } = {}) {
+  _createBroadcastPayload({ type = 'snapshot', symbol = null, symbols = null } = {}) {
     const allPrices = this._cloneLatestPrices();
-    const changedPrices = symbol && allPrices[symbol]
-      ? { [symbol]: { ...allPrices[symbol] } }
-      : {};
+    
+    // Handle batch updates with multiple symbols
+    let changedPrices = {};
+    if (symbols && Array.isArray(symbols) && symbols.length > 0) {
+      symbols.forEach(sym => {
+        if (allPrices[sym]) {
+          changedPrices[sym] = { ...allPrices[sym] };
+        }
+      });
+    } else if (symbol && allPrices[symbol]) {
+      // Handle single symbol update
+      changedPrices = { [symbol]: { ...allPrices[symbol] } };
+    }
 
     return {
       type,
       symbol,
+      symbols,
       data: symbol && allPrices[symbol] ? { ...allPrices[symbol] } : null,
       changedPrices,
       allPrices,

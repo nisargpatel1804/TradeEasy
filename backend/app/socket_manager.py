@@ -383,18 +383,10 @@ class MO_WebSocket_Manager:
 
         if not index_info or ltp <= 0: return
         
-        # Validate index price ranges
-        index_name = index_info.get('name', '')
-        if 'NIFTY' in index_name and (ltp < 5000 or ltp > 50000):
-            logger.warning(f"⚠️ Unusual NIFTY index value: {ltp}")
-            if ltp < 1000 or ltp > 100000:
-                logger.error(f"❌ Rejecting invalid NIFTY value: {ltp}")
-                return
-        elif 'SENSEX' in index_name and (ltp < 20000 or ltp > 150000):
-            logger.warning(f"⚠️ Unusual SENSEX index value: {ltp}")
-            if ltp < 5000 or ltp > 200000:
-                logger.error(f"❌ Rejecting invalid SENSEX value: {ltp}")
-                return
+        # Basic sanity check for extremely invalid values only
+        if ltp < 100 or ltp > 200000:
+            logger.error(f"❌ Rejecting invalid index value for {index_info.get('name', '')}: {ltp}")
+            return
 
         exchange_key = index_info.get('exchange', '').upper()
         prev_close = self.scrip_prev_close.get(f"{exchange_key}:{scrip_code_str}", 0.0)
@@ -649,16 +641,10 @@ class MO_WebSocket_Manager:
                 if self.is_connected and self.ws_authed:
                     current_time = time.time()
                     
-                    # Send heartbeat ping
-                    if self.last_heartbeat_sent and (current_time - self.last_heartbeat_sent) >= self.heartbeat_interval:
-                        try:
-                            # Send a ping via WebSocket
-                            if self.mo_api.ws:
-                                self.mo_api.ws.ping()
-                                self.last_heartbeat_sent = current_time
-                                logger.debug("Heartbeat ping sent")
-                        except Exception as e:
-                            logger.warning(f"Failed to send heartbeat ping: {e}")
+                    # Track heartbeat timing (actual ping/pong handled by websocket library)
+                    if self.last_heartbeat_sent is None or (current_time - self.last_heartbeat_sent) >= self.heartbeat_interval:
+                        self.last_heartbeat_sent = current_time
+                        logger.debug("Heartbeat interval marker updated")
                     
                     # Check for heartbeat timeout (no data received)
                     if self.last_heartbeat_received:
