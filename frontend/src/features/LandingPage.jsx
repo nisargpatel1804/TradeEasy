@@ -18,7 +18,14 @@ import {
   Zap,
   Target,
   ArrowRight,
+  Users,
+  Clock,
+  DollarSign,
+  Award,
+  CheckCircle2,
+  Sparkles,
 } from "lucide-react";
+import "../assets/css/Landing.css";
 
 // The words to animate in the hero section
 const words = ["trader", "investor", "analyst", "enthusiast"];
@@ -40,13 +47,13 @@ const LandingPage = () => {
   }, []);
 
   return (
-    <div className="bg-white text-gray-800">
+    <div className="landing-container">
       {/* --- Header --- */}
-      <header className="fixed top-0 left-0 right-0 z-50 bg-white/80 backdrop-blur-lg border-b border-gray-200">
-        <nav className="container mx-auto px-6 py-3 flex justify-between items-center">
-          <Link to="/" className="flex items-center gap-2">
-            <TrendingUp className="h-7 w-7 text-blue-600" />
-            <span className="text-xl font-bold text-gray-900">TradeEasy</span>
+      <header className="landing-header">
+        <nav className="landing-nav">
+          <Link to="/" className="landing-logo">
+            <TrendingUp className="landing-logo-icon h-7 w-7" />
+            <span>TradeEasy</span>
           </Link>
 
           {/* Desktop Navigation */}
@@ -109,16 +116,16 @@ const LandingPage = () => {
       {/* --- Main Content --- */}
       <main>
         {/* Hero Section */}
-        <section className="pt-32 pb-20 text-center bg-gray-50">
-          <div className="container mx-auto px-6">
+        <section className="landing-hero">
+          <div className="landing-hero-content">
             <motion.h1
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.8 }}
-              className="text-4xl md:text-6xl font-extrabold text-gray-900 leading-tight"
+              className="landing-hero-title"
             >
               Every{" "}
-              <span className="text-blue-600 inline-block">
+              <span className="landing-hero-animated-word">
                 <AnimatePresence mode="wait">
                   <motion.span
                     key={words[wordIndex]}
@@ -139,7 +146,7 @@ const LandingPage = () => {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.8, delay: 0.2 }}
-              className="mt-6 max-w-2xl mx-auto text-lg text-gray-600"
+              className="landing-hero-subtitle"
             >
               Practice trading with virtual money in real market conditions.
               Learn, strategize, and master the art of trading without risking real capital.
@@ -149,53 +156,160 @@ const LandingPage = () => {
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.8, delay: 0.4 }}
-                className="mt-8 flex justify-center gap-4"
+                className="landing-hero-cta"
               >
-                <Button asChild size="lg" className="group">
-                  <MotionLink to="/signup">
-                    Get Started Free
-                    <ArrowRight className="ml-2 h-5 w-5 transition-transform group-hover:translate-x-1" />
-                  </MotionLink>
-                </Button>
+                <Link to="/signup" className="landing-btn-primary">
+                  <span>Get Started Free</span>
+                  <ArrowRight className="h-5 w-5" />
+                </Link>
               </motion.div>
             )}
           </div>
         </section>
 
+        {/* Stats Section */}
+        <section className="landing-stats">
+          <div className="landing-stats-grid">
+            <motion.div
+              initial={{ opacity: 0, y: 30 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.5 }}
+              className="landing-stat-card"
+            >
+              <Users className="w-10 h-10 mx-auto mb-3 text-blue-600" />
+              <div className="landing-stat-number">10K+</div>
+              <div className="landing-stat-label">Active Traders</div>
+            </motion.div>
+            <motion.div
+              initial={{ opacity: 0, y: 30 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.5, delay: 0.1 }}
+              className="landing-stat-card"
+            >
+              <Clock className="w-10 h-10 mx-auto mb-3 text-purple-600" />
+              <div className="landing-stat-number">24/7</div>
+              <div className="landing-stat-label">Market Access</div>
+            </motion.div>
+            <motion.div
+              initial={{ opacity: 0, y: 30 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.5, delay: 0.2 }}
+              className="landing-stat-card"
+            >
+              <DollarSign className="w-10 h-10 mx-auto mb-3 text-green-600" />
+              <div className="landing-stat-number">₹10L</div>
+              <div className="landing-stat-label">Virtual Capital</div>
+            </motion.div>
+            <motion.div
+              initial={{ opacity: 0, y: 30 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.5, delay: 0.3 }}
+              className="landing-stat-card"
+            >
+              <Award className="w-10 h-10 mx-auto mb-3 text-yellow-600" />
+              <div className="landing-stat-number">100%</div>
+              <div className="landing-stat-label">Risk-Free</div>
+            </motion.div>
+          </div>
+        </section>
+
         {/* Features Section */}
-        <section className="py-20">
-          <div className="container mx-auto px-6">
-            <div className="text-center mb-12">
-              <h2 className="text-3xl md:text-4xl font-bold text-gray-900">Why Choose TradeEasy?</h2>
-              <p className="mt-4 text-lg text-gray-600">The tools you need to succeed in a risk-free environment.</p>
+        <section className="landing-features">
+          <div className="landing-section-header">
+            <h2 className="landing-section-title">Why Choose TradeEasy?</h2>
+            <p className="landing-section-subtitle">
+              The tools you need to succeed in a risk-free environment.
+            </p>
+          </div>
+          <div className="landing-features-grid">
+            {features.map((feature, index) => (
+              <motion.div
+                key={index}
+                initial={{ opacity: 0, y: 30 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ duration: 0.5, delay: index * 0.1 }}
+                className="landing-feature-card"
+              >
+                <div className="landing-feature-icon-wrapper">
+                  <feature.icon className="h-7 w-7" />
+                </div>
+                <h3 className="landing-feature-title">{feature.title}</h3>
+                <p className="landing-feature-description">{feature.description}</p>
+              </motion.div>
+            ))}
+          </div>
+        </section>
+
+        {/* Benefits Section */}
+        <section className="py-20 px-6 bg-gradient-to-br from-slate-50 to-blue-50">
+          <div className="max-w-6xl mx-auto">
+            <div className="landing-section-header">
+              <h2 className="landing-section-title">Everything You Need to Succeed</h2>
+              <p className="landing-section-subtitle">
+                A complete trading platform designed for learning and growth.
+              </p>
             </div>
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
-              {features.map((feature, index) => (
+            <div className="grid md:grid-cols-2 gap-8 mt-12">
+              {benefits.map((benefit, index) => (
                 <motion.div
                   key={index}
-                  initial={{ opacity: 0, y: 30 }}
-                  whileInView={{ opacity: 1, y: 0 }}
+                  initial={{ opacity: 0, x: index % 2 === 0 ? -30 : 30 }}
+                  whileInView={{ opacity: 1, x: 0 }}
                   viewport={{ once: true }}
                   transition={{ duration: 0.5, delay: index * 0.1 }}
-                  className="bg-white p-6 rounded-xl border border-gray-200 shadow-sm"
+                  className="flex gap-4 p-6 bg-white rounded-xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow"
                 >
-                  <div className="flex items-center justify-center h-12 w-12 rounded-full bg-blue-100 text-blue-600">
-                    <feature.icon className="h-6 w-6" />
+                  <div className="flex-shrink-0">
+                    <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
+                      <CheckCircle2 className="w-6 h-6 text-white" />
+                    </div>
                   </div>
-                  <h3 className="mt-5 text-xl font-semibold">{feature.title}</h3>
-                  <p className="mt-2 text-gray-600">{feature.description}</p>
+                  <div>
+                    <h3 className="text-lg font-semibold text-slate-900 mb-2">{benefit.title}</h3>
+                    <p className="text-slate-600">{benefit.description}</p>
+                  </div>
                 </motion.div>
               ))}
             </div>
           </div>
         </section>
+
+        {/* CTA Section */}
+        {!isAuthenticated && (
+          <section className="landing-cta">
+            <div className="landing-cta-content">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                whileInView={{ opacity: 1, scale: 1 }}
+                viewport={{ once: true }}
+                transition={{ duration: 0.6 }}
+              >
+                <Sparkles className="w-16 h-16 mx-auto mb-6 text-yellow-300" />
+                <h2 className="landing-cta-title">Ready to Start Your Trading Journey?</h2>
+                <p className="landing-cta-subtitle">
+                  Join thousands of traders learning and growing on TradeEasy. 
+                  Start with ₹10,00,000 virtual capital today.
+                </p>
+                <Link to="/signup" className="landing-cta-button">
+                  <span>Create Free Account</span>
+                  <ArrowRight className="h-5 w-5" />
+                </Link>
+              </motion.div>
+            </div>
+          </section>
+        )}
       </main>
 
       {/* --- Footer --- */}
-      <footer className="bg-gray-900 text-white">
-        <div className="container mx-auto px-6 py-8 text-center">
-            <p>© {new Date().getFullYear()} TradeEasy. All rights reserved.</p>
-            <p className="text-sm text-gray-400 mt-2">A virtual trading platform for educational purposes.</p>
+      <footer className="landing-footer">
+        <div className="landing-footer-content">
+          <p className="landing-footer-text">© {new Date().getFullYear()} TradeEasy. All rights reserved.</p>
+          <p className="landing-footer-subtext">A virtual trading platform for educational purposes.</p>
         </div>
       </footer>
     </div>
@@ -232,6 +346,33 @@ const features = [
     title: "Performance Tracking",
     description: "Get detailed insights from your trading history to improve your strategy.",
     icon: Target,
+  },
+];
+
+const benefits = [
+  {
+    title: "No Credit Card Required",
+    description: "Start trading immediately with no payment information needed. Just sign up and go.",
+  },
+  {
+    title: "Real Market Conditions",
+    description: "Experience live market data and prices from NSE and BSE exchanges.",
+  },
+  {
+    title: "Comprehensive Analytics",
+    description: "Track your performance with detailed charts, reports, and insights.",
+  },
+  {
+    title: "Multiple Watchlists",
+    description: "Create and manage multiple watchlists to organize your trading ideas.",
+  },
+  {
+    title: "Order History",
+    description: "Review all your past trades with complete transaction history and details.",
+  },
+  {
+    title: "Educational Platform",
+    description: "Learn trading strategies and market analysis in a zero-risk environment.",
   },
 ];
 

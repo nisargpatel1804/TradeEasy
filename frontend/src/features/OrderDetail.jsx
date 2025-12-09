@@ -7,6 +7,17 @@ import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx"
 import { Skeleton } from "../assets/ui/skeleton.jsx";
 import { ArrowLeft, ShoppingCart, Tag, Hash, Calendar, HelpCircle, TrendingUp, TrendingDown } from "lucide-react";
 
+const formatStatus = (status = "") => {
+  if (!status) return "Unknown";
+  return status
+    .toString()
+    .toLowerCase()
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+};
+
 const OrderDetail = () => {
   const { orderId } = useParams();
   const [order, setOrder] = useState(null);
@@ -24,22 +35,12 @@ const OrderDetail = () => {
       setIsLoading(true);
       setError(null);
       try {
-        // NOTE: The backend does not currently support fetching a single order.
-        // This is a placeholder for when `fetchOrderDetail(orderId)` is implemented.
-        // For now, we will simulate this by fetching all orders and finding the one.
-        const data = await api.fetchOrders();
-        if (data.success) {
-            const allOrders = [...(data.executed || []), ...(data.pending || [])];
-            const foundOrder = allOrders.find(o => o.id === orderId);
-            if(foundOrder) {
-                setOrder(foundOrder);
-            } else {
-                throw new Error(`Order with ID ${orderId} not found.`);
-            }
+        const data = await api.fetchOrderDetail(orderId);
+        if (data.success && data.order) {
+          setOrder(data.order);
         } else {
-            throw new Error(data.message || "Failed to fetch orders.");
+          throw new Error(data.message || `Order with ID ${orderId} not found.`);
         }
-
       } catch (err) {
         const errorMessage = err.message || "Could not load order details.";
         setError(errorMessage);
@@ -112,10 +113,10 @@ const OrderDetail = () => {
             <DetailItem icon={Calendar} label="Date" value={new Date(order.date).toLocaleString()} />
             <div className="sm:col-span-2">
                  <DetailItem 
-                    icon={HelpCircle} 
-                    label="Status" 
-                    value={order.status.charAt(0).toUpperCase() + order.status.slice(1)}
-                    className="font-bold"
+                  icon={HelpCircle} 
+                  label="Status" 
+                  value={formatStatus(order.status_display || order.status)}
+                  className="font-bold"
                 />
             </div>
           </CardContent>

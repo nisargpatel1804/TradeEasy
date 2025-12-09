@@ -58,8 +58,10 @@ export const SocketProvider = ({ children }) => {
       reconnectionDelay: 2000,
       reconnectionDelayMax: 8000,
       timeout: 60000,
-      transports: ['websocket', 'polling'],
-      upgrade: true,
+      // Use polling-only to prevent "Invalid frame header" errors
+      // until the backend is configured with eventlet/gevent for native WebSocket support
+      transports: ['polling'],
+      upgrade: false,
     });
 
     let isShuttingDown = false;

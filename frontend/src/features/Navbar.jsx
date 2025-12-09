@@ -1,12 +1,11 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useDataContext } from '../context/DataContext.jsx';
 import { useSocket } from '../context/SocketContext.jsx';
-import * as api from '../services/api.js';
 import priceUpdateService from '../services/priceUpdateService.js';
+import * as api from '../services/api.js';
 import { Button } from '../assets/ui/button.jsx';
-import { Input } from '../assets/ui/input.jsx';
 import { Avatar, AvatarFallback } from '../assets/ui/Avatar.jsx';
 import {
   DropdownMenu,
@@ -16,44 +15,78 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '../assets/ui/dropdown-menu.jsx';
-import { Search, LogOut, User, Menu, X, Loader2, Plus, TrendingUp } from 'lucide-react';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../assets/ui/dialog.jsx';
+import { LogOut, User, Menu, Bell, Plus, ArrowRight, Loader2 } from 'lucide-react';
 import { useToast } from '../assets/ui/use-toast.js';
-import debounce from 'lodash.debounce';
 
-const HEADLINE_INDEX_CONFIG = {
-  'NSE:26000': { label: 'Nifty 50' },
-  'BSE:999901': { label: 'Sensex' },
+const TICKER_CONFIG = [
+  {
+    key: 'nifty50',
+    label: 'Nifty 50',
+    hints: ['NSE:26000', 'NIFTY 50', 'NIFTY50'],
+  },
+  {
+    key: 'gift_nifty',
+    label: 'Gift Nifty',
+    hints: ['NSEIFSC:NIFTY', 'GIFT NIFTY', 'GIFTNIFTY'],
+  },
+  {
+    key: 'india_vix',
+    label: 'India VIX',
+    hints: ['INDIA VIX', 'NSE:INDIAVIX', 'INDIAVIX'],
+  },
+];
+
+const findIndexMatch = (priceMap = {}, config) => {
+  if (!priceMap || !config) {
+    return null;
+  }
+
+  for (const hint of config.hints || []) {
+    if (priceMap[hint]) {
+      return priceMap[hint];
+    }
+  }
+
+  const fallbackKey = Object.keys(priceMap).find((symbol) => {
+    const item = priceMap[symbol];
+    const normalizedName = item?.name?.toLowerCase() || '';
+    return normalizedName.includes((config.label || '').toLowerCase());
+  });
+
+  return fallbackKey ? priceMap[fallbackKey] : null;
 };
 
-const HEADLINE_SYMBOLS = Object.keys(HEADLINE_INDEX_CONFIG);
+const RESET_NOTE = 'Clears holdings, positions, orders, and performance data.';
+const WALLET_LIMIT_OPTIONS = [
+  { label: '₹10 Lakh', value: 1_000_000, warning: RESET_NOTE },
+  { label: '₹25 Lakh', value: 2_500_000, warning: RESET_NOTE },
+  { label: '₹50 Lakh', value: 5_000_000, warning: RESET_NOTE },
+  { label: '₹1 Crore', value: 10_000_000, warning: RESET_NOTE },
+];
 
-const Navbar = () => {
+const Navbar = ({ onToggleSidebar }) => {
   const { isAuthenticated, logout, user } = useAuth();
-  const { profileData, getProfile, watchlistsData, getWatchlists, indicesData } = useDataContext();
-  const { isConnected, connectionStatus, isReconnecting, lastError } = useSocket();
+  const { profileData, indicesData, refreshProfile } = useDataContext();
+  const { isConnected, connectionStatus } = useSocket();
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState([]);
-  const [isSearchLoading, setIsSearchLoading] = useState(false);
-  const [isSearchFocused, setIsSearchFocused] = useState(false);
-  const searchRef = useRef(null);
-
   const [headlineIndices, setHeadlineIndices] = useState(() =>
-    HEADLINE_SYMBOLS.reduce((acc, symbol) => {
-      acc[symbol] = null;
+    TICKER_CONFIG.reduce((acc, item) => {
+      acc[item.key] = null;
       return acc;
     }, {})
   );
+  const [isWalletDialogOpen, setIsWalletDialogOpen] = useState(false);
+  const [selectedWalletLimit, setSelectedWalletLimit] = useState(null);
+  const [isUpdatingWallet, setIsUpdatingWallet] = useState(false);
 
-  const normaliseIndexPayload = useCallback((payload = {}, symbol) => {
-    if (!payload || !symbol) {
+  const normaliseIndexPayload = useCallback((payload = {}, config) => {
+    if (!payload || !config) {
       return null;
     }
 
-    const config = HEADLINE_INDEX_CONFIG[symbol] || {};
     const coerceNumber = (value) => {
       if (typeof value === 'number' && Number.isFinite(value)) {
         return value;
@@ -71,9 +104,9 @@ const Navbar = () => {
     }
 
     return {
-      symbol,
-      name: payload.name || config.label || symbol,
-      label: config.label || payload.name || symbol,
+      symbol: payload.symbol,
+      name: payload.name || config.label || payload.symbol,
+      label: config.label || payload.name || payload.symbol,
       price,
       change: change ?? 0,
       percentChange: percentChange ?? 0,
@@ -89,19 +122,20 @@ const Navbar = () => {
       let mutated = false;
       const next = { ...prev };
 
-      HEADLINE_SYMBOLS.forEach((symbol) => {
-        const normalized = normaliseIndexPayload(priceMap[symbol], symbol);
+      TICKER_CONFIG.forEach((config) => {
+        const match = findIndexMatch(priceMap, config);
+        const normalized = normaliseIndexPayload(match, config);
         if (!normalized) {
           return;
         }
 
-        const current = prev[symbol];
+        const current = prev[config.key];
         if (!current ||
           current.price !== normalized.price ||
           current.change !== normalized.change ||
           current.percentChange !== normalized.percentChange ||
           current.name !== normalized.name) {
-          next[symbol] = normalized;
+          next[config.key] = normalized;
           mutated = true;
         }
       });
@@ -110,71 +144,19 @@ const Navbar = () => {
     });
   }, [normaliseIndexPayload]);
 
-  const formatNumber = (value, fractionDigits = 2) => {
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
-      return '--';
+  const handleLogout = async () => {
+    try {
+      await logout();
+      toast({ title: 'Logged Out', description: 'You have been successfully logged out.' });
+    } catch (error) {
+      console.error("Logout failed:", error);
+      toast({ 
+        title: 'Logout Failed', 
+        description: 'Could not log out. Please try again or clear your cookies.',
+        variant: 'destructive'
+      });
     }
-    return value.toLocaleString('en-IN', {
-      minimumFractionDigits: fractionDigits,
-      maximumFractionDigits: fractionDigits,
-    });
   };
-
-  const formatSigned = (value, fractionDigits = 2) => {
-    if (typeof value !== 'number' || !Number.isFinite(value)) {
-      return '--';
-    }
-    const sign = value > 0 ? '+' : value < 0 ? '-' : '';
-    const absValue = Math.abs(value).toFixed(fractionDigits);
-    return sign ? `${sign}${absValue}` : absValue;
-  };
-
-  const getTrendClass = (value) => {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value === 0) {
-      return 'text-gray-500 dark:text-gray-400';
-    }
-    return value > 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400';
-  };
-
-  // Fetch profile and watchlists on mount if authenticated
-  useEffect(() => {
-    if (isAuthenticated) {
-      getProfile();
-      getWatchlists();
-    }
-  }, [isAuthenticated, getProfile, getWatchlists]);
-
-  const handleLogout = () => {
-    logout();
-    toast({ title: 'Logged Out', description: 'You have been successfully logged out.' });
-    navigate('/login');
-  };
-
-  const debouncedSearch = useCallback(
-    debounce(async (query) => {
-      if (query.length < 2) {
-        setSearchResults([]);
-        setIsSearchLoading(false);
-        return;
-      }
-      try {
-        const results = await api.searchStocks(query);
-        setSearchResults(results || []);
-      } catch (error) {
-        console.error("Search failed:", error);
-        setSearchResults([]);
-      } finally {
-        setIsSearchLoading(false);
-      }
-    }, 300),
-    []
-  );
-
-  useEffect(() => {
-    setIsSearchLoading(true);
-    debouncedSearch(searchQuery);
-    return () => debouncedSearch.cancel();
-  }, [searchQuery, debouncedSearch]);
 
   useEffect(() => {
     if (!Array.isArray(indicesData) || indicesData.length === 0) {
@@ -203,213 +185,239 @@ const Navbar = () => {
     };
   }, [updateHeadlineFromMap]);
 
-  // Handle click outside of search to close results
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (searchRef.current && !searchRef.current.contains(event.target)) {
-        setIsSearchFocused(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  const handleAddStock = async (e, stock) => {
-    e.stopPropagation();
-    const defaultWatchlist = watchlistsData?.watchlists.find(w => !w.is_deletable);
-    if (!defaultWatchlist) {
-      toast({ title: 'Error', description: 'Default watchlist not found.', variant: 'destructive' });
-      return;
-    }
-    const existingSymbols = new Set((defaultWatchlist.stocks || []).map(item => item?.symbol?.toUpperCase()).filter(Boolean));
-    if (existingSymbols.has(stock.symbol.toUpperCase())) {
-      toast({
-        title: 'Already added',
-        description: `${stock.symbol} is already in ${defaultWatchlist.name}.`,
-      });
-      setSearchQuery('');
-      return;
-    }
-    try {
-      await api.addStockToWatchlist(defaultWatchlist.name, {
-        symbol: stock.symbol,
-        name: stock.name,
-        scripcode: stock.scripcode
-      });
-      toast({ title: 'Success', description: `${stock.symbol} added to ${defaultWatchlist.name}.` });
-      getWatchlists(true); // Refresh watchlist data
-      setSearchQuery(''); // Clear search
-    } catch (error) {
-      const friendlyMessage = error?.status === 409
-        ? `${stock.symbol} is already in ${defaultWatchlist.name}.`
-        : (error?.message || 'Unable to add stock to watchlist.');
-      toast({ title: 'Error', description: friendlyMessage, variant: 'destructive' });
-    }
-  };
-
   if (!isAuthenticated) {
     return null; // Don't render navbar on auth pages
   }
 
   const profileInitial = profileData?.username?.charAt(0).toUpperCase() || user?.username?.charAt(0).toUpperCase() || 'U';
+  const walletBalance = useMemo(() => {
+    const amount = profileData?.available_balance ?? profileData?.balance ?? 0;
+    if (typeof amount !== 'number') {
+      return '₹0.00';
+    }
+    return amount.toLocaleString('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+  }, [profileData]);
+
+  const handleWalletLimitSubmit = useCallback(async () => {
+    if (!selectedWalletLimit) {
+      return;
+    }
+    setIsUpdatingWallet(true);
+    try {
+      const response = await api.updateWalletLimit(selectedWalletLimit);
+      const message = response?.message || 'Wallet limit updated.';
+      toast({ title: 'Wallet updated', description: message });
+      await refreshProfile();
+      setIsWalletDialogOpen(false);
+    } catch (error) {
+      toast({
+        title: 'Unable to reset wallet',
+        description: error.message || 'Please try again later.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsUpdatingWallet(false);
+    }
+  }, [selectedWalletLimit, toast, refreshProfile]);
+
+  useEffect(() => {
+    if (!isWalletDialogOpen) {
+      setSelectedWalletLimit(null);
+    }
+  }, [isWalletDialogOpen]);
+
+  const tickerItems = useMemo(() => {
+    return TICKER_CONFIG.map((config) => {
+      const data = headlineIndices[config.key];
+      return {
+        key: config.key,
+        label: config.label,
+        price: data?.price ?? null,
+        change: data?.change ?? null,
+        percent: data?.percentChange ?? null,
+      };
+    });
+  }, [headlineIndices]);
 
   return (
-    <nav className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 sticky top-0 z-50">
-      {/* Indices Header */}
-      <div className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-end gap-6 py-2">
-            {HEADLINE_SYMBOLS.map((symbol) => {
-              const config = HEADLINE_INDEX_CONFIG[symbol];
-              const data = headlineIndices[symbol];
-              const percentValue = data?.percentChange ?? null;
+    <header className="fixed inset-x-0 top-0 z-50 border-b border-slate-200 bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60">
+      <div className="flex items-center justify-between gap-4 px-4 py-3 lg:px-8">
+        <div className="flex items-center gap-3">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="lg:hidden"
+            onClick={onToggleSidebar}
+            aria-label="Open watchlist"
+          >
+            <Menu className="h-5 w-5" />
+          </Button>
+          <Link to="/dashboard" className="flex items-center gap-3 rounded-full bg-amber-50 px-4 py-2 text-amber-800">
+            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-base font-bold text-amber-700 shadow-inner">
+              TE
+            </span>
+            <div>
+              <p className="text-sm font-semibold leading-tight">TradeEasy</p>
+              <div className="text-[10px] font-semibold uppercase tracking-widest text-amber-500">Invest Smarter</div>
+            </div>
+          </Link>
+        </div>
 
-              return (
-                <div key={symbol} className="flex flex-col items-end min-w-[140px]" title={data?.name || config.label}>
-                  <span className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">
-                    {config.label}
-                  </span>
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-sm font-semibold text-gray-900 dark:text-white">
-                      {formatNumber(data?.price)}
-                    </span>
-                    <span className={`text-xs font-semibold ${getTrendClass(percentValue)}`}>
-                      {formatSigned(data?.change)} ({formatSigned(percentValue)}%)
-                    </span>
-                  </div>
+        <div className="hidden flex-1 items-center justify-center gap-4 overflow-x-auto md:flex">
+          {tickerItems.map((item) => (
+            <TickerChip key={item.key} label={item.label} price={item.price} change={item.change} percent={item.percent} />
+          ))}
+          <Link
+            to="/indices"
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-amber-200 bg-amber-50 text-amber-800 transition hover:border-amber-300"
+            aria-label="Open indices overview"
+          >
+            <ArrowRight className="h-4 w-4" />
+          </Link>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="hidden items-center gap-3 rounded-full border border-slate-200 bg-white px-4 py-1.5 shadow-sm sm:flex">
+            <div>
+              <p className="text-xs text-slate-500">Wallet Balance</p>
+              <p className="text-sm font-bold text-slate-900">{walletBalance}</p>
+            </div>
+            <Button
+              size="icon"
+              className="h-8 w-8 rounded-full bg-amber-500 text-white"
+              aria-label="Reset portfolio"
+              onClick={() => setIsWalletDialogOpen(true)}
+            >
+              <Plus className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="flex items-center gap-2 rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-600">
+            <span className={`h-2 w-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+            {connectionStatus === 'reconnecting' ? 'Reconnecting' : isConnected ? 'Live' : 'Offline'}
+          </div>
+          <Button variant="ghost" size="icon" aria-label="Notifications">
+            <Bell className="h-5 w-5 text-slate-600" />
+          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="ghost" className="relative h-9 w-9 rounded-full border border-slate-200">
+                <Avatar className="h-9 w-9">
+                  <AvatarFallback>{profileInitial}</AvatarFallback>
+                </Avatar>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent className="w-56" align="end" forceMount>
+              <DropdownMenuLabel className="font-normal">
+                <div className="flex flex-col space-y-1">
+                  <p className="text-sm font-medium leading-none">{profileData?.username || user?.username}</p>
+                  <p className="text-xs leading-none text-muted-foreground">{profileData?.email}</p>
                 </div>
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={() => navigate('/profile')}>
+                <User className="mr-2 h-4 w-4" />
+                <span>Profile</span>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={handleLogout} className="text-red-600 focus:text-red-600">
+                <LogOut className="mr-2 h-4 w-4" />
+                <span>Log out</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      </div>
+
+      <div className="flex gap-3 overflow-x-auto border-t border-slate-100 px-4 py-2 md:hidden">
+        {tickerItems.map((item) => (
+          <TickerChip key={item.key} label={item.label} price={item.price} change={item.change} percent={item.percent} compact />
+        ))}
+        <Link
+          to="/indices"
+          className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-amber-200 bg-amber-50 text-amber-800"
+          aria-label="Open indices overview"
+        >
+          <ArrowRight className="h-3.5 w-3.5" />
+        </Link>
+      </div>
+
+      <Dialog open={isWalletDialogOpen} onOpenChange={setIsWalletDialogOpen}>
+        <DialogContent className="max-w-lg rounded-3xl">
+          <DialogHeader>
+            <DialogTitle>Reset Wallet Limit</DialogTitle>
+            <DialogDescription>
+              Pick a preset amount to refresh your simulated balance. Every reset clears holdings, positions,
+              orders, and performance data for the selected account.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {WALLET_LIMIT_OPTIONS.map((option) => {
+              const isActive = selectedWalletLimit === option.value;
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setSelectedWalletLimit(option.value)}
+                  className={`rounded-2xl border px-4 py-3 text-left text-sm font-semibold transition ${
+                    isActive ? 'border-amber-500 bg-amber-50 text-amber-900' : 'border-slate-200 bg-white text-slate-700'
+                  }`}
+                >
+                  {option.label}
+                  {option.warning && (
+                    <p className="mt-1 text-xs font-normal text-red-500">{option.warning}</p>
+                  )}
+                </button>
               );
             })}
           </div>
-        </div>
-      </div>
-
-      {/* Main Navbar Body */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16">
-          <div className="flex items-center">
-            <Link to="/dashboard" className="flex-shrink-0 flex items-center gap-2">
-              <TrendingUp className="h-8 w-8 text-blue-600" />
-              <span className="font-bold text-xl text-gray-800 dark:text-white">TradeEasy</span>
-            </Link>
-            <div className="hidden md:block">
-              <div className="ml-10 flex items-baseline space-x-4">
-                <Link to="/dashboard" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-md text-sm font-medium">Dashboard</Link>
-                <Link to="/watchlist" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-md text-sm font-medium">Watchlist</Link>
-                <Link to="/portfolio" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-md text-sm font-medium">Portfolio</Link>
-                <Link to="/orders" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-md text-sm font-medium">Orders</Link>
-                <Link to="/performance" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white px-3 py-2 rounded-md text-sm font-medium">Performance</Link>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-4">
-            {/* Search Bar */}
-            <div className="relative hidden md:block" ref={searchRef}>
-              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                <Search className="h-5 w-5 text-gray-400" />
-              </div>
-              <Input
-                type="text"
-                placeholder="Search stocks..."
-                className="pl-10"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onFocus={() => setIsSearchFocused(true)}
-              />
-              {isSearchFocused && searchQuery && (
-                <div className="absolute mt-2 w-72 rounded-md shadow-lg bg-white dark:bg-gray-800 ring-1 ring-black ring-opacity-5">
-                  {isSearchLoading ? (
-                    <div className="p-4 text-center text-sm text-gray-500">
-                      <Loader2 className="h-5 w-5 animate-spin inline-block"/>
-                    </div>
-                  ) : searchResults.length > 0 ? (
-                    <div className="py-1 max-h-80 overflow-y-auto">
-                      {searchResults.map((stock) => (
-                        <div key={stock.symbol} className="flex items-center justify-between px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-700">
-                           <div className="text-sm cursor-pointer" onClick={() => navigate(`/stock/${stock.symbol}`)}>
-                            <p className="font-medium text-gray-900 dark:text-white">{stock.symbol}</p>
-                            <p className="text-gray-500 dark:text-gray-400 truncate w-40">{stock.name}</p>
-                          </div>
-                           <Button size="sm" variant="ghost" onClick={(e) => handleAddStock(e, stock)}><Plus className="h-4 w-4" /></Button>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="p-4 text-center text-sm text-gray-500">No results found.</div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Connection Status */}
-            <div className="flex items-center gap-2 text-xs font-medium text-gray-500">
-              <span
-                className={`inline-block h-3 w-3 rounded-full ${isConnected ? 'bg-green-500' : isReconnecting ? 'bg-amber-400' : 'bg-red-500'}`}
-                title={
-                  isConnected
-                    ? 'Live market data connected'
-                    : isReconnecting
-                      ? 'Reconnecting to live market data'
-                      : lastError?.message || 'Live market data disconnected'
-                }
-                data-status={connectionStatus}
-              ></span>
-              <span>
-                {connectionStatus === 'reconnecting' ? 'Reconnecting…' : isConnected ? 'Live' : 'Offline'}
-              </span>
-            </div>
-
-            {/* Profile Dropdown */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" className="relative h-8 w-8 rounded-full">
-                  <Avatar className="h-8 w-8">
-                    <AvatarFallback>{profileInitial}</AvatarFallback>
-                  </Avatar>
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent className="w-56" align="end" forceMount>
-                <DropdownMenuLabel className="font-normal">
-                  <div className="flex flex-col space-y-1">
-                    <p className="text-sm font-medium leading-none">{profileData?.username || user?.username}</p>
-                    <p className="text-xs leading-none text-muted-foreground">{profileData?.email}</p>
-                  </div>
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => navigate('/profile')}>
-                  <User className="mr-2 h-4 w-4" />
-                  <span>Profile</span>
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={handleLogout} className="text-red-600 focus:text-red-600">
-                  <LogOut className="mr-2 h-4 w-4" />
-                  <span>Log out</span>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-
-          <div className="-mr-2 flex md:hidden">
-            <Button variant="ghost" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}>
-              {isMobileMenuOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsWalletDialogOpen(false)} disabled={isUpdatingWallet}>
+              Cancel
             </Button>
-          </div>
-        </div>
-      </div>
+            <Button onClick={handleWalletLimitSubmit} disabled={!selectedWalletLimit || isUpdatingWallet}>
+              {isUpdatingWallet && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Reset Portfolio
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </header>
+  );
+};
 
-      {isMobileMenuOpen && (
-        <div className="md:hidden">
-          <div className="px-2 pt-2 pb-3 space-y-1 sm:px-3">
-            <Link to="/dashboard" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white block px-3 py-2 rounded-md text-base font-medium">Dashboard</Link>
-            <Link to="/watchlist" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white block px-3 py-2 rounded-md text-base font-medium">Watchlist</Link>
-            <Link to="/portfolio" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white block px-3 py-2 rounded-md text-base font-medium">Portfolio</Link>
-            <Link to="/orders" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white block px-3 py-2 rounded-md text-base font-medium">Orders</Link>
-            <Link to="/performance" className="text-gray-500 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white block px-3 py-2 rounded-md text-base font-medium">Performance</Link>
-          </div>
-        </div>
+const TickerChip = ({ label, price, change, percent, compact = false }) => {
+  const formatNumber = (value) => {
+    if (typeof value !== 'number' || Number.isNaN(value)) {
+      return '--';
+    }
+    return value.toLocaleString('en-IN', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+  };
+
+  const isPositive = typeof change === 'number' && change >= 0;
+  const changeColor = isPositive ? 'text-emerald-600' : 'text-red-500';
+
+  return (
+    <div className="min-w-[180px] rounded-2xl border border-slate-100 bg-white px-4 py-2 shadow-sm">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+      <div className="mt-1 flex items-baseline justify-between">
+        <span className="text-sm font-bold text-slate-900">{formatNumber(price)}</span>
+        {!compact && (
+          <span className={`text-xs font-semibold ${changeColor}`}>
+            {isPositive ? '+' : ''}{formatNumber(change)} ({typeof percent === 'number' ? `${percent.toFixed(2)}%` : '--'})
+          </span>
+        )}
+      </div>
+      {compact && (
+        <p className={`text-xs font-semibold ${changeColor}`}>
+          {isPositive ? '+' : ''}{formatNumber(change)} ({typeof percent === 'number' ? `${percent.toFixed(2)}%` : '--'})
+        </p>
       )}
-    </nav>
+    </div>
   );
 };
 

@@ -473,72 +473,93 @@ const Watchlist = () => {
             
             <Card className="shadow-lg">
                 <CardContent className="p-0">
-                    <Table>
-                        <TableHeader>
-                            <TableRow>
-                                <TableHead
-                                    aria-sort={getAriaSortValue('name')}
-                                >
-                                    <button
-                                        type="button"
-                                        onClick={() => handleSort('name')}
-                                        className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900 focus:outline-none dark:text-gray-400 dark:hover:text-gray-200"
-                                    >
-                                        <span>Symbol / Name</span>
-                                        {renderSortIcon('name')}
-                                    </button>
-                                </TableHead>
-                                <TableHead
-                                    className="text-right"
-                                    aria-sort={getAriaSortValue('ltp')}
-                                >
-                                    <button
-                                        type="button"
-                                        onClick={() => handleSort('ltp')}
-                                        className="flex items-center justify-end gap-1 w-full text-xs font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900 focus:outline-none dark:text-gray-400 dark:hover:text-gray-200"
-                                    >
-                                        <span>LTP (₹)</span>
-                                        {renderSortIcon('ltp')}
-                                    </button>
-                                </TableHead>
-                                <TableHead className="text-right">Change (₹)</TableHead>
-                                <TableHead
-                                    className="text-right"
-                                    aria-sort={getAriaSortValue('percent_change')}
-                                >
-                                    <button
-                                        type="button"
-                                        onClick={() => handleSort('percent_change')}
-                                        className="flex items-center justify-end gap-1 w-full text-xs font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900 focus:outline-none dark:text-gray-400 dark:hover:text-gray-200"
-                                    >
-                                        <span>Change (%)</span>
-                                        {renderSortIcon('percent_change')}
-                                    </button>
-                                </TableHead>
-                                <TableHead className="text-center">Actions</TableHead>
-                            </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                            {isLoading ? (
-                                [...Array(5)].map((_, i) => <StockRowSkeleton key={i} />)
-                            ) : stocksWithLiveData.length > 0 ? (
-                                stocksWithLiveData.map(stock => (
-                                    <StockRow 
-                                        key={stock.symbol} 
-                                        stock={stock} 
-                                        onTrade={handleTradeClick}
-                                        onRemove={() => handleRemoveStock(activeWatchlistName, stock.symbol)}
-                                    />
-                                ))
-                            ) : (
+                    <div className="hidden md:block">
+                        <Table>
+                            <TableHeader>
                                 <TableRow>
-                                    <TableCell colSpan={5} className="text-center py-12 text-gray-500">
-                                        Your watchlist is empty. Add stocks using the search bar.
-                                    </TableCell>
+                                    <TableHead
+                                        aria-sort={getAriaSortValue('name')}
+                                    >
+                                        <button
+                                            type="button"
+                                            onClick={() => handleSort('name')}
+                                            className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900 focus:outline-none dark:text-gray-400 dark:hover:text-gray-200"
+                                        >
+                                            <span>Symbol / Name</span>
+                                            {renderSortIcon('name')}
+                                        </button>
+                                    </TableHead>
+                                    <TableHead
+                                        className="text-right"
+                                        aria-sort={getAriaSortValue('ltp')}
+                                    >
+                                        <button
+                                            type="button"
+                                            onClick={() => handleSort('ltp')}
+                                            className="flex w-full items-center justify-end gap-1 text-xs font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900 focus:outline-none dark:text-gray-400 dark:hover:text-gray-200"
+                                        >
+                                            <span>LTP (₹)</span>
+                                            {renderSortIcon('ltp')}
+                                        </button>
+                                    </TableHead>
+                                    <TableHead className="text-right">Change (₹)</TableHead>
+                                    <TableHead
+                                        className="text-right"
+                                        aria-sort={getAriaSortValue('percent_change')}
+                                    >
+                                        <button
+                                            type="button"
+                                            onClick={() => handleSort('percent_change')}
+                                            className="flex w-full items-center justify-end gap-1 text-xs font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900 focus:outline-none dark:text-gray-400 dark:hover:text-gray-200"
+                                        >
+                                            <span>Change (%)</span>
+                                            {renderSortIcon('percent_change')}
+                                        </button>
+                                    </TableHead>
+                                    <TableHead className="text-center">Actions</TableHead>
                                 </TableRow>
-                            )}
-                        </TableBody>
-                    </Table>
+                            </TableHeader>
+                            <TableBody>
+                                {isLoading ? (
+                                    [...Array(5)].map((_, i) => <StockRowSkeleton key={i} />)
+                                ) : stocksWithLiveData.length > 0 ? (
+                                    stocksWithLiveData.map(stock => (
+                                        <StockRow 
+                                            key={stock.symbol} 
+                                            stock={stock} 
+                                            onTrade={handleTradeClick}
+                                            onRemove={() => handleRemoveStock(activeWatchlistName, stock.symbol)}
+                                        />
+                                    ))
+                                ) : (
+                                    <TableRow>
+                                        <TableCell colSpan={5} className="py-12 text-center text-gray-500">
+                                            Your watchlist is empty. Add stocks using the search bar.
+                                        </TableCell>
+                                    </TableRow>
+                                )}
+                            </TableBody>
+                        </Table>
+                    </div>
+
+                    <div className="space-y-3 p-4 md:hidden">
+                        {isLoading ? (
+                            [...Array(4)].map((_, index) => <CompactStockCardSkeleton key={index} />)
+                        ) : stocksWithLiveData.length > 0 ? (
+                            stocksWithLiveData.map((stock) => (
+                                <CompactStockCard
+                                    key={stock.symbol}
+                                    stock={stock}
+                                    onTrade={handleTradeClick}
+                                    onRemove={() => handleRemoveStock(activeWatchlistName, stock.symbol)}
+                                />
+                            ))
+                        ) : (
+                            <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50 p-6 text-center text-sm text-gray-500">
+                                Your watchlist is empty. Add stocks using the search bar.
+                            </div>
+                        )}
+                    </div>
                 </CardContent>
             </Card>
 
@@ -610,6 +631,13 @@ const Watchlist = () => {
 
 // --- Sub-components ---
 
+const sanitizeSymbol = (symbol) => {
+    if (typeof symbol !== "string") {
+        return "";
+    }
+    return symbol.includes(".") ? symbol.split(".")[0] : symbol;
+};
+
 const StockRow = ({ stock, onTrade, onRemove }) => {
     const navigate = useNavigate();
     const toNumber = (value, fallback = 0) => {
@@ -626,11 +654,12 @@ const StockRow = ({ stock, onTrade, onRemove }) => {
     const isPositive = change >= 0;
     const priceSource = stock.price_source || 'ltp';
     const isFallbackPrice = priceSource !== 'ltp';
+    const cleanSymbol = sanitizeSymbol(stock.symbol);
 
     return (
         <TableRow 
             className="cursor-pointer hover:bg-gray-50" 
-            onClick={() => navigate(`/stock/${stock.symbol}`)}
+            onClick={() => navigate(`/stock/${cleanSymbol || stock.symbol}`)}
         >
             <TableCell>
                 <div className="font-medium text-gray-800">{stock.symbol}</div>
@@ -661,6 +690,77 @@ const StockRow = ({ stock, onTrade, onRemove }) => {
     );
 };
 
+const CompactStockCard = ({ stock, onTrade, onRemove }) => {
+    const navigate = useNavigate();
+    const toNumber = (value, fallback = 0) => {
+        if (typeof value === 'number' && Number.isFinite(value)) {
+            return value;
+        }
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    };
+
+    const ltp = toNumber(stock.ltp ?? stock.price, 0);
+    const change = toNumber(stock.change, 0);
+    const percentChange = toNumber(stock.percent_change ?? stock.percentChange, 0);
+    const isPositive = change >= 0;
+    const cleanSymbol = sanitizeSymbol(stock.symbol) || stock.symbol;
+
+    return (
+        <div
+            className="cursor-pointer rounded-3xl border border-gray-100 bg-white p-4 shadow-sm"
+            onClick={() => navigate(`/stock/${cleanSymbol}`)}
+        >
+            <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                    <p className="text-lg font-semibold text-gray-900">{cleanSymbol}</p>
+                    <p className="text-sm text-gray-500 truncate">{stock.name || "--"}</p>
+                </div>
+                <div className="text-right">
+                    <p className="text-base font-semibold text-gray-900">₹{ltp.toFixed(2)}</p>
+                    <p className={`text-sm font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                        {isPositive ? '+' : ''}{change.toFixed(2)} ({percentChange.toFixed(2)}%)
+                    </p>
+                </div>
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+                <Button
+                    size="sm"
+                    className="bg-emerald-500 text-white hover:bg-emerald-600"
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onTrade?.(stock, 'BUY');
+                    }}
+                >
+                    Buy
+                </Button>
+                <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onTrade?.(stock, 'SELL');
+                    }}
+                >
+                    Sell
+                </Button>
+                <Button
+                    size="icon"
+                    variant="ghost"
+                    className="ml-auto text-red-500 hover:text-red-600"
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        onRemove?.();
+                    }}
+                >
+                    <Trash2 className="h-4 w-4" />
+                    <span className="sr-only">Remove {cleanSymbol}</span>
+                </Button>
+            </div>
+        </div>
+    );
+};
+
 const StockRowSkeleton = () => (
     <TableRow>
         <TableCell>
@@ -672,6 +772,26 @@ const StockRowSkeleton = () => (
         <TableCell><Skeleton className="h-5 w-20 ml-auto" /></TableCell>
         <TableCell><Skeleton className="h-8 w-32 mx-auto" /></TableCell>
     </TableRow>
+);
+
+const CompactStockCardSkeleton = () => (
+    <div className="rounded-3xl border border-gray-100 bg-white p-4 shadow-sm">
+        <div className="flex items-start justify-between gap-3">
+            <div className="w-1/2 space-y-2">
+                <Skeleton className="h-5 w-24" />
+                <Skeleton className="h-4 w-32" />
+            </div>
+            <div className="w-20 space-y-2 text-right">
+                <Skeleton className="ml-auto h-5 w-16" />
+                <Skeleton className="ml-auto h-4 w-12" />
+            </div>
+        </div>
+        <div className="mt-4 flex gap-3">
+            <Skeleton className="h-8 w-16" />
+            <Skeleton className="h-8 w-16" />
+            <Skeleton className="h-8 w-10" />
+        </div>
+    </div>
 );
 
 const StockSearch = ({ activeWatchlist, onAddStock }) => {

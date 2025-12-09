@@ -7,6 +7,7 @@ from flask_login import login_required, current_user
 from mongoengine import Q
 from app.models import Transaction, Holding, User, Lot, ShortPosition
 from app.utils.market_hours import validate_order_timing, is_market_open, get_market_status_message, get_market_session, is_market_holiday
+from app.utils.cache import cache as app_cache
 # Import the centralized, cached function for all stock data lookups
 from .stock import get_stock_data_from_api, format_symbol
 
@@ -291,6 +292,12 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
 
     total_amount = execution_price * Decimal(quantity)
 
+    if product_type == 'MIS' and status == 'PENDING':
+        return {
+            "success": False,
+            "message": "Intraday (MIS) orders must execute immediately. Adjust the price or switch to CNC."
+        }, 400
+
     # --- Step 5: Return Processed Trade Data ---
     return {
         "success": True,
@@ -317,7 +324,22 @@ def _execute_buy_order(user, trade_data, idempotency_key):
     execution_price = Decimal(str(trade_data['execution_price']))
     product_type = trade_data['product_type']
     remaining_quantity = int(trade_data['quantity'])
+    total_cost = execution_price * Decimal(remaining_quantity)
 
+    # CRITICAL FIX #3: Atomic balance check to prevent race condition
+    # Use MongoDB's atomic update to check and deduct balance in one operation
+    result = User.objects(
+        id=user.id,
+        balance__gte=float(total_cost)  # Atomic check: balance must be sufficient
+    ).update_one(
+        dec__balance=float(total_cost)  # Atomic decrement
+    )
+    
+    if result == 0 or result is None:
+        raise ValueError(f"Insufficient funds. Required: ₹{float(total_cost):.2f}. Please refresh and try again.")
+    
+    # Reload user to get updated balance
+    user.reload()
     user_balance = Decimal(str(user.balance))
     shares_added = 0
     shares_covered = 0
@@ -701,6 +723,10 @@ def buy():
             
             logger.info(f"BUY order executed for {user.client_id}: {trade_data['quantity']} of {trade_data['symbol']} ({trade_data['product_type']})")
             
+            # HIGH PRIORITY FIX #7: Invalidate user profile/balance cache
+            app_cache.invalidate_pattern(f"route:get_profile:user:{current_user.id}")
+            app_cache.invalidate_pattern(f"route:get_portfolio:user:{current_user.id}")
+            
             return jsonify({
                 "success": True,
                 "message": "Buy order executed successfully.",
@@ -869,6 +895,10 @@ def sell():
                 _create_bracket_order_legs(user, transaction, trade_data)
             
             logger.info(f"SELL order executed for {user.client_id}: {trade_data['quantity']} of {trade_data['symbol']} ({trade_data['product_type']})")
+            
+            # HIGH PRIORITY FIX #7: Invalidate user profile/balance cache
+            app_cache.invalidate_pattern(f"route:get_profile:user:{current_user.id}")
+            app_cache.invalidate_pattern(f"route:get_portfolio:user:{current_user.id}")
             
             return jsonify({
                 "success": True,
@@ -1090,7 +1120,7 @@ def cancel_order(order_id):
                 holding.save()
                 logger.info(f"Released reserved quantity {transaction.quantity} for cancelled SELL order {order_id}")
         
-        transaction.status = 'cancelled'
+        transaction.status = 'CANCELLED'
         transaction.save()
         
         # Validate bracket order cancellation logic
@@ -1131,7 +1161,7 @@ def cancel_order(order_id):
                             leg_holding.save()
                             logger.info(f"Released reserved quantity {leg.quantity} for cancelled sibling leg {leg.id}")
                     
-                    leg.status = 'cancelled'
+                    leg.status = 'CANCELLED'
                     leg.save()
             
             # Save user after all balance adjustments

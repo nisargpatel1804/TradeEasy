@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { motion } from "framer-motion";
 import { toast } from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
@@ -9,8 +9,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../assets/ui/table.jsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../assets/ui/select.jsx";
 import { TrendingUp, TrendingDown, Wallet, Briefcase, ArrowUpDown } from "lucide-react";
+import { cn } from "../utils/cn.js";
+import { mergePriceMapWithVariants, pickLivePriceForSymbol, seedPriceMapFromHoldings } from "../utils/symbolUtils.js";
+import { Button } from "../assets/ui/button.jsx";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../assets/ui/dialog.jsx";
+import TradeForm from "./TradeForm.jsx";
 
-const PortfolioPage = () => {
+const PortfolioPage = ({ isEmbedded = false }) => {
   const navigate = useNavigate();
   const [portfolioData, setPortfolioData] = useState(null);
   const [livePrices, setLivePrices] = useState({});
@@ -18,46 +23,41 @@ const PortfolioPage = () => {
   const [error, setError] = useState(null);
   const [sortBy, setSortBy] = useState("symbol"); // symbol, pnl, value, quantity
   const [sortOrder, setSortOrder] = useState("asc"); // asc, desc
+  const [exitLoadingSymbol, setExitLoadingSymbol] = useState(null);
+  const [selectedHolding, setSelectedHolding] = useState(null);
+  const [tradeModalAction, setTradeModalAction] = useState("SELL");
+  const [isTradeModalOpen, setIsTradeModalOpen] = useState(false);
 
-  useEffect(() => {
-    const loadPortfolio = async () => {
-      try {
+  const loadPortfolio = useCallback(async ({ showLoader = false } = {}) => {
+    try {
+      if (showLoader) {
         setIsLoading(true);
-        setError(null);
-        const data = await api.fetchPortfolio();
-        if (data.success) {
-          setPortfolioData(data);
-          // Pre-populate live prices with LTP from all holdings
-          const initialPrices = {};
-          
-          // CNC Holdings
-          if (data.cnc_holdings) {
-            data.cnc_holdings.forEach(holding => {
-              initialPrices[holding.symbol] = { ltp: holding.ltp };
-            });
-          }
-          
-          // MIS Holdings
-          if (data.mis_holdings) {
-            data.mis_holdings.forEach(holding => {
-              initialPrices[holding.symbol] = { ltp: holding.ltp };
-            });
-          }
-          
-          setLivePrices(initialPrices);
-        } else {
-          throw new Error(data.message || "Failed to fetch portfolio.");
-        }
-      } catch (err) {
-        setError(err.message);
-        toast.error(`Error: ${err.message}`);
-      } finally {
+      }
+      setError(null);
+      const data = await api.fetchPortfolio();
+      if (data.success) {
+        setPortfolioData(data);
+        const initialPrices = seedPriceMapFromHoldings([
+          ...(data.cnc_holdings || []),
+          ...(data.mis_holdings || []),
+        ]);
+        setLivePrices(initialPrices);
+      } else {
+        throw new Error(data.message || "Failed to fetch portfolio.");
+      }
+    } catch (err) {
+      setError(err.message);
+      toast.error(`Error: ${err.message}`);
+    } finally {
+      if (showLoader) {
         setIsLoading(false);
       }
-    };
-
-    loadPortfolio();
+    }
   }, []);
+
+  useEffect(() => {
+    loadPortfolio({ showLoader: true });
+  }, [loadPortfolio]);
 
   useEffect(() => {
     const unsubscribe = priceUpdateService.subscribe(update => {
@@ -66,18 +66,12 @@ const PortfolioPage = () => {
           return {};
         }
 
-        if (update?.type === 'snapshot') {
-          if (update?.allPrices && Object.keys(update.allPrices).length > 0) {
-            return { ...currentPrices, ...update.allPrices };
-          }
-          return currentPrices;
+        if (update?.type === 'snapshot' && update?.allPrices) {
+          return mergePriceMapWithVariants(currentPrices, update.allPrices);
         }
 
         if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
-          return {
-            ...currentPrices,
-            ...update.changedPrices,
-          };
+          return mergePriceMapWithVariants(currentPrices, update.changedPrices);
         }
 
         return currentPrices;
@@ -85,6 +79,57 @@ const PortfolioPage = () => {
     });
     return () => unsubscribe();
   }, []);
+
+  const openTradeModal = (holding, action = "SELL") => {
+    setSelectedHolding(holding);
+    setTradeModalAction(action);
+    setIsTradeModalOpen(true);
+  };
+
+  const closeTradeModal = () => {
+    setIsTradeModalOpen(false);
+    setSelectedHolding(null);
+  };
+
+  const handleExitPosition = async (holding, event) => {
+    event?.stopPropagation();
+    if (!holding?.symbol || holding.quantity <= 0) {
+      return;
+    }
+
+    const toastId = toast.loading(`Exiting ${holding.symbol}...`);
+    setExitLoadingSymbol(holding.symbol);
+    try {
+      const payload = {
+        symbol: holding.symbol,
+        quantity: holding.quantity,
+        action: 'SELL',
+        product_type: holding.product_type || 'CNC',
+        order_type: 'MARKET',
+        allow_short: false,
+      };
+
+      const result = await api.placeTrade(payload);
+      if (result.success) {
+        toast.success(result.message || `Exit order placed for ${holding.symbol}.`, { id: toastId });
+        await loadPortfolio();
+      } else {
+        throw new Error(result.message || 'Failed to exit position.');
+      }
+    } catch (err) {
+      toast.error(err.message || 'Failed to exit position.', { id: toastId });
+    } finally {
+      setExitLoadingSymbol(null);
+    }
+  };
+
+  const handleDetailsClick = (holding, event) => {
+    event?.stopPropagation();
+    if (!holding?.symbol) {
+      return;
+    }
+    navigate(`/stock/${holding.symbol}`);
+  };
 
   const processedHoldings = useMemo(() => {
     if (!portfolioData) return null;
@@ -97,7 +142,8 @@ const PortfolioPage = () => {
 
     // Update with live prices and calculate metrics
     const holdingsWithLiveData = allHoldings.map(holding => {
-      const livePrice = livePrices[holding.symbol]?.ltp || holding.ltp;
+      const livePriceData = pickLivePriceForSymbol(livePrices, holding.symbol, holding.exchange);
+      const livePrice = livePriceData?.ltp ?? holding.ltp;
       const market_value = livePrice * holding.quantity;
       const unrealized_pnl = market_value - holding.investment_value;
       const unrealized_pnl_pct = (unrealized_pnl / holding.investment_value) * 100;
@@ -191,43 +237,48 @@ const PortfolioPage = () => {
     }
   };
 
+  const pageShellClasses = cn(
+    "space-y-6",
+    isEmbedded ? "" : "mx-auto max-w-6xl px-2 pb-10 pt-4 sm:px-4 lg:px-8"
+  );
+
   if (isLoading) {
     return (
-      <div className="p-4 sm:p-6 lg:p-8 space-y-6">
+      <div className={pageShellClasses}>
         <Skeleton className="h-8 w-48" />
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <Skeleton className="h-24" />
-          <Skeleton className="h-24" />
-          <Skeleton className="h-24" />
-          <Skeleton className="h-24" />
+          {[...Array(4)].map((_, idx) => (
+            <Skeleton key={idx} className="h-28 rounded-3xl" />
+          ))}
         </div>
-        <Skeleton className="h-96" />
+        <Skeleton className="h-96 rounded-3xl" />
       </div>
     );
   }
 
   if (error) {
-    return <div className="p-8 text-center text-red-500">{error}</div>;
+    return <div className={pageShellClasses}><div className="rounded-3xl border border-red-200 bg-red-50/50 p-10 text-center text-red-600">{error}</div></div>;
   }
   
   if (!processedHoldings) {
-    return <div className="p-8 text-center">No holdings data available.</div>;
+    return <div className={pageShellClasses}><div className="rounded-3xl border border-dashed border-slate-200 p-10 text-center text-slate-500">No holdings data available.</div></div>;
   }
 
   const { holdings, summary } = processedHoldings;
 
   return (
-    <motion.div 
-      className="p-4 sm:p-6 lg:p-8"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.5 }}
-    >
-      <h1 className="text-3xl font-bold mb-6">Portfolio</h1>
+    <>
+      <motion.div 
+        className={pageShellClasses}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: 0.5 }}
+      >
+        {!isEmbedded && <h1 className="text-3xl font-bold text-slate-900">Portfolio</h1>}
 
       {/* Summary Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-6">
-        <Card>
+        <Card className="rounded-3xl border border-slate-100 shadow-sm">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Current Value</CardTitle>
             <Wallet className="h-4 w-4 text-blue-600" />
@@ -237,7 +288,7 @@ const PortfolioPage = () => {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="rounded-3xl border border-slate-100 shadow-sm">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Invested Value</CardTitle>
             <Briefcase className="h-4 w-4 text-gray-600" />
@@ -247,7 +298,7 @@ const PortfolioPage = () => {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="rounded-3xl border border-slate-100 shadow-sm">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Total Returns</CardTitle>
             {summary.total_returns >= 0 ? <TrendingUp className="h-4 w-4 text-green-600" /> : <TrendingDown className="h-4 w-4 text-red-600" />}
@@ -262,7 +313,7 @@ const PortfolioPage = () => {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="rounded-3xl border border-slate-100 shadow-sm">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">1 Day Return</CardTitle>
             {summary.oneDayReturn >= 0 ? <TrendingUp className="h-4 w-4 text-green-600" /> : <TrendingDown className="h-4 w-4 text-red-600" />}
@@ -279,7 +330,7 @@ const PortfolioPage = () => {
       </div>
 
       {/* Holdings Table */}
-      <Card>
+      <Card className="rounded-3xl border border-slate-100 shadow-sm">
         <CardHeader>
           <div className="flex items-center justify-between">
             <CardTitle>All Holdings ({holdings.length})</CardTitle>
@@ -298,7 +349,7 @@ const PortfolioPage = () => {
               </Select>
               <button
                 onClick={() => setSortOrder(sortOrder === "asc" ? "desc" : "asc")}
-                className="p-2 hover:bg-gray-100 rounded"
+                className="rounded-full border border-slate-200 p-2 text-slate-600 hover:bg-slate-50"
               >
                 <ArrowUpDown className="h-4 w-4" />
               </button>
@@ -325,6 +376,7 @@ const PortfolioPage = () => {
                   <TableHead className="text-right cursor-pointer" onClick={() => handleSortChange("pnl")}>
                     P&L {sortBy === "pnl" && (sortOrder === "asc" ? "↑" : "↓")}
                   </TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -350,6 +402,32 @@ const PortfolioPage = () => {
                         ({holding.unrealized_pnl >= 0 ? '+' : ''}{holding.unrealized_pnl_pct.toFixed(2)}%)
                       </div>
                     </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex flex-wrap items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => openTradeModal(holding, 'SELL')}
+                        >
+                          Modify
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          isLoading={exitLoadingSymbol === holding.symbol}
+                          onClick={(e) => handleExitPosition(holding, e)}
+                        >
+                          Exit
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={(e) => handleDetailsClick(holding, e)}
+                        >
+                          Details
+                        </Button>
+                      </div>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -359,7 +437,40 @@ const PortfolioPage = () => {
           )}
         </CardContent>
       </Card>
-    </motion.div>
+      </motion.div>
+
+      <Dialog
+      open={isTradeModalOpen && Boolean(selectedHolding)}
+      onOpenChange={(open) => {
+        setIsTradeModalOpen(open);
+        if (!open) {
+          setSelectedHolding(null);
+        }
+      }}
+    >
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>
+            {tradeModalAction === 'SELL' ? 'Modify Exit Plan' : 'Update Order'} - {selectedHolding?.symbol}
+          </DialogTitle>
+          <DialogDescription>
+            Adjust targets, stop loss, or position sizing for {selectedHolding?.symbol} without leaving the portfolio view.
+          </DialogDescription>
+        </DialogHeader>
+        {selectedHolding && (
+          <TradeForm
+            symbol={selectedHolding.symbol}
+            action={tradeModalAction}
+            onTradeSuccess={() => {
+              closeTradeModal();
+              loadPortfolio();
+            }}
+            onClose={closeTradeModal}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+    </>
   );
 };
 

@@ -1,35 +1,59 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion } from 'framer-motion';
 import { useDataContext } from '../context/DataContext.jsx';
 import { useSocket } from '../context/SocketContext.jsx';
 import priceUpdateService from '../services/priceUpdateService.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../assets/ui/card.jsx';
 import { Skeleton } from '../assets/ui/skeleton.jsx';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Search as SearchIcon } from 'lucide-react';
 import { Button } from '../assets/ui/button.jsx';
+import { Input } from '../assets/ui/input.jsx';
+
+
+const formatNumber = (value) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return '0.00';
+  }
+  return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+};
+
+const formatPercent = (value) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) {
+    return '0.00%';
+  }
+  const sign = num > 0 ? '+' : '';
+  return `${sign}${num.toFixed(2)}%`;
+};
 
 const Indices = () => {
   const { indicesData: initialIndices, isLoadingIndices, indicesError, getInitialIndices } = useDataContext();
   const { isConnected, isReconnecting, connectionStatus, lastError } = useSocket();
   const [indices, setIndices] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   useEffect(() => {
-    // Set initial data from context
     if (initialIndices && initialIndices.length > 0) {
       setIndices(initialIndices);
     }
   }, [initialIndices]);
 
   useEffect(() => {
-    // Subscribe to real-time updates
-    const unsubscribe = priceUpdateService.subscribe(update => {
-      setIndices(prevIndices => {
-        if (update?.type === 'reset') {
-          return prevIndices;
+    if (!initialIndices || initialIndices.length === 0) {
+      getInitialIndices().catch(() => undefined);
+    }
+  }, [initialIndices, getInitialIndices]);
+
+  useEffect(() => {
+    const unsubscribe = priceUpdateService.subscribe((update) => {
+      setIndices((prev) => {
+        if (!Array.isArray(prev) || prev.length === 0) {
+          return prev;
         }
 
         let changes = null;
-
         if (update?.type === 'snapshot' && update?.allPrices && Object.keys(update.allPrices).length > 0) {
           changes = update.allPrices;
         } else if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
@@ -37,90 +61,90 @@ const Indices = () => {
         }
 
         if (!changes) {
-          return prevIndices;
+          return prev;
         }
 
-        const indexMap = new Map(prevIndices.map(i => [i.symbol, i]));
-
-        for (const [symbol, value] of Object.entries(changes)) {
-          if (indexMap.has(symbol)) {
-            indexMap.set(symbol, { ...indexMap.get(symbol), ...value });
+        const next = new Map(prev.map((index) => [index.symbol, index]));
+        Object.entries(changes).forEach(([symbol, payload]) => {
+          if (next.has(symbol)) {
+            next.set(symbol, { ...next.get(symbol), ...payload });
           }
-        }
-
-        return Array.from(indexMap.values());
+        });
+        return Array.from(next.values());
       });
     });
 
     return () => unsubscribe();
   }, []);
 
-  const formatNumber = (value) => {
-    const num = parseFloat(value);
-    if (isNaN(num)) return '0.00';
-    return num.toFixed(2);
-  };
-  
-  const getChangeColor = (change) => {
-    const numChange = parseFloat(change);
-    if (numChange > 0) return 'text-green-600';
-    if (numChange < 0) return 'text-red-600';
-    return 'text-gray-600';
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      const latest = await getInitialIndices(true);
+      if (Array.isArray(latest) && latest.length > 0) {
+        setIndices(latest);
+      }
+    } catch (error) {
+      console.error('Unable to refresh indices', error);
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
-  const renderContent = () => {
-    if (isLoadingIndices && indices.length === 0) {
-      return (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-          {[...Array(6)].map((_, i) => (
-            <Card key={i}>
-              <CardHeader>
-                <Skeleton className="h-5 w-3/4" />
-              </CardHeader>
-              <CardContent className="space-y-2">
-                <Skeleton className="h-6 w-1/2" />
-                <Skeleton className="h-4 w-full" />
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      );
+  const filteredIndices = useMemo(() => {
+    let data = Array.isArray(indices) ? [...indices] : [];
+
+    if (searchTerm.trim()) {
+      const term = searchTerm.trim().toLowerCase();
+      data = data.filter((index) => {
+        const name = (index.name || '').toLowerCase();
+        const symbol = (index.symbol || '').toLowerCase();
+        return name.includes(term) || symbol.includes(term);
+      });
+    }
+
+    data.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
+    return data;
+  }, [indices, searchTerm]);
+
+
+  const renderState = () => {
+    if ((isLoadingIndices && (!indices || indices.length === 0)) || (indices.length === 0 && !indicesError)) {
+      return <LoadingGrid />;
     }
 
     if (indicesError) {
       return (
-        <div className="text-center py-10">
-          <AlertTriangle className="mx-auto h-12 w-12 text-red-400" />
-          <h3 className="mt-2 text-lg font-medium text-gray-900 dark:text-white">Could not load market data</h3>
-          <p className="mt-1 text-sm text-gray-500">{indicesError}</p>
-          <div className="mt-6">
-            <Button onClick={() => getInitialIndices(true)}>Retry</Button>
-          </div>
+        <div className="rounded-3xl border border-dashed border-red-200 bg-red-50/40 p-10 text-center">
+          <AlertTriangle className="mx-auto h-12 w-12 text-red-500" />
+          <h3 className="mt-4 text-lg font-semibold text-red-700">Could not load market data</h3>
+          <p className="text-sm text-red-600">{indicesError}</p>
+          <Button className="mt-6" onClick={() => handleRefresh()} isLoading={isRefreshing}>
+            Retry
+          </Button>
+        </div>
+      );
+    }
+
+    if (filteredIndices.length === 0) {
+      return (
+        <div className="rounded-3xl border border-dashed border-slate-200 p-10 text-center text-sm text-slate-500">
+          No indices match your current filters.
         </div>
       );
     }
 
     return (
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-        {indices.map((index, i) => (
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        {filteredIndices.map((index, idx) => (
           <motion.div
             key={index.symbol}
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3, delay: i * 0.05 }}
+            transition={{ duration: 0.25, delay: idx * 0.02 }}
           >
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base font-medium truncate">{index.name}</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-2xl font-bold">{formatNumber(index.price)}</p>
-                <p className={`text-sm font-semibold ${getChangeColor(index.change)}`}>
-                  {index.change > 0 ? '+' : ''}
-                  {formatNumber(index.change)} ({index.percent_change > 0 ? '+' : ''}{formatNumber(index.percent_change)}%)
-                </p>
-              </CardContent>
-            </Card>
+            <IndexCard index={index} />
           </motion.div>
         ))}
       </div>
@@ -128,29 +152,100 @@ const Indices = () => {
   };
 
   return (
-    <div className="p-4 sm:p-6 lg:p-8">
-       <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Market Overview</h1>
-         <div className="flex items-center gap-2">
-           <div
-             className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : isReconnecting ? 'bg-amber-400' : 'bg-red-500'}`}
-             title={
-               isConnected
-                 ? 'Live market data connected'
-                 : isReconnecting
-                   ? 'Reconnecting to live market data'
-                   : lastError?.message || 'Live market data disconnected'
-             }
-           ></div>
-           <span className="text-sm font-medium text-gray-600 dark:text-gray-300">
-             {connectionStatus === 'reconnecting' ? 'Reconnecting…' : isConnected ? 'Live' : 'Offline'}
-           </span>
+    <div className="space-y-6 px-2 pb-12 pt-4 sm:px-4 lg:px-8">
+      <section className="rounded-3xl border border-slate-100 bg-white/90 p-5 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">Market Overview</p>
+            <h1 className="text-3xl font-bold text-slate-900">Live Indices</h1>
+          </div>
+          <div className="flex items-center gap-2">
+            <span
+              className={`h-3 w-3 rounded-full ${
+                isConnected ? 'bg-emerald-500' : isReconnecting ? 'bg-amber-400' : 'bg-red-500'
+              }`}
+              title={
+                isConnected
+                  ? 'Live market data connected'
+                  : isReconnecting
+                  ? 'Reconnecting to live market data'
+                  : lastError?.message || 'Live market data disconnected'
+              }
+            />
+            <span className="text-sm font-medium text-slate-600">
+              {connectionStatus === 'reconnecting' ? 'Reconnecting…' : isConnected ? 'Live' : 'Offline'}
+            </span>
+          </div>
         </div>
+      </section>
+
+      <div className="flex flex-wrap items-center gap-3 rounded-3xl border border-slate-100 bg-slate-50/70 p-4">
+        <div className="relative flex-1 min-w-[220px]">
+          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+          <Input
+            value={searchTerm}
+            onChange={(event) => setSearchTerm(event.target.value)}
+            placeholder="Search indices or symbols"
+            className="rounded-2xl border-slate-200 bg-white pl-10"
+          />
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="rounded-full"
+          onClick={handleRefresh}
+          isLoading={isRefreshing}
+        >
+          <RefreshCw className="h-4 w-4" /> Refresh
+        </Button>
       </div>
-      {renderContent()}
+
+      {renderState()}
     </div>
   );
 };
+
+const IndexCard = ({ index }) => {
+  const changeValue = Number(index.change) || 0;
+  const percentValue = Number(index.percent_change) || 0;
+  const isPositive = changeValue >= 0;
+  const priceValue = Number(index.price) || 0;
+
+  return (
+    <Card className="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <CardTitle className="text-lg font-semibold text-slate-900">{index.name}</CardTitle>
+          <p className="text-sm text-slate-500">{(index.symbol || '').toUpperCase()}</p>
+        </div>
+        <div className="text-right">
+          <p className="text-2xl font-bold text-slate-900">{formatNumber(priceValue)}</p>
+          <p className={`text-sm font-semibold ${isPositive ? 'text-emerald-600' : 'text-red-600'}`}>
+            {isPositive ? '+' : ''}{formatPercent(percentValue)}
+          </p>
+        </div>
+      </div>
+    </Card>
+  );
+};
+
+const LoadingGrid = () => (
+  <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+    {[...Array(6)].map((_, index) => (
+      <Card key={index} className="rounded-3xl border border-slate-100">
+        <CardHeader>
+          <Skeleton className="h-4 w-1/2" />
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Skeleton className="h-8 w-2/3" />
+          <Skeleton className="h-4 w-1/3" />
+          <Skeleton className="h-4 w-1/2" />
+        </CardContent>
+      </Card>
+    ))}
+  </div>
+);
 
 export default Indices;
 

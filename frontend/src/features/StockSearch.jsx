@@ -167,7 +167,6 @@ const StockSearch = () => {
                   </div>
                 );
               })
-            )
             ) : (
               <div className="p-4 text-center text-sm text-gray-500">
                 {query.length > 1 ? "No results found." : "Type to search..."}

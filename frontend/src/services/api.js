@@ -70,6 +70,7 @@ export const checkAuth = () => fetchData('/auth/check-auth');
 // --- Profile ---
 export const getProfile = () => fetchData('/profile');
 export const updateProfile = (profileData) => apiClient.put('/profile', profileData).then(res => res.data);
+export const updateWalletLimit = (amount) => apiClient.post('/profile/wallet-limit', { amount }).then(res => res.data);
 
 // --- Portfolio ---
 export const getPortfolio = () => fetchData('/portfolio');
@@ -78,6 +79,8 @@ export const fetchPortfolio = getPortfolio;
 // --- Orders ---
 export const getOrders = () => fetchData('/orders');
 export const fetchOrders = getOrders;
+export const getOrderDetail = (orderId) => fetchData(`/orders/${orderId}`);
+export const fetchOrderDetail = getOrderDetail;
 
 // --- Markets ---
 export const getMarketIndices = () => fetchData('/indices');
@@ -118,3 +121,4 @@ export const createWatchlist = (name) => apiClient.post('/watchlists', { name })
 export const deleteWatchlist = (watchlistName) => apiClient.delete(`/watchlists/${watchlistName}`).then(res => res.data);
 export const addStockToWatchlist = (watchlistName, stockData) => apiClient.post(`/watchlists/${watchlistName}/stocks`, stockData).then(res => res.data);
 export const removeStockFromWatchlist = (watchlistName, symbol) => apiClient.delete(`/watchlists/${watchlistName}/stocks/${symbol}`).then(res => res.data);
+export const renameWatchlist = (watchlistName, newName) => apiClient.patch(`/watchlists/${watchlistName}`, { new_name: newName }).then(res => res.data);

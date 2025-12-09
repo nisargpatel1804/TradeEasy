@@ -101,9 +101,11 @@ def login():
         user = User.objects(client_id=client_id).first()
 
         if user and user.is_active and bcrypt.check_password_hash(user.password, password):
-            login_user(user, remember=True)
+            # Respect the remember_me flag from the client; default to False for security
+            remember = bool(data.get('remember_me', False))
+            login_user(user, remember=remember)
             session.pop('login_attempts', None) # Clear attempts on successful login
-            logger.info(f"User {user.client_id} logged in successfully.")
+            logger.info(f"User {user.client_id} logged in successfully (remember={remember}).")
             return jsonify({
                 "success": True,
                 "message": "Login successful.",

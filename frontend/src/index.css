@@ -2,134 +2,118 @@
 @tailwind components;
 @tailwind utilities;
 
-/* 🎨 Define Theme Variables */
 @layer base {
   :root {
-    --background: 0 0% 100%; /* White Background */
-    --foreground: 0 0% 10%; /* Dark Grey Text */
-    --card: 0 0% 98%; /* Light Greyish-White Cards */
-    --card-foreground: 0 0% 10%;
+    /* Background Colors */
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    
+    /* Card Colors */
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    
+    /* Popover Colors */
     --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 10%;
-    --primary: 0 0% 10%; /* Black Buttons */
-    --primary-foreground: 0 0% 98%; /* White Text */
-    --secondary: 0 0% 95%; /* Light Grey Background */
-    --secondary-foreground: 0 0% 10%;
-    --muted: 0 0% 92%; /* Subtle Grey */
-    --muted-foreground: 0 0% 30%;
-    --accent: 0 0% 90%;
-    --accent-foreground: 0 0% 10%;
-    --destructive: 0 84.2% 60.2%; /* Red (Sell/Loss) */
-    --destructive-foreground: 0 0% 98%;
-    --constructive: 145 63% 49%; /* Green (Buy/Profit) */
-    --constructive-foreground: 0 0% 98%;
-    --border: 0 0% 85%; /* Light Grey Borders */
-    --input: 0 0% 85%;
-    --ring: 0 0% 10%;
+    --popover-foreground: 222.2 84% 4.9%;
+    
+    /* Primary Colors */
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    
+    /* Secondary Colors */
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    
+    /* Muted Colors */
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    
+    /* Accent Colors */
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    
+    /* Destructive Colors */
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    
+    /* Border & Input */
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    
+    /* Border Radius */
     --radius: 0.5rem;
-    --transition: all 0.3s ease-in-out;
   }
 
-  .light-theme {
-    background-color: hsl(var(--background));
-    color: hsl(var(--foreground));
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
   }
 }
 
-/* 📌 Apply Global Styles */
 @layer base {
   * {
     @apply border-border;
   }
-
+  
   body {
-    @apply bg-background text-foreground font-sans;
-    font-family: "Inter", sans-serif;
-    margin: 0;
-    padding: 0;
-    transition: var(--transition);
-    background-color: hsl(var(--background));
-    color: hsl(var(--foreground));
-  }
-
-  /* 🏠 Root Container */
-  #root {
-    max-width: 1280px;
-    margin: 0 auto;
-    padding: 2rem;
-    text-align: center;
-  }
-
-  /* 🔘 Base Button Styles */
-  button {
-    padding: 10px 20px;
-    font-size: 1rem;
-    font-weight: 600;
-    border: none;
-    border-radius: 8px;
-    cursor: pointer;
-    transition: var(--transition);
-  }
-
-  button:hover {
-    opacity: 0.85;
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+    min-height: 100%;
+    width: 100%;
+    overflow-y: scroll;
+    overflow-x: hidden;
+    scrollbar-gutter: stable both-edges;
   }
 }
 
-/* ⚙️ Custom Component Styles & Animations */
-@layer components {
-  /* 📦 Card Container */
-  .card {
-    @apply bg-card;
-    padding: 1.5rem;
-    border-radius: 12px;
-    box-shadow: 0px 4px 8px rgba(0, 0, 0, 0.1);
-    transition: var(--transition);
-  }
-
-  .card:hover {
-    box-shadow: 0px 6px 12px rgba(0, 0, 0, 0.15);
-  }
-
-  /* 🔐 Auth Button */
-  .btn-auth {
-    @apply bg-primary text-primary-foreground;
-  }
-
-  /* 📈 Buy & Sell Buttons */
-  .btn-buy {
-    @apply bg-constructive text-constructive-foreground;
-  }
-
-  .btn-sell {
-    @apply bg-destructive text-destructive-foreground;
-  }
-
-  /* ⏳ Loader Animation */
-  .loader {
-    width: 40px;
-    height: 40px;
-    border: 5px solid hsl(var(--border));
-    border-top-color: hsl(var(--primary));
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    margin: 20px auto;
-  }
-
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
 
-/* 📱 Responsive Design */
-@media (max-width: 768px) {
-  #root {
-    padding: 1rem;
-  }
+::-webkit-scrollbar-track {
+  background: hsl(var(--muted));
+  border-radius: 5px;
+}
 
-  .card {
-    padding: 1rem;
-  }
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 5px;
+  transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.5);
+}
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+  width: 100%;
+  overflow-x: hidden;
+}
+
+/* Focus visible styles */
+*:focus-visible {
+  outline: 2px solid hsl(var(--primary));
+  outline-offset: 2px;
 }

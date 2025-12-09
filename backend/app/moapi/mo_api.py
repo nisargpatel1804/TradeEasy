@@ -445,7 +445,7 @@ class MotilalOswalAPI:
 
     def get_index_ltp(self, exchange: str, scripcode: int, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
         payload: Dict[str, Any] = {
-            "exchange": exchange.upper(),
+            "exchangename": exchange.upper(),
             "scripcode": str(scripcode),
         }
         if clientcode:

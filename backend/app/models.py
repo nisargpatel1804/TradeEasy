@@ -88,6 +88,9 @@ class User(Document, UserMixin):
     def __repr__(self):
         return f"<User {self.username} | ClientID: {self.client_id}>"
 
+TRANSACTION_STATUSES = ("PENDING", "EXECUTED", "CANCELLED")
+
+
 class Transaction(Document):
     """Logs every buy or sell transaction."""
     user = ReferenceField(User, required=True)
@@ -95,7 +98,8 @@ class Transaction(Document):
     action = StringField(choices=('BUY', 'SELL'), required=True)
     quantity = IntField(required=True)
     price = FloatField(required=True)
-    status = StringField(default="EXECUTED", required=True)  # EXECUTED, pending, processing, failed, cancelled
+    status = StringField(default="PENDING", required=True, choices=TRANSACTION_STATUSES)
+    is_processing = BooleanField(default=False)
     order_type = StringField(default='MARKET', required=True)  # MARKET, LIMIT, STOP_LOSS, STOP_LIMIT, BRACKET, TRAILING_STOP
     transaction_date = DateTimeField(default=datetime.utcnow, required=True)
     
@@ -289,3 +293,23 @@ def clean_aqscrip_data(sender, document, **kwargs):
 # Connect signals to the corresponding models
 signals.pre_save.connect(clean_user_data, sender=User)
 signals.pre_save.connect(clean_aqscrip_data, sender=AQScrip)
+
+
+def normalize_transaction_status(sender, document, **kwargs):
+    """Ensure transaction.status stays within the allowed set."""
+    status_value = (document.status or "").upper()
+    normalization_map = {
+        "PROCESSING": "PENDING",
+        "FAILED": "CANCELLED",
+        "CANCELED": "CANCELLED",
+        "CANCELLED": "CANCELLED",
+    }
+    if status_value not in TRANSACTION_STATUSES:
+        status_value = normalization_map.get(status_value, "CANCELLED")
+    document.status = status_value
+    # Reset the processing flag once an order leaves pending state
+    if status_value != "PENDING":
+        document.is_processing = False
+
+
+signals.pre_save.connect(normalize_transaction_status, sender=Transaction)

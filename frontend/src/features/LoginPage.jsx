@@ -13,7 +13,7 @@ import { Loader2 } from "lucide-react";
  * It uses the AuthContext to handle the login process.
  */
 const LoginPage = () => {
-  const [formData, setFormData] = useState({ client_id: "", password: "" });
+  const [formData, setFormData] = useState({ client_id: "", password: "", remember_me: false });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const { login } = useAuth(); // The login function from AuthContext does all the heavy lifting.
@@ -21,10 +21,10 @@ const LoginPage = () => {
   const { toast } = useToast();
 
   const handleChange = (e) => {
-    const { name, value } = e.target;
+    const { name, value, type, checked } = e.target;
     // Convert Client ID to uppercase as the user types for better UX
     const processedValue = name === 'client_id' ? value.toUpperCase().trim() : value;
-    setFormData((prev) => ({ ...prev, [name]: processedValue }));
+    setFormData((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : processedValue }));
   };
 
   const handleSubmit = async (e) => {
@@ -44,6 +44,7 @@ const LoginPage = () => {
       await login({
         client_id: formData.client_id,
         password: formData.password,
+        remember_me: formData.remember_me,
       });
 
       // On successful login, AuthContext will navigate to '/dashboard'.
@@ -102,6 +103,20 @@ const LoginPage = () => {
                 onChange={handleChange}
                 required
               />
+            </div>
+            
+            <div className="flex items-center space-x-2">
+              <input
+                id="remember_me"
+                name="remember_me"
+                type="checkbox"
+                checked={formData.remember_me}
+                onChange={handleChange}
+                className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+              />
+              <Label htmlFor="remember_me" className="text-sm font-normal cursor-pointer">
+                Remember me
+              </Label>
             </div>
             
             <Button type="submit" className="w-full font-semibold" disabled={isLoading}>

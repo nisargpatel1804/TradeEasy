@@ -28,17 +28,19 @@ export const AuthProvider = ({ children }) => {
 
   /**
    * Memoized logout function. It calls the logout service, updates state,
-   * and navigates the user to the login page.
+   * and navigates the user to the login page only on successful logout.
    */
   const handleLogout = useCallback(async () => {
     try {
       await authService.logout();
-    } catch (error) {
-      console.error("Logout failed, but proceeding with client-side cleanup:", error);
-    } finally {
+      // Only clear state and navigate if logout succeeds
       setUser(null);
       setIsAuthenticated(false);
       navigate('/login');
+    } catch (error) {
+      console.error("Logout failed:", error);
+      // Keep user on current page and let them know logout failed
+      throw error; // Re-throw so calling components can handle it
     }
   }, [navigate]);
   

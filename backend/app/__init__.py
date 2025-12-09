@@ -188,17 +188,27 @@ def create_app():
         from datetime import datetime
         
         if current_user.is_authenticated:
-            last_activity = session.get('last_activity')
             now = datetime.utcnow()
+            last_activity = session.get('last_activity')
             
+            # Update timestamp at the start to prevent race conditions
+            session['last_activity'] = now.isoformat()
+            session.modified = True
+            
+            # Check if previous activity was too long ago
             if last_activity:
                 from datetime import datetime as dt
                 if isinstance(last_activity, str):
-                    last_activity = dt.fromisoformat(last_activity)
+                    try:
+                        last_activity = dt.fromisoformat(last_activity)
+                    except ValueError:
+                        # Invalid timestamp format - reset and continue
+                        logger.warning(f"Invalid last_activity timestamp for user {current_user.client_id}")
+                        return
                 
                 idle_duration = now - last_activity
                 if idle_duration > app.config['SESSION_IDLE_TIMEOUT']:
-                    logger.info(f"Session expired due to inactivity for user {current_user.client_id}")
+                    logger.info(f"Session expired due to inactivity for user {current_user.client_id} (idle: {idle_duration})")
                     from flask_login import logout_user
                     logout_user()
                     session.clear()
@@ -206,10 +216,6 @@ def create_app():
                         "success": False,
                         "message": "Session expired due to inactivity. Please log in again."
                     }), 401
-            
-            # Update last activity timestamp
-            session['last_activity'] = now.isoformat()
-            session.modified = True
 
     # --- Configure SocketIO Event Handlers ---
     @socketio.on('connect')

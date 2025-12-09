@@ -27,5 +27,9 @@ gunicorn>=20.1,<23
 python-engineio>=4.8
 python-socketio>=5.10
 
+# Production WebSocket support (install ONE of these for native WebSocket upgrade):
+# eventlet>=0.33  # Recommended for production - enables native WebSocket transport
+# gevent>=23.9    # Alternative async mode for WebSocket support
+
 # Time zone database for ZoneInfo on Windows
 tzdata>=2024.1

@@ -1,8 +1,8 @@
 // Inspired by react-hot-toast library
 import * as React from "react"
 
-const TOAST_LIMIT = 1
-const TOAST_REMOVE_DELAY = 1000000
+const TOAST_LIMIT = 3
+const TOAST_REMOVE_DELAY = 5000
 
 const actionTypes = {
   ADD_TOAST: "ADD_TOAST",
@@ -31,7 +31,7 @@ const addToRemoveQueue = (toastId) => {
       type: "REMOVE_TOAST",
       toastId: toastId,
     })
-  }, TOAST_REMOVE_DELAY)
+  }, memoryState.toasts.find((toast) => toast.id === toastId)?.duration ?? TOAST_REMOVE_DELAY)
 
   toastTimeouts.set(toastId, timeout)
 }
@@ -101,6 +101,7 @@ function dispatch(action) {
 }
 
 function toast({
+  duration = TOAST_REMOVE_DELAY,
   ...props
 }) {
   const id = genId()
@@ -117,12 +118,15 @@ function toast({
     toast: {
       ...props,
       id,
+      duration,
       open: true,
       onOpenChange: (open) => {
         if (!open) dismiss()
       },
     },
   })
+
+  addToRemoveQueue(id)
 
   return {
     id: id,
@@ -141,8 +145,8 @@ function useToast() {
       if (index > -1) {
         listeners.splice(index, 1)
       }
-    };
-  }, [state])
+    }
+  }, [])
 
   return {
     ...state,

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useAuth } from "../context/AuthContext.jsx";
 import * as api from "../services/api.js";
 import { Input } from "../assets/ui/input.jsx";
@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { toast } from "react-hot-toast";
 import { Loader2, Clock, Info, TrendingUp, TrendingDown, AlertCircle } from "lucide-react";
 import priceUpdateService from "../services/priceUpdateService.js";
+import { getSymbolVariants } from "../utils/symbolUtils.js";
 
 const generateIdempotencyKey = () => {
   if (typeof window !== "undefined" && window.crypto?.randomUUID) {
@@ -33,12 +34,18 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
   const [stockData, setStockData] = useState(null);
   const [livePrice, setLivePrice] = useState(null);
   const [portfolioData, setPortfolioData] = useState(null);
-  
+
+  const subscriptionSymbols = useMemo(
+    () => getSymbolVariants(symbol, stockData?.exchange),
+    [symbol, stockData?.exchange]
+  );
+
   // Update symbol if the initial prop changes
   useEffect(() => {
-    setSymbol(initialSymbol.toUpperCase());
-    if (initialSymbol) {
-      fetchStockData(initialSymbol);
+    const normalized = (initialSymbol || "").toUpperCase();
+    setSymbol(normalized);
+    if (normalized) {
+      fetchStockData(normalized);
     }
   }, [initialSymbol]);
 
@@ -59,26 +66,44 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
 
   // Subscribe to live price updates
   useEffect(() => {
-    if (!symbol) return;
-    
+    if (!subscriptionSymbols.length) return undefined;
+
     const unsubscribe = priceUpdateService.subscribe(update => {
-      if (update?.changedPrices && update.changedPrices[symbol]) {
-        setLivePrice(update.changedPrices[symbol]);
-      } else if (update?.allPrices && update.allPrices[symbol]) {
-        setLivePrice(update.allPrices[symbol]);
+      if (!update) return;
+      for (const key of subscriptionSymbols) {
+        if (update?.changedPrices?.[key]) {
+          setLivePrice(update.changedPrices[key]);
+          return;
+        }
+        if (update?.allPrices?.[key]) {
+          setLivePrice(update.allPrices[key]);
+          return;
+        }
       }
     });
-    
+
     return () => unsubscribe();
-  }, [symbol]);
+  }, [subscriptionSymbols]);
 
   // Fetch stock data
   const fetchStockData = async (stockSymbol) => {
     try {
-      const data = await api.getStockDetails(stockSymbol);
-      if (data && data.ltp) {
-        setStockData(data);
-        setLivePrice({ ltp: data.ltp, change: data.change, percent_change: data.percent_change });
+      const response = await api.getStockDetails(stockSymbol);
+      const priceData = response?.price_data;
+      if (!priceData) {
+        return;
+      }
+
+      setStockData(priceData);
+      setLivePrice({
+        ltp: priceData.ltp,
+        change: priceData.change,
+        percent_change: priceData.percent_change,
+      });
+
+      // Ensure symbol input aligns with canonical symbol casing
+      if (!symbol) {
+        setSymbol((priceData.symbol || "").toUpperCase());
       }
     } catch (err) {
       console.error('Failed to fetch stock data:', err);
@@ -286,191 +311,222 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
   const availableBalance = portfolioData?.summary?.available_balance || portfolioData?.summary?.cash_balance || 0;
 
   return (
-    <Card className="w-full max-w-2xl mx-auto shadow-lg">
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-2xl font-bold">Place Order</CardTitle>
-          {getMarketStatusBadge()}
-        </div>
-      </CardHeader>
-      <CardContent>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          {/* Buy/Sell Action Buttons */}
-          <div className="grid grid-cols-2 gap-2">
-            <Button
-              type="button"
-              onClick={() => setAction("BUY")}
-              className={action === "BUY" ? "bg-green-600 hover:bg-green-700 text-white" : "bg-gray-200 text-gray-800"}
-            >
-              Buy
-            </Button>
-            <Button
-              type="button"
-              onClick={() => setAction("SELL")}
-              className={action === "SELL" ? "bg-red-600 hover:bg-red-700 text-white" : "bg-gray-200 text-gray-800"}
-            >
-              Sell
-            </Button>
-          </div>
-
-          {/* Symbol */}
+    <Card className="w-full max-w-3xl mx-auto rounded-[32px] border border-slate-100/80 bg-white/95 shadow-2xl shadow-slate-200/70">
+      <CardHeader className="gap-3 pb-0">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <Label htmlFor="symbol">Symbol</Label>
-            <Input
-              id="symbol"
-              value={symbol}
-              onChange={(e) => {
-                const newSymbol = e.target.value.toUpperCase();
-                setSymbol(newSymbol);
-                if (newSymbol.length >= 2) {
-                  fetchStockData(newSymbol);
-                }
-              }}
-              placeholder="e.g. RELIANCE"
-              required
-              disabled={!!initialSymbol}
-            />
+            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Smart Ticket</p>
+            <CardTitle className="text-2xl font-semibold text-slate-900">Trade Form</CardTitle>
+          </div>
+          {symbol && (
+            <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
+              {symbol}
+            </span>
+          )}
+        </div>
+        {getMarketStatusBadge()}
+      </CardHeader>
+      <CardContent className="pt-6">
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_260px]">
+            <div className="space-y-6">
+              <div className="grid gap-3 sm:grid-cols-2">
+                {[
+                  { key: "BUY", label: "Buy", helper: "Delivery / Long", accent: "emerald", icon: TrendingUp },
+                  { key: "SELL", label: "Sell", helper: "Exit / Short", accent: "rose", icon: TrendingDown },
+                ].map((option) => {
+                  const isActive = action === option.key;
+                  const accentClasses = option.accent === "emerald"
+                    ? {
+                        border: "border-emerald-200",
+                        icon: "bg-emerald-50 text-emerald-600",
+                        text: "text-emerald-700",
+                        glow: "shadow-[0_18px_45px_rgba(16,185,129,0.18)]",
+                      }
+                    : {
+                        border: "border-rose-200",
+                        icon: "bg-rose-50 text-rose-600",
+                        text: "text-rose-700",
+                        glow: "shadow-[0_18px_45px_rgba(244,63,94,0.18)]",
+                      };
+
+                  return (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => setAction(option.key)}
+                      className={`rounded-3xl border bg-white/95 p-4 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/10 ${
+                        isActive
+                          ? `${accentClasses.border} ${accentClasses.glow}`
+                          : "border-slate-200 hover:border-slate-300"
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${accentClasses.icon}`}>
+                          <option.icon className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <p className={`text-base font-semibold ${isActive ? accentClasses.text : "text-slate-900"}`}>
+                            {option.label}
+                          </p>
+                          <p className="text-xs text-slate-500">{option.helper}</p>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="grid gap-5 md:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="symbol" className="text-xs font-semibold uppercase tracking-wide text-slate-500">Symbol</Label>
+                  <Input
+                    id="symbol"
+                    value={symbol}
+                    onChange={(e) => {
+                      const newSymbol = e.target.value.toUpperCase();
+                      setSymbol(newSymbol);
+                      if (newSymbol.length >= 2) {
+                        fetchStockData(newSymbol);
+                      }
+                    }}
+                    placeholder="e.g. RELIANCE"
+                    required
+                    disabled={!!initialSymbol}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="quantity" className="text-xs font-semibold uppercase tracking-wide text-slate-500">Quantity</Label>
+                  <Input
+                    id="quantity"
+                    type="number"
+                    value={quantity}
+                    onChange={(e) => setQuantity(e.target.value)}
+                    placeholder="0"
+                    required
+                    min="1"
+                  />
+                </div>
+              </div>
+
+              <div className="grid gap-5 md:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="entryPrice" className="text-xs font-semibold uppercase tracking-wide text-slate-500">Price (Optional)</Label>
+                  <Input
+                    id="entryPrice"
+                    type="number"
+                    value={entryPrice}
+                    onChange={(e) => setEntryPrice(e.target.value)}
+                    placeholder="Market Price"
+                    min="0.01"
+                    step="0.01"
+                  />
+                  {!entryPrice && (
+                    <p className="text-xs text-slate-500">Executes at live price {formatCurrency(currentLtp)}</p>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="timeframe" className="text-xs font-semibold uppercase tracking-wide text-slate-500">Timeframe</Label>
+                  <Select onValueChange={handleTimeframeChange} value={timeframe}>
+                    <SelectTrigger id="timeframe">
+                      <SelectValue placeholder="Select timeframe" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="intraday">Intraday (auto square-off 3:25 PM)</SelectItem>
+                      {action === "BUY" && <SelectItem value="delivery">Delivery</SelectItem>}
+                      {action === "SELL" && (
+                        <>
+                          <SelectItem value="delivery">Position (until exit)</SelectItem>
+                          <SelectItem value="1month">Park for 1 Month</SelectItem>
+                          <SelectItem value="1year">Park for 1 Year</SelectItem>
+                        </>
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="grid gap-5 md:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="stopLoss" className="text-xs font-semibold uppercase tracking-wide text-slate-500">Stop Loss</Label>
+                  <Input
+                    id="stopLoss"
+                    type="number"
+                    value={stopLoss}
+                    onChange={(e) => setStopLoss(e.target.value)}
+                    placeholder="0.00"
+                    min="0.01"
+                    step="0.01"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="target" className="text-xs font-semibold uppercase tracking-wide text-slate-500">Target</Label>
+                  <Input
+                    id="target"
+                    type="number"
+                    value={target}
+                    onChange={(e) => setTarget(e.target.value)}
+                    placeholder="0.00"
+                    min="0.01"
+                    step="0.01"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <aside className="space-y-4 rounded-3xl border border-slate-100/80 bg-slate-50/60 p-4">
+              {currentLtp > 0 ? (
+                <div className="rounded-2xl border border-white/70 bg-white/80 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Live LTP</p>
+                  <p className="text-3xl font-bold text-slate-900">{formatCurrency(currentLtp)}</p>
+                  <div className={`mt-2 flex items-center gap-2 text-sm font-semibold ${getPriceChangeColor(priceChange)}`}>
+                    {priceChange > 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
+                    {formatCurrency(Math.abs(priceChange))}
+                    <span className="text-xs">({percentChange > 0 ? '+' : ''}{percentChange?.toFixed(2)}%)</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
+                  LTP will appear once a valid symbol is selected.
+                </div>
+              )}
+
+              <div className="space-y-3 rounded-2xl border border-slate-200/80 bg-white/70 p-4">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Available</span>
+                  <span className="text-base font-semibold text-slate-900">{formatCurrency(availableBalance)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">{action === "BUY" ? "Margin Req" : "Proceeds"}</span>
+                  <span className="text-base font-semibold text-slate-900">{formatCurrency(action === "BUY" ? marginRequired : totalAmount)}</span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>Charges</span>
+                  <span className="font-semibold text-slate-900">{formatCurrency(charges)}</span>
+                </div>
+              </div>
+            </aside>
           </div>
 
-          {/* LTP with Change */}
-          {currentLtp > 0 && (
-            <div className="p-3 bg-gray-50 rounded-lg border border-gray-200">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm text-gray-500">Last Traded Price</p>
-                  <p className="text-2xl font-bold">{formatCurrency(currentLtp)}</p>
-                </div>
-                <div className="text-right">
-                  <div className={`flex items-center gap-1 ${getPriceChangeColor(priceChange)}`}>
-                    {priceChange > 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
-                    <span className="font-semibold">{formatCurrency(Math.abs(priceChange))}</span>
-                  </div>
-                  <p className={`text-sm ${getPriceChangeColor(priceChange)}`}>
-                    ({percentChange > 0 ? '+' : ''}{percentChange?.toFixed(2)}%)
-                  </p>
-                </div>
+          {action === "BUY" && marginRequired > availableBalance && (
+            <div className="rounded-2xl border border-rose-200 bg-rose-50/70 p-3 text-sm text-rose-700">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-4 w-4" />
+                <span>Insufficient balance. Required: {formatCurrency(marginRequired)}</span>
               </div>
             </div>
           )}
 
-          {/* Quantity */}
-          <div>
-            <Label htmlFor="quantity">Quantity</Label>
-            <Input
-              id="quantity"
-              type="number"
-              value={quantity}
-              onChange={(e) => setQuantity(e.target.value)}
-              placeholder="0"
-              required
-              min="1"
-            />
-          </div>
-
-          {/* Entry Price (Optional) */}
-          <div>
-            <Label htmlFor="entryPrice">Entry Price (Optional - Leave blank for Market Order)</Label>
-            <Input
-              id="entryPrice"
-              type="number"
-              value={entryPrice}
-              onChange={(e) => setEntryPrice(e.target.value)}
-              placeholder="Market Price"
-              min="0.01"
-              step="0.01"
-            />
-            {!entryPrice && (
-              <p className="text-xs text-gray-500 mt-1">
-                Will execute at market price: {formatCurrency(currentLtp)}
-              </p>
-            )}
-          </div>
-
-          {/* Timeframe */}
-          <div>
-            <Label htmlFor="timeframe">Timeframe</Label>
-            <Select onValueChange={handleTimeframeChange} value={timeframe}>
-              <SelectTrigger id="timeframe">
-                <SelectValue placeholder="Select timeframe" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="intraday">Intraday (Auto square-off at 3:25 PM)</SelectItem>
-                {action === "BUY" && <SelectItem value="delivery">Delivery</SelectItem>}
-                {action === "SELL" && (
-                  <>
-                    <SelectItem value="delivery">Permanent (Until Exit)</SelectItem>
-                    <SelectItem value="1month">1 Month</SelectItem>
-                    <SelectItem value="1year">1 Year</SelectItem>
-                  </>
-                )}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Stop Loss (Optional) */}
-          <div>
-            <Label htmlFor="stopLoss">Stop Loss (Optional)</Label>
-            <Input
-              id="stopLoss"
-              type="number"
-              value={stopLoss}
-              onChange={(e) => setStopLoss(e.target.value)}
-              placeholder="0.00"
-              min="0.01"
-              step="0.01"
-            />
-          </div>
-
-          {/* Target (Optional) */}
-          <div>
-            <Label htmlFor="target">Target (Optional)</Label>
-            <Input
-              id="target"
-              type="number"
-              value={target}
-              onChange={(e) => setTarget(e.target.value)}
-              placeholder="0.00"
-              min="0.01"
-              step="0.01"
-            />
-          </div>
-
-          {/* Available Balance / Margin */}
-          <div className="grid grid-cols-2 gap-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
-            <div>
-              <p className="text-sm text-gray-600">Available Balance</p>
-              <p className="font-semibold text-lg">{formatCurrency(availableBalance)}</p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600">{action === "BUY" ? "Margin Required" : "Estimated Proceeds"}</p>
-              <p className="font-semibold text-lg">{formatCurrency(action === "BUY" ? marginRequired : totalAmount)}</p>
-            </div>
-          </div>
-
-          {/* Charges */}
-          <div className="p-3 bg-gray-50 rounded-lg border border-gray-200">
-            <div className="flex justify-between items-center">
-              <span className="text-sm text-gray-600">Charges</span>
-              <span className="font-semibold">{formatCurrency(charges)}</span>
-            </div>
-          </div>
-
-          {/* Warning for insufficient funds */}
-          {action === "BUY" && marginRequired > availableBalance && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2 text-red-700">
-              <AlertCircle className="h-5 w-5" />
-              <span className="text-sm">Insufficient balance. Required: {formatCurrency(marginRequired)}</span>
-            </div>
+          {error && (
+            <p className="text-center text-sm font-semibold text-rose-600">{error}</p>
           )}
-          
-          {error && <p className="text-sm text-red-500 text-center">{error}</p>}
 
-          <Button 
-            type="submit" 
-            className="w-full" 
+          <Button
+            type="submit"
+            className="w-full rounded-2xl py-6 text-base font-semibold"
             disabled={isLoading || (action === "BUY" && marginRequired > availableBalance)}
           >
-            {isLoading ? <Loader2 className="animate-spin mx-auto" /> : `Place ${action} Order`}
+            {isLoading ? <Loader2 className="mx-auto animate-spin" /> : `Place ${action} Order`}
           </Button>
         </form>
       </CardContent>

@@ -1,8 +1,12 @@
 import logging
 import threading
 import time
+from datetime import time as dt_time
+
 from app.moapi.mo_api import MotilalOswalAPI
 from app.moapi.packet_parser import MOPacketParser
+from app.utils.market_indices import MAJOR_INDEX_TARGETS
+from app.utils.market_hours import get_current_ist_time
 
 # --- Configuration ---
 # Use a more detailed logging format for better debugging
@@ -11,6 +15,9 @@ logging.basicConfig(
     format='%(asctime)s - %(threadName)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+SOCKET_WINDOW_START = dt_time(8, 45)
+SOCKET_WINDOW_END = dt_time(15, 45)
 
 class MO_WebSocket_Manager:
     """
@@ -80,10 +87,48 @@ class MO_WebSocket_Manager:
         # Subscription tracking
         self.registered_scrips = set() # Tracks scrip subscriptions, format: 'EXCHANGE:EXCHANGETYPE:SCRIPCODE'
         
+        # CRITICAL FIX #4: Track user subscriptions to re-register on reconnect
+        self.user_subscriptions = {}  # Maps user_id -> set of scrip keys
+        self.subscription_lock = threading.Lock()
+        
         self.initialized = True
         logger.info("MO WebSocket Manager initialized.")
         self._load_initial_index_data()
         # Note: Watchlist scrips are loaded on-demand when users connect, not at startup
+
+    def _within_socket_window(self, current_dt=None):
+        """Return True when within the websocket trading window (08:45-15:45 IST)."""
+        current_dt = current_dt or get_current_ist_time()
+        current_time = current_dt.time()
+
+        if SOCKET_WINDOW_START <= SOCKET_WINDOW_END:
+            return SOCKET_WINDOW_START <= current_time < SOCKET_WINDOW_END
+
+        # Handles windows that wrap past midnight (not used currently)
+        return current_time >= SOCKET_WINDOW_START or current_time < SOCKET_WINDOW_END
+
+    def update_index_metadata(self, indexcode, name, exchange, prev_close=None, latest_payload=None):
+        """Registers or refreshes index metadata used for live tick processing."""
+        if not indexcode or not exchange:
+            return
+
+        indexcode_str = str(indexcode)
+        exchange_key = exchange.upper()
+        display_name = name or f"{exchange_key}:{indexcode_str}"
+
+        with self.data_lock:
+            self.index_codes_map[indexcode_str] = {
+                "name": display_name,
+                "exchange": exchange_key,
+            }
+
+            if isinstance(prev_close, (int, float)) and prev_close > 0:
+                self.scrip_prev_close[f"{exchange_key}:{indexcode_str}"] = prev_close
+
+            if isinstance(latest_payload, dict):
+                payload_copy = {**latest_payload}
+                payload_copy.setdefault('symbol', f"{exchange_key}:{indexcode_str}")
+                self.latest_indices_data[payload_copy['symbol']] = payload_copy
 
     def start(self):
         """Starts the WebSocket connection manager in a background thread."""
@@ -196,6 +241,24 @@ class MO_WebSocket_Manager:
                     else:
                         logger.info("🟡 Circuit breaker entering HALF-OPEN state. Attempting connection...")
                         self.circuit_state = 'half_open'
+
+                within_socket_window = self._within_socket_window()
+                if not within_socket_window and not self.force_connect:
+                    if self.is_connected or self.ws_authed:
+                        logger.info("⏹️ Trading window closed (08:45 AM - 03:45 PM IST). Disconnecting WebSocket feed.")
+                        try:
+                            self.mo_api.disconnect_websocket()
+                        except Exception as disconnect_error:
+                            logger.debug(f"Graceful disconnect outside trading window failed: {disconnect_error}")
+                        self.is_connected = False
+                        self.ws_authed = False
+
+                    retry_count = 0
+                    self.failure_count = 0
+                    self.circuit_state = 'closed'
+                    logger.info("🌙 Outside trading window. Rechecking in 300 seconds...")
+                    self.stop_event.wait(300)
+                    continue
                 
                 # Check market hours
                 market_open = self.mo_api.market_hours.is_market_open()
@@ -238,7 +301,12 @@ class MO_WebSocket_Manager:
                 retry_count += 1
                 retry_delay = min(base_delay * (2 ** min(retry_count - 1, 4)), max_retry_delay)
                 
-                market_status = "" if self.mo_api.market_hours.is_market_open() else " (Expected - Market is closed)"
+                within_socket_window = self._within_socket_window()
+                if within_socket_window:
+                    market_status = "" if self.mo_api.market_hours.is_market_open() else " (Expected - Market is closed)"
+                else:
+                    market_status = " (Outside trading window)"
+
                 logger.warning(f"🔄 WebSocket connection lost{market_status}. Retry #{retry_count} in {retry_delay}s...")
                 
                 if self.socketio:
@@ -247,6 +315,7 @@ class MO_WebSocket_Manager:
                         "retry_count": retry_count,
                         "retry_in": retry_delay,
                         "market_open": self.mo_api.market_hours.is_market_open(),
+                        "within_socket_window": within_socket_window,
                         "circuit_state": self.circuit_state
                     })
 
@@ -381,11 +450,7 @@ class MO_WebSocket_Manager:
         index_info = self.index_codes_map.get(scrip_code_str, {})
         ltp = data.get('Rate', 0.0)
 
-        if not index_info or ltp <= 0: return
-        
-        # Basic sanity check for extremely invalid values only
-        if ltp < 100 or ltp > 200000:
-            logger.error(f"❌ Rejecting invalid index value for {index_info.get('name', '')}: {ltp}")
+        if not index_info or ltp <= 0:
             return
 
         exchange_key = index_info.get('exchange', '').upper()
@@ -613,6 +678,23 @@ class MO_WebSocket_Manager:
                     exchange, exchange_type, scripcode_str = scrip_key.split(':')
                     self.mo_api.register_scrip(exchange, int(scripcode_str), exchange_type)
                     time.sleep(0.05) # Rate limit subscriptions
+            
+            # CRITICAL FIX #4: Re-register all user subscriptions on reconnect
+            # This ensures watchlist changes during disconnect are restored
+            with self.subscription_lock:
+                if self.user_subscriptions:
+                    logger.info(f"Re-registering subscriptions for {len(self.user_subscriptions)} active users...")
+                    for user_id, scrip_keys in self.user_subscriptions.items():
+                        for scrip_key in scrip_keys:
+                            if scrip_key not in self.registered_scrips:
+                                try:
+                                    exchange, exchange_type, scripcode_str = scrip_key.split(':')
+                                    self.mo_api.register_scrip(exchange, int(scripcode_str), exchange_type)
+                                    self.registered_scrips.add(scrip_key)
+                                    time.sleep(0.05)
+                                    logger.debug(f"Re-registered {scrip_key} for user {user_id}")
+                                except Exception as e:
+                                    logger.warning(f"Failed to re-register {scrip_key}: {e}")
         except Exception as e:
             logger.error(f"Failed during subscription process: {e}")
 
@@ -621,15 +703,47 @@ class MO_WebSocket_Manager:
         Loads the initial snapshot of major index data (e.g., NIFTY, SENSEX)
         using REST calls on startup. This populates the UI before live ticks arrive.
         """
-        # This is a simplified placeholder. In a real app, you would fetch this
-        # from your database or a dedicated MO API endpoint for index masters.
-        # For now, we'll hardcode major indices to bootstrap the process.
-        major_indices = {
-            "26000": {"name": "NIFTY 50", "exchange": "NSE"},
-            "26009": {"name": "NIFTY BANK", "exchange": "NSE"},
-            "999901": {"name": "S&P BSE SENSEX", "exchange": "BSE"}
-        }
-        self.index_codes_map = major_indices
+        discovered_indices = {}
+
+        try:
+            for exchange in ("NSE", "BSE"):
+                master_resp = self.mo_api.get_index_data(exchange)
+                if not (master_resp and master_resp.get('status') == 'SUCCESS'):
+                    logger.warning(f"Unable to fetch index master data for {exchange} during bootstrap")
+                    continue
+
+                master_list = master_resp.get('data', []) or []
+                for entry in master_list:
+                    indexcode = str(entry.get('indexcode') or entry.get('IndexCode') or entry.get('scripcode'))
+                    name = entry.get('indexname') or entry.get('IndexName') or f"{exchange}:{indexcode}"
+
+                    if not indexcode or not name:
+                        continue
+
+                    discovered_indices[indexcode] = {
+                        'name': name,
+                        'exchange': exchange,
+                    }
+        except Exception as exc:
+            logger.warning(f"Failed to dynamically load index metadata: {exc}")
+
+        if not discovered_indices and MAJOR_INDEX_TARGETS:
+            for exchange, targets in MAJOR_INDEX_TARGETS.items():
+                for target in targets:
+                    for code in target.get('codes', []):
+                        discovered_indices[str(code)] = {
+                            'name': target.get('display') or f"{exchange}:{code}",
+                            'exchange': exchange,
+                        }
+
+        if not discovered_indices:
+            discovered_indices = {
+                "26000": {"name": "NIFTY 50", "exchange": "NSE"},
+                "26009": {"name": "NIFTY BANK", "exchange": "NSE"},
+                "999901": {"name": "S&P BSE SENSEX", "exchange": "BSE"}
+            }
+
+        self.index_codes_map = discovered_indices
         logger.info(f"Loaded {len(self.index_codes_map)} major indices for tracking.")
     
     def _heartbeat_loop(self):
@@ -699,6 +813,7 @@ class MO_WebSocket_Manager:
         """
         Registers all stocks from a specific user's watchlists for real-time updates.
         This is called when a user connects via WebSocket.
+        CRITICAL FIX #4 & #6: Track user subscriptions for reconnection and prevent duplicates.
         """
         try:
             from app.models import User
@@ -708,7 +823,10 @@ class MO_WebSocket_Manager:
                 logger.warning(f"User {user_id} not found while registering watchlist stocks.")
                 return 0
             
+            user_id_str = str(user_id)
             stocks_registered = 0
+            user_scrips = set()
+            
             for watchlist in getattr(user, 'watchlists', []) or []:
                 for stock in getattr(watchlist, 'stocks', []) or []:
                     if stock and stock.symbol:
@@ -718,13 +836,25 @@ class MO_WebSocket_Manager:
                             if raw_scripcode is None:
                                 continue
                             scripcode = int(raw_scripcode)
-                            self.register_scrip(stock.symbol, exchange, scripcode)
-                            stocks_registered += 1
+                            
+                            composite_key = f"{exchange}:CASH:{scripcode}"
+                            user_scrips.add(composite_key)
+                            
+                            # HIGH PRIORITY FIX #6: Only register if not already subscribed
+                            if composite_key not in self.registered_scrips:
+                                self.register_scrip(stock.symbol, exchange, scripcode)
+                                stocks_registered += 1
+                            else:
+                                logger.debug(f"Stock {stock.symbol} already subscribed, skipping duplicate")
                         except Exception as e:
                             logger.warning(f"Failed to register stock {getattr(stock, 'symbol', '?')}: {e}")
             
+            # CRITICAL FIX #4: Store user subscriptions for reconnection
+            with self.subscription_lock:
+                self.user_subscriptions[user_id_str] = user_scrips
+            
             if stocks_registered > 0:
-                logger.info(f"Registered {stocks_registered} watchlist stock(s) for user {user_id}")
+                logger.info(f"Registered {stocks_registered} new watchlist stock(s) for user {user_id_str}")
             return stocks_registered
             
         except Exception as e:

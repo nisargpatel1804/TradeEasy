@@ -251,7 +251,7 @@ class OrderProcessor:
                             holding.save()
                             logger.info(f"Released reserved quantity {order.quantity} for cancelled MIS order {order.id}")
                     
-                    order.status = "cancelled"
+                    order.status = "CANCELLED"
                     order.save()
                     logger.info(f"Cancelled pending MIS order {order.id} during auto square-off")
                 except Exception as cancel_error:
@@ -443,9 +443,29 @@ class OrderProcessor:
         """
         Executes a pending order and updates all relevant database records.
         Uses idempotency key to prevent duplicate executions.
-        Improved atomic operation handling.
+        Improved atomic operation handling with race condition prevention.
         """
         try:
+            # CRITICAL FIX #2: Atomic status update FIRST to prevent race condition
+            # This ensures only ONE thread can execute this order
+            result = Transaction.objects(
+                id=order.id,
+                status="PENDING",
+                is_processing=False
+            ).update_one(
+                set__is_processing=True,
+                set__execution_date=datetime.utcnow()
+            )
+            
+            if result == 0 or result is None:
+                logger.warning(f"⚠️ Order {order.id} already processed by another thread. Skipping.")
+                return
+            
+            # Reload order to get updated state
+            order.reload()
+            
+            logger.info(f"✅ Executing order {order.id}: {order.action} {order.quantity} {order.symbol} @{execution_price}")
+            
             # CRITICAL FIX #5: Check idempotency before execution
             if order.idempotency_key:
                 existing_executed = Transaction.objects(
@@ -465,46 +485,33 @@ class OrderProcessor:
                         if holding and holding.reserved_quantity >= order.quantity:
                             holding.reserved_quantity -= order.quantity
                             holding.save()
-                    order.status = "failed"
+                    order.status = "CANCELLED"
+                    order.is_processing = False
                     order.save()
                     return
-            
-            # Atomic status update with validation
-            # This prevents two threads from executing the same order
-            result = Transaction.objects(id=order.id, status="PENDING").update_one(
-                set__status="processing"
-            )
-            
-            if result == 0:
-                # Order was already processed or cancelled by another thread
-                logger.debug(f"Order {order.id} already processed or cancelled")
-                return
-            
-            # Must reload to get fresh data after atomic update
-            order.reload()
-            if order.status != "processing":
-                logger.warning(f"Order {order.id} status changed after reload: {order.status}")
-                return
             
             # Validate stock is still tradeable
             api_data = get_stock_data_from_api(order.symbol)
             if not api_data:
-                logger.error(f"Stock {order.symbol} not found or delisted. Failing order {order.id}")
-                order.status = "failed"
+                logger.error(f"Stock {order.symbol} not found or delisted. Cancelling order {order.id}")
+                order.status = "CANCELLED"
+                order.is_processing = False
                 order.save()
                 return
             
             # Check if stock is suspended or halted
             if api_data.get('issuspended') == 'Y' or api_data.get('isbanscrip') == 'Y':
-                logger.error(f"Stock {order.symbol} is suspended/banned. Failing order {order.id}")
-                order.status = "failed"
+                logger.error(f"Stock {order.symbol} is suspended/banned. Cancelling order {order.id}")
+                order.status = "CANCELLED"
+                order.is_processing = False
                 order.save()
                 return
 
             user = User.objects(id=order.user.id).first()
             if not user:
-                logger.error(f"User for order {order.id} not found. Failing order.")
-                order.status = "failed"
+                logger.error(f"User for order {order.id} not found. Cancelling order.")
+                order.status = "CANCELLED"
+                order.is_processing = False
                 order.save()
                 return
 
@@ -531,9 +538,10 @@ class OrderProcessor:
 
                     if user_balance < total_amount:
                         logger.warning(
-                            f"Insufficient funds for order {order.id}. Required: {total_amount}, Available: {user.balance}. Failing order."
+                            f"Insufficient funds for order {order.id}. Required: {total_amount}, Available: {user.balance}. Cancelling order."
                         )
-                        order.status = "failed"
+                        order.status = "CANCELLED"
+                        order.is_processing = False
                         order.save()
                         user.save()
                         return
@@ -628,14 +636,15 @@ class OrderProcessor:
                     holding = Holding.objects(user=user, symbol=order.symbol, product_type=product_type).first()
                     
                     if not holding or holding.quantity < order.quantity:
-                        logger.warning(f"Insufficient shares for order {order.id}. Failing order.")
-                        order.status = "failed"
+                        logger.warning(f"Insufficient shares for order {order.id}. Cancelling order.")
+                        order.status = "CANCELLED"
+                        order.is_processing = False
                         order.save()
-                        # CRITICAL FIX #2: Release reserved_quantity on failed sell
+                        # CRITICAL FIX #2: Release reserved_quantity on cancelled sell
                         if holding and holding.reserved_quantity >= order.quantity:
                             holding.reserved_quantity -= order.quantity
                             holding.save()
-                            logger.info(f"Released reserved quantity {order.quantity} for failed order {order.id}")
+                            logger.info(f"Released reserved quantity {order.quantity} for cancelled order {order.id}")
                         return
 
                     # Normal sell
@@ -670,8 +679,9 @@ class OrderProcessor:
                 # CRITICAL FIX #9: Preserve original price, store execution price separately
                 if not order.original_price:
                     order.original_price = order.price  # Store original limit/stop price
-                order.price = float(execution_price)  # Update to actual execution price
+                order.price = float(execution_price)
                 order.execution_date = datetime.utcnow()
+                order.is_processing = False
                 
                 user.save()
                 order.save()
@@ -693,14 +703,15 @@ class OrderProcessor:
                 # Ensure reserved balance is released on failure
                 logger.error(f"Error during order execution: {inner_e}", exc_info=True)
                 execution_successful = False
-                # Mark order as failed before cleanup
+                # Mark order as cancelled before cleanup
                 try:
                     order.reload()
-                    if order.status == "processing":
-                        order.status = "failed"
+                    if order.is_processing:
+                        order.status = "CANCELLED"
+                        order.is_processing = False
                         order.save()
                 except Exception as mark_error:
-                    logger.error(f"Could not mark order {order.id} as failed: {mark_error}", exc_info=True)
+                    logger.error(f"Could not mark order {order.id} as cancelled: {mark_error}", exc_info=True)
                 raise  # Re-raise to outer exception handler
             
             finally:
@@ -712,7 +723,7 @@ class OrderProcessor:
                             updated_reserved = Decimal(str(user.reserved_balance)) - reserved_amount
                             user.reserved_balance = float(max(updated_reserved, Decimal('0')))
                             user.save()
-                            logger.info(f"Released reserved balance ₹{float(reserved_amount):.2f} for failed order {order.id}")
+                            logger.info(f"Released reserved balance ₹{float(reserved_amount):.2f} for cancelled order {order.id}")
                         except Exception as cleanup_error:
                             logger.critical(f"CRITICAL: Failed to release reserved balance: {cleanup_error}", exc_info=True)
                     
@@ -723,20 +734,21 @@ class OrderProcessor:
                             if holding and holding.reserved_quantity >= order.quantity:
                                 holding.reserved_quantity -= order.quantity
                                 holding.save()
-                                logger.info(f"Released reserved quantity {order.quantity} for failed sell order {order.id}")
+                                logger.info(f"Released reserved quantity {order.quantity} for cancelled sell order {order.id}")
                         except Exception as cleanup_error:
                             logger.critical(f"CRITICAL: Failed to release reserved quantity: {cleanup_error}", exc_info=True)
 
         except Exception as e:
             logger.error(f"Critical error executing order {order.id}: {e}", exc_info=True)
-            # Reload to ensure we have latest state before marking as failed
+            # Reload to ensure we have latest state before marking as cancelled
             try:
                 order.reload()
-                if order.status == "processing":
-                    order.status = "failed"
+                if order.is_processing:
+                    order.status = "CANCELLED"
+                    order.is_processing = False
                     order.save()
             except:
-                logger.error(f"Could not mark order {order.id} as failed", exc_info=True)
+                logger.error(f"Could not mark order {order.id} as cancelled", exc_info=True)
 
     def _cancel_bracket_legs(self, executed_order):
         """Cancel the opposite leg of a bracket order when one leg executes.
@@ -779,7 +791,8 @@ class OrderProcessor:
                         
                         # Use atomic update to prevent race conditions
                         result = Transaction.objects(id=leg.id, status="PENDING").update_one(
-                            set__status="cancelled"
+                            set__status="CANCELLED",
+                            set__is_processing=False
                         )
                         if result > 0:
                             cancelled_count += 1
@@ -866,7 +879,8 @@ class OrderProcessor:
             Transaction.objects(parent_order_id=str(order.id)).delete()
 
             order.reload()
-            order.status = "failed"
+            order.status = "CANCELLED"
+            order.is_processing = False
             order.execution_date = None
             if order.original_price is not None:
                 order.price = float(order.original_price)

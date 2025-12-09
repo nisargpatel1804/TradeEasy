@@ -17,7 +17,7 @@ import MarketPage from "./features/MarketPage.jsx";
 import Indices from "./features/Indices.jsx";
 import OrderDetail from "./features/OrderDetail.jsx";
 import NotFoundPage from './features/NotFoundPage.jsx';
-import Navbar from "./features/Navbar.jsx";
+import DashboardLayout from "./features/DashboardLayout.jsx";
 import { Toaster } from "./assets/ui/toaster.jsx";
 
 /**
@@ -47,40 +47,32 @@ function App() {
   const { isAuthenticated } = useAuth();
 
   return (
-    <div className="flex flex-col min-h-screen bg-gray-50 text-gray-900">
-      {/* The Navbar will only be displayed for logged-in users */}
-      {isAuthenticated && <Navbar />}
-      
-      <main className="flex-grow p-4 md:p-6 lg:p-8">
-        <Routes>
-          {/* --- Public Routes --- */}
-          {/* These routes are accessible to everyone. If a logged-in user tries to
-              access them, they are redirected to their dashboard. */}
-          <Route path="/" element={isAuthenticated ? <Navigate to="/dashboard" /> : <LandingPage />} />
-          <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" /> : <LoginPage />} />
-          <Route path="/signup" element={isAuthenticated ? <Navigate to="/dashboard" /> : <SignupPage />} />
+    <div className="min-h-screen bg-gray-50 text-gray-900">
+      <Routes>
+        {/* --- Public Routes --- */}
+        <Route path="/" element={isAuthenticated ? <Navigate to="/dashboard" /> : <LandingPage />} />
+        <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" /> : <LoginPage />} />
+        <Route path="/signup" element={isAuthenticated ? <Navigate to="/dashboard" /> : <SignupPage />} />
 
-          {/* --- Protected Routes --- */}
-          {/* These routes are wrapped with the ProtectedRoute component to ensure
-              only authenticated users can access them. */}
-          <Route path="/dashboard" element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />
-          <Route path="/portfolio" element={<ProtectedRoute><PortfolioPage /></ProtectedRoute>} />
-          <Route path="/watchlist" element={<ProtectedRoute><Watchlist /></ProtectedRoute>} />
-          <Route path="/orders" element={<ProtectedRoute><OrdersPage /></ProtectedRoute>} />
-          <Route path="/performance" element={<ProtectedRoute><PerformancePage /></ProtectedRoute>} />
-          <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
-          <Route path="/market" element={<ProtectedRoute><MarketPage /></ProtectedRoute>} />
-          <Route path="/indices" element={<ProtectedRoute><Indices /></ProtectedRoute>} />
-          <Route path="/trade/:symbol" element={<ProtectedRoute><TradePage /></ProtectedRoute>} />
-          <Route path="/stock/overview/:symbol" element={<ProtectedRoute><StockOverview /></ProtectedRoute>} />
-          <Route path="/stock/:symbol" element={<ProtectedRoute><StockOverview /></ProtectedRoute>} />
-          <Route path="/order-detail/:orderId" element={<ProtectedRoute><OrderDetail /></ProtectedRoute>} />
-          
-          {/* --- 404 Not Found Route --- */}
-          {/* This catch-all route renders if no other route matches. */}
-          <Route path="*" element={<NotFoundPage />} />
-        </Routes>
-      </main>
+        {/* --- Protected Routes w/ Dashboard layout --- */}
+        <Route element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/portfolio" element={<PortfolioPage />} />
+          <Route path="/watchlist" element={<Watchlist />} />
+          <Route path="/orders" element={<OrdersPage />} />
+          <Route path="/performance" element={<PerformancePage />} />
+          <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/market" element={<MarketPage />} />
+          <Route path="/indices" element={<Indices />} />
+          <Route path="/trade/:symbol" element={<TradePage />} />
+          <Route path="/stock/overview/:symbol" element={<StockOverview />} />
+          <Route path="/stock/:symbol" element={<StockOverview />} />
+          <Route path="/order-detail/:orderId" element={<OrderDetail />} />
+        </Route>
+
+        {/* --- 404 Not Found Route --- */}
+        <Route path="*" element={<NotFoundPage />} />
+      </Routes>
       <Toaster />
     </div>
   );
