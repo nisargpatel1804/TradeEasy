@@ -28,11 +28,13 @@ class OrderProcessor:
     
     Uses MongoDB transactions for atomic operations to prevent race conditions.
     """
-    def __init__(self, interval: int = 10):
+    def __init__(self, interval: int = 10, app=None):
         """Initializes the processor with a check interval."""
         self.interval = interval
         self.stop_thread = False
-        self.app = create_app()  # Create a Flask app instance for the thread's context
+        # Reuse the already-created Flask app when available (prevents
+        # starting scheduler/socket manager twice inside the worker thread).
+        self.app = app or create_app()
         self.trailing_stop_triggers = {}  # Track trailing stop trigger prices
 
     def run(self):
@@ -896,12 +898,12 @@ class OrderProcessor:
             )
 
 
-def start_order_processor():
+def start_order_processor(app=None):
     """
     Initializes and starts the background order processing thread.
     This should be called from the main application entry point (e.g., run.py).
     """
-    processor = OrderProcessor()
+    processor = OrderProcessor(app=app)
     thread = Thread(target=processor.run, name="OrderProcessorThread", daemon=True)
     thread.start()
     logger.info("✅ Order processor thread started")

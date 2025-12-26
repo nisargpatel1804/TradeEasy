@@ -5,7 +5,24 @@ import axios from "axios";
 // Load API base URL from environment variables, with a fallback for local development.
 // NOTE: In production we may intentionally set VITE_API_BASE_URL to an empty string
 // to use same-origin requests (e.g., behind Vercel rewrites).
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:5000";
+const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL;
+
+const isLocalhostBase = (value) => {
+  if (typeof value !== 'string') return false;
+  const v = value.trim().toLowerCase();
+  return (
+    v === 'http://localhost:5000' ||
+    v === 'http://127.0.0.1:5000' ||
+    v.startsWith('http://localhost:') ||
+    v.startsWith('http://127.0.0.1:')
+  );
+};
+
+// In production on Vercel, `localhost` is never correct. If it's set accidentally,
+// force same-origin so `/api/*` rewrites can work.
+const API_BASE_URL = (import.meta.env.PROD && isLocalhostBase(rawApiBaseUrl))
+  ? ""
+  : (rawApiBaseUrl ?? (import.meta.env.PROD ? "" : "http://localhost:5000"));
 const DEFAULT_TIMEOUT = 15000; // 15 seconds
 
 /**

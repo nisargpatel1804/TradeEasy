@@ -108,10 +108,18 @@ def create_app():
     if app.config.get('DEBUG', False):
         CORS(app, supports_credentials=True, origins='*')
     else:
+        # In production, explicitly allow the Vercel frontend
+        allowed_origins = [
+            frontend_url,
+            "https://tradeeasy-frontend.vercel.app",
+            "http://127.0.0.1:5173"
+        ]
         CORS(
             app,
-            resources={r"/api/*": {"origins": [frontend_url, "http://127.0.0.1:5173"]}},
-            supports_credentials=True
+            resources={r"/api/*": {"origins": allowed_origins}},
+            supports_credentials=True,
+            allow_headers=['Content-Type', 'Authorization'],
+            expose_headers=['Content-Type'],
         )
 
     # --- Singleton WebSocket Manager Initialization ---

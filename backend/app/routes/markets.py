@@ -428,7 +428,6 @@ def _get_index_constituents(exchange, search_terms, preferred_codes=None):
 # --- API Routes ---
 
 @markets_bp.route("/indices", methods=["GET"])
-@login_required
 def get_market_indices():
     """
     Provides a snapshot of major market indices by efficiently fetching and
@@ -570,7 +569,6 @@ def get_market_indices():
 
 
 @markets_bp.route("/market", methods=["GET"])
-@login_required
 def get_market():
     """Returns Nifty 50 constituents + real-time movers (server-side)."""
     try:

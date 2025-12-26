@@ -93,7 +93,7 @@ class ProductionConfig(Config):
     """
     DEBUG = False
     SESSION_COOKIE_SECURE = True # Enforce HTTPS for all session cookies
-    SESSION_COOKIE_SAMESITE = 'Strict'
+    SESSION_COOKIE_SAMESITE = 'None' # Allow cross-origin cookies (required for separate frontend/backend domains)
 
     # Critical security check for production
     if not Config.SECRET_KEY or Config.SECRET_KEY == 'dev-secret-key-for-testing':
