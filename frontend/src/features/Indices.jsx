@@ -5,9 +5,10 @@ import { useSocket } from '../context/SocketContext.jsx';
 import priceUpdateService from '../services/priceUpdateService.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../assets/ui/card.jsx';
 import { Skeleton } from '../assets/ui/skeleton.jsx';
-import { AlertTriangle, RefreshCw, Search as SearchIcon } from 'lucide-react';
+import { AlertTriangle, RefreshCw, Search as SearchIcon, ArrowLeft } from 'lucide-react';
 import { Button } from '../assets/ui/button.jsx';
 import { Input } from '../assets/ui/input.jsx';
+import { useNavigate } from 'react-router-dom';
 
 
 const formatNumber = (value) => {
@@ -30,6 +31,7 @@ const formatPercent = (value) => {
 const Indices = () => {
   const { indicesData: initialIndices, isLoadingIndices, indicesError, getInitialIndices } = useDataContext();
   const { isConnected, isReconnecting, connectionStatus, lastError } = useSocket();
+  const navigate = useNavigate();
   const [indices, setIndices] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -84,8 +86,6 @@ const Indices = () => {
       if (Array.isArray(latest) && latest.length > 0) {
         setIndices(latest);
       }
-    } catch (error) {
-      console.error('Unable to refresh indices', error);
     } finally {
       setIsRefreshing(false);
     }
@@ -152,12 +152,25 @@ const Indices = () => {
   };
 
   return (
-    <div className="space-y-6 px-2 pb-12 pt-4 sm:px-4 lg:px-8">
+    <div className="mx-auto max-w-7xl space-y-3 pb-4 pt-2 px-2 sm:px-3 lg:px-4">
       <section className="rounded-3xl border border-slate-100 bg-white/90 p-5 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">Market Overview</p>
-            <h1 className="text-3xl font-bold text-slate-900">Live Indices</h1>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              className="h-9 w-9 shrink-0 rounded-full border-slate-200"
+              onClick={() => navigate(-1)}
+              aria-label="Back"
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </Button>
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Market Overview</p>
+              <h1 className="text-lg font-semibold text-slate-900 sm:text-xl">Live Indices</h1>
+              <p className="text-xs font-medium text-slate-500">Live snapshot from the market feed.</p>
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <span
@@ -222,7 +235,7 @@ const IndexCard = ({ index }) => {
         <div className="text-right">
           <p className="text-2xl font-bold text-slate-900">{formatNumber(priceValue)}</p>
           <p className={`text-sm font-semibold ${isPositive ? 'text-emerald-600' : 'text-red-600'}`}>
-            {isPositive ? '+' : ''}{formatPercent(percentValue)}
+            {formatPercent(percentValue)}
           </p>
         </div>
       </div>

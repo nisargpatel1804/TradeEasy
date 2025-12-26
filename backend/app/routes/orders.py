@@ -1,4 +1,5 @@
 import logging
+from datetime import timezone
 from flask import Blueprint, jsonify
 from flask_login import login_required, current_user
 from app.models import Transaction
@@ -9,11 +10,21 @@ orders_bp = Blueprint('orders', __name__)
 
 STATUS_KEYS = ("EXECUTED", "PENDING", "CANCELLED")
 
+
+def _iso_utc(dt) -> str | None:
+    if not dt:
+        return None
+    if getattr(dt, 'tzinfo', None) is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
 # --- Helper Function ---
 
 def _format_order(order: Transaction) -> dict:
     """Formats a Transaction document into a clean dictionary for the API response."""
     status_value = (order.status or '').upper()
+    # Prefer execution_date when available (this matches "when trade executed" for pending orders).
+    primary_dt = order.execution_date or order.transaction_date
     formatted = {
         "id": str(order.id),
         "symbol": order.symbol,
@@ -23,7 +34,7 @@ def _format_order(order: Transaction) -> dict:
         "order_type": order.order_type,
         "status": status_value,
         "status_display": order.status,
-        "date": order.transaction_date.isoformat(),
+        "date": _iso_utc(primary_dt),
         "product_type": order.product_type if hasattr(order, 'product_type') else 'CNC'
     }
     
@@ -35,7 +46,7 @@ def _format_order(order: Transaction) -> dict:
     if order.trailing_stop_pct:
         formatted["trailing_stop_pct"] = float(order.trailing_stop_pct)
     if order.execution_date:
-        formatted["execution_date"] = order.execution_date.isoformat()
+        formatted["execution_date"] = _iso_utc(order.execution_date)
     
     return formatted
 

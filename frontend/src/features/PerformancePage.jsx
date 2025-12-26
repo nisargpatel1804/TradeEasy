@@ -1,30 +1,24 @@
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
-import { useNavigate } from "react-router-dom";
 import { toast } from "react-hot-toast";
+import { useNavigate } from "react-router-dom";
 import * as api from "../services/api.js";
 import priceUpdateService from "../services/priceUpdateService.js";
 import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx";
 import { Skeleton } from "../assets/ui/skeleton.jsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../assets/ui/table.jsx";
-import { TrendingUp, TrendingDown, Receipt } from "lucide-react";
+import { TrendingUp, TrendingDown, Receipt, ArrowLeft } from "lucide-react";
 import { cn } from "../utils/cn.js";
-import { mergePriceMapWithVariants, pickLivePriceForSymbol, seedPriceMapFromHoldings } from "../utils/symbolUtils.js";
 import { Button } from "../assets/ui/button.jsx";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "../assets/ui/dialog.jsx";
-import TradeForm from "./TradeForm.jsx";
+import { mergePriceMapWithVariants, pickLivePriceForSymbol, seedPriceMapFromHoldings } from "../utils/symbolUtils.js";
 
 const PerformancePage = ({ isEmbedded = false }) => {
+  const navigate = useNavigate();
   const [portfolioData, setPortfolioData] = useState(null);
   const [orders, setOrders] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [livePrices, setLivePrices] = useState({});
-  const [exitLoadingSymbol, setExitLoadingSymbol] = useState(null);
-  const [selectedHolding, setSelectedHolding] = useState(null);
-  const [tradeModalAction, setTradeModalAction] = useState("SELL");
-  const [isTradeModalOpen, setIsTradeModalOpen] = useState(false);
-  const navigate = useNavigate();
 
   const loadData = useCallback(async ({ showLoader = false } = {}) => {
     try {
@@ -36,11 +30,6 @@ const PerformancePage = ({ isEmbedded = false }) => {
       const portfolioResponse = await api.fetchPortfolio();
       if (portfolioResponse.success) {
         setPortfolioData(portfolioResponse);
-        const initialPrices = seedPriceMapFromHoldings([
-          ...(portfolioResponse.cnc_holdings || []),
-          ...(portfolioResponse.mis_holdings || []),
-        ]);
-        setLivePrices(initialPrices);
       }
       
       const ordersResponse = await api.fetchOrders();
@@ -63,75 +52,32 @@ const PerformancePage = ({ isEmbedded = false }) => {
     return () => clearInterval(interval);
   }, [loadData]);
 
-  // Subscribe to live price updates
   useEffect(() => {
-    const unsubscribe = priceUpdateService.subscribe(update => {
-      setLivePrices(currentPrices => {
+    const holdings = Array.isArray(portfolioData?.holdings) ? portfolioData.holdings : [];
+    setLivePrices(seedPriceMapFromHoldings(holdings));
+  }, [portfolioData]);
+
+  useEffect(() => {
+    const unsubscribe = priceUpdateService.subscribe((update) => {
+      setLivePrices((currentPrices) => {
         if (update?.type === 'reset') {
           return {};
         }
+
         if (update?.type === 'snapshot' && update?.allPrices) {
           return mergePriceMapWithVariants(currentPrices, update.allPrices);
         }
-        if (update?.changedPrices) {
+
+        if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
           return mergePriceMapWithVariants(currentPrices, update.changedPrices);
         }
+
         return currentPrices;
       });
     });
+
     return () => unsubscribe();
   }, []);
-
-  const openTradeModal = (holding, action = "SELL") => {
-    setSelectedHolding(holding);
-    setTradeModalAction(action);
-    setIsTradeModalOpen(true);
-  };
-
-  const closeTradeModal = () => {
-    setIsTradeModalOpen(false);
-    setSelectedHolding(null);
-  };
-
-  const handleExitPosition = async (holding, event) => {
-    event?.stopPropagation();
-    if (!holding?.symbol || holding.quantity <= 0) {
-      return;
-    }
-
-    const toastId = toast.loading(`Exiting ${holding.symbol}...`);
-    setExitLoadingSymbol(holding.symbol);
-    try {
-      const payload = {
-        symbol: holding.symbol,
-        quantity: holding.quantity,
-        action: 'SELL',
-        product_type: holding.product_type || 'CNC',
-        order_type: 'MARKET',
-        allow_short: false,
-      };
-
-      const result = await api.placeTrade(payload);
-      if (result.success) {
-        toast.success(result.message || `Exit order placed for ${holding.symbol}.`, { id: toastId });
-        await loadData();
-      } else {
-        throw new Error(result.message || 'Failed to exit position.');
-      }
-    } catch (err) {
-      toast.error(err.message || 'Failed to exit position.', { id: toastId });
-    } finally {
-      setExitLoadingSymbol(null);
-    }
-  };
-
-  const handleDetailsClick = (holding, event) => {
-    event?.stopPropagation();
-    if (!holding?.symbol) {
-      return;
-    }
-    navigate(`/stock/${holding.symbol}`);
-  };
 
   const formatCurrency = (value) => {
     if (typeof value !== 'number') return '₹0.00';
@@ -144,68 +90,74 @@ const PerformancePage = ({ isEmbedded = false }) => {
     return 'text-gray-700 dark:text-gray-300';
   };
 
-  // Calculate P&L for each trade
-  const tradesWithPnL = orders.map(order => {
-    // For simplicity, P&L calculation would need buy and sell pairs
-    // This is a simplified version - in production, you'd match buy/sell pairs
-    const pnl = 0; // Placeholder - needs proper calculation
-    return {
-      ...order,
-      pnl
-    };
-  });
-
-  // Calculate total stats with live prices
+  // Calculate total stats (prefer live prices so totals update in real-time)
   const totalCharges = 0; // As per requirements, charges are 0 for now
-  const realizedPnL = portfolioData?.summary?.realized_pnl || 0;
-  
-  const holdingsWithLiveData = useMemo(() => {
-    if (!portfolioData) {
-      return [];
-    }
-
-    const baseHoldings = [
-      ...(portfolioData.cnc_holdings || []).map((holding) => ({ ...holding, product_type: 'CNC' })),
-      ...(portfolioData.mis_holdings || []).map((holding) => ({ ...holding, product_type: 'MIS' })),
-    ];
-
-    return baseHoldings.map((holding) => {
-      const liveData = pickLivePriceForSymbol(livePrices, holding.symbol, holding.exchange);
-      const ltp = liveData?.ltp ?? holding.ltp;
-      const marketValue = ltp * holding.quantity;
-      const pnl = marketValue - holding.investment_value;
-      const pnlPct = holding.investment_value > 0 ? (pnl / holding.investment_value) * 100 : 0;
-      return {
-        ...holding,
-        ltp,
-        marketValue,
-        pnl,
-        pnlPct,
-      };
-    });
-  }, [portfolioData, livePrices]);
+  const realizedPnL = Number(portfolioData?.summary?.realized_pnl) || 0;
 
   const unrealizedPnL = useMemo(() => {
-    if (!holdingsWithLiveData.length) {
-      return 0;
-    }
-    return holdingsWithLiveData.reduce((sum, holding) => sum + holding.pnl, 0);
-  }, [holdingsWithLiveData]);
-  
-  const totalPnL = realizedPnL + unrealizedPnL;
+    const holdings = Array.isArray(portfolioData?.holdings) ? portfolioData.holdings : [];
+
+    const invested = holdings.reduce((sum, holding) => {
+      const qty = Number(holding?.quantity) || 0;
+      const investmentValue = Number(holding?.investment_value);
+      if (Number.isFinite(investmentValue)) {
+        return sum + investmentValue;
+      }
+      const avg = Number(holding?.average_price) || 0;
+      return sum + (avg * qty);
+    }, 0);
+
+    const current = holdings.reduce((sum, holding) => {
+      const qty = Number(holding?.quantity) || 0;
+      if (!holding?.symbol || qty === 0) {
+        return sum;
+      }
+
+      const live = pickLivePriceForSymbol(livePrices, holding.symbol, holding.exchange);
+      const ltp = Number(live?.ltp ?? live?.price ?? holding?.ltp) || 0;
+      return sum + (ltp * qty);
+    }, 0);
+
+    // Keep any API-only unrealized component (e.g., short positions) as a stable baseline.
+    const summaryHoldingsValue = Number(portfolioData?.summary?.holdings_value);
+    const summaryInvestment = Number(portfolioData?.summary?.total_investment);
+    const summaryUnrealized = Number(portfolioData?.summary?.unrealized_pnl);
+
+    const apiHoldingsUnrealized =
+      Number.isFinite(summaryHoldingsValue) && Number.isFinite(summaryInvestment)
+        ? (summaryHoldingsValue - summaryInvestment)
+        : 0;
+
+    const apiNonHoldingUnrealized =
+      Number.isFinite(summaryUnrealized)
+        ? (summaryUnrealized - apiHoldingsUnrealized)
+        : 0;
+
+    return (current - invested) + apiNonHoldingUnrealized;
+  }, [portfolioData, livePrices]);
+
+  const totalPnL = useMemo(() => realizedPnL + unrealizedPnL, [realizedPnL, unrealizedPnL]);
 
   const pageShellClasses = cn(
-    "space-y-6",
-    isEmbedded ? "" : "mx-auto max-w-6xl px-2 pb-10 pt-4 sm:px-4 lg:px-8"
+    "mx-auto max-w-7xl space-y-3 pb-4 pt-2",
+    isEmbedded ? "" : "px-2 sm:px-3 lg:px-4"
   );
 
   if (isLoading) {
     return (
       <div className={pageShellClasses}>
-        <Skeleton className="h-8 w-48" />
-        <div className="grid gap-4 md:grid-cols-3">
+        {!isEmbedded && (
+          <div className="flex items-center gap-2">
+            <Skeleton className="h-9 w-9 rounded-full" />
+            <div className="space-y-1">
+              <Skeleton className="h-5 w-32" />
+              <Skeleton className="h-3 w-56" />
+            </div>
+          </div>
+        )}
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {[...Array(3)].map((_, idx) => (
-            <Skeleton key={idx} className="h-28 rounded-3xl" />
+            <Skeleton key={idx} className="h-24 rounded-3xl" />
           ))}
         </div>
         <Skeleton className="h-96 rounded-3xl" />
@@ -225,152 +177,132 @@ const PerformancePage = ({ isEmbedded = false }) => {
         animate={{ opacity: 1 }}
         transition={{ duration: 0.5 }}
       >
-        {!isEmbedded && <h1 className="text-3xl font-bold text-slate-900">Performance</h1>}
+        {!isEmbedded && (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-9 w-9 shrink-0 rounded-full border-slate-200"
+                onClick={() => navigate(-1)}
+                aria-label="Back"
+              >
+                <ArrowLeft className="h-4 w-4" />
+              </Button>
+              <div>
+                <h1 className="text-lg font-semibold text-slate-900 sm:text-xl">Performance</h1>
+                <p className="text-xs font-medium text-slate-500">Realized, unrealized, and completed trades in one view.</p>
+              </div>
+            </div>
+          </div>
+        )}
 
       {/* Summary Cards */}
-      <div className="grid gap-4 md:grid-cols-3 mb-6">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <Card className="rounded-3xl border border-slate-100 shadow-sm">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Realized P&L</CardTitle>
-            {realizedPnL >= 0 ? <TrendingUp className="h-4 w-4 text-green-600" /> : <TrendingDown className="h-4 w-4 text-red-600" />}
-          </CardHeader>
-          <CardContent>
-            <div className={`text-2xl font-bold ${getPnlColor(realizedPnL)}`}>
-              {formatCurrency(realizedPnL)}
+            <CardTitle className="text-xs font-semibold uppercase tracking-wide text-slate-500">Realized P&L</CardTitle>
+            <div className={cn(
+              "flex h-8 w-8 items-center justify-center rounded-2xl",
+              realizedPnL >= 0 ? "bg-emerald-500/10 text-emerald-700" : "bg-red-500/10 text-red-600"
+            )}>
+              {realizedPnL >= 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
             </div>
-            <p className="text-xs text-gray-500 mt-1">From closed positions</p>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className={cn("text-xl font-bold", getPnlColor(realizedPnL))}>{formatCurrency(realizedPnL)}</div>
+            <p className="mt-1 text-xs text-slate-500">From closed positions</p>
           </CardContent>
         </Card>
 
         <Card className="rounded-3xl border border-slate-100 shadow-sm">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Unrealized P&L</CardTitle>
-            {unrealizedPnL >= 0 ? <TrendingUp className="h-4 w-4 text-green-600" /> : <TrendingDown className="h-4 w-4 text-red-600" />}
-          </CardHeader>
-          <CardContent>
-            <div className={`text-2xl font-bold ${getPnlColor(unrealizedPnL)}`}>
-              {formatCurrency(unrealizedPnL)}
+            <CardTitle className="text-xs font-semibold uppercase tracking-wide text-slate-500">Unrealized P&L</CardTitle>
+            <div className={cn(
+              "flex h-8 w-8 items-center justify-center rounded-2xl",
+              unrealizedPnL >= 0 ? "bg-emerald-500/10 text-emerald-700" : "bg-red-500/10 text-red-600"
+            )}>
+              {unrealizedPnL >= 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
             </div>
-            <p className="text-xs text-gray-500 mt-1">From open positions</p>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className={cn("text-xl font-bold", getPnlColor(unrealizedPnL))}>{formatCurrency(unrealizedPnL)}</div>
+            <p className="mt-1 text-xs text-slate-500">From open positions</p>
           </CardContent>
         </Card>
 
         <Card className="rounded-3xl border border-slate-100 shadow-sm">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Charges</CardTitle>
-            <Receipt className="h-4 w-4 text-gray-600" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-gray-700">
-              {formatCurrency(totalCharges)}
+            <CardTitle className="text-xs font-semibold uppercase tracking-wide text-slate-500">Charges</CardTitle>
+            <div className="flex h-8 w-8 items-center justify-center rounded-2xl bg-slate-900/5 text-slate-900">
+              <Receipt className="h-4 w-4" />
             </div>
-            <p className="text-xs text-gray-500 mt-1">Trading fees & taxes</p>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className="text-xl font-bold text-slate-900">{formatCurrency(totalCharges)}</div>
+            <p className="mt-1 text-xs text-slate-500">Trading fees & taxes</p>
           </CardContent>
         </Card>
       </div>
 
       {/* Total P&L Card */}
-      <Card className="mb-6 rounded-3xl border border-slate-100 shadow-sm">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-lg font-medium">Total P&L</CardTitle>
-          {totalPnL >= 0 ? <TrendingUp className="h-5 w-5 text-green-600" /> : <TrendingDown className="h-5 w-5 text-red-600" />}
-        </CardHeader>
-        <CardContent>
-          <div className={`text-4xl font-bold ${getPnlColor(totalPnL)}`}>
-            {formatCurrency(totalPnL)}
-          </div>
-          <p className="text-sm text-gray-500 mt-2">
-            Realized: {formatCurrency(realizedPnL)} + Unrealized: {formatCurrency(unrealizedPnL)}
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card className="mb-6 rounded-3xl border border-slate-100 shadow-sm">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+      <Card className="rounded-3xl border border-slate-100 shadow-sm">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
           <div>
-            <CardTitle className="text-lg font-medium">Performance Stocks</CardTitle>
-            <p className="text-xs text-gray-500">Live positions with quick actions</p>
+            <CardTitle className="text-base font-semibold text-slate-900">Total P&L</CardTitle>
+            <p className="text-xs font-medium text-slate-500">Realized + unrealized</p>
           </div>
-          <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-            {holdingsWithLiveData.length} active
-          </span>
+          <div className={cn(
+            "flex h-9 w-9 items-center justify-center rounded-2xl",
+            totalPnL >= 0 ? "bg-emerald-500/10 text-emerald-700" : "bg-red-500/10 text-red-600"
+          )}>
+            {totalPnL >= 0 ? <TrendingUp className="h-5 w-5" /> : <TrendingDown className="h-5 w-5" />}
+          </div>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {holdingsWithLiveData.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-200 p-8 text-center text-sm text-slate-500">
-              No open positions available.
-            </div>
-          ) : (
-            holdingsWithLiveData.map((holding) => (
-              <div
-                key={`${holding.symbol}-${holding.product_type}`}
-                className="rounded-2xl border border-slate-100 bg-white/90 p-4 shadow-sm"
-              >
-                <div className="grid gap-4 md:grid-cols-[1fr_auto_auto] md:items-center">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{holding.product_type}</p>
-                    <p className="text-xl font-semibold text-slate-900">{holding.symbol}</p>
-                    <p className="text-sm text-slate-500">{holding.quantity} shares @ {formatCurrency(holding.average_price)}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">LTP</p>
-                    <p className="text-2xl font-bold text-slate-900">{formatCurrency(holding.ltp)}</p>
-                    <p className={`text-sm font-semibold ${getPnlColor(holding.pnl)}`}>
-                      {formatCurrency(holding.pnl)} ({holding.pnl >= 0 ? '+' : ''}{holding.pnlPct.toFixed(2)}%)
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap justify-end gap-2">
-                    <Button size="sm" variant="outline" onClick={() => openTradeModal(holding, 'SELL')}>
-                      Modify
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="destructive"
-                      isLoading={exitLoadingSymbol === holding.symbol}
-                      onClick={(e) => handleExitPosition(holding, e)}
-                    >
-                      Exit
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={(e) => handleDetailsClick(holding, e)}>
-                      Details
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
+        <CardContent className="pt-0">
+          <div className={cn("text-3xl font-bold", getPnlColor(totalPnL))}>{formatCurrency(totalPnL)}</div>
+          <p className="mt-2 text-xs text-slate-500">
+            Realized {formatCurrency(realizedPnL)} · Unrealized {formatCurrency(unrealizedPnL)}
+          </p>
         </CardContent>
       </Card>
 
       {/* Exited Trades Table */}
       <Card className="rounded-3xl border border-slate-100 shadow-sm">
-        <CardHeader>
-          <CardTitle>Completed Trades ({orders.length})</CardTitle>
+        <CardHeader className="space-y-1">
+          <CardTitle className="text-base font-semibold text-slate-900">Completed Trades</CardTitle>
+          <p className="text-xs font-medium text-slate-500">Executed orders ({orders.length})</p>
         </CardHeader>
-        <CardContent>
+        <CardContent className="pt-0">
           {orders.length > 0 ? (
-            <Table>
+            <>
+            <div className="hidden md:block overflow-x-auto">
+              <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Symbol</TableHead>
-                  <TableHead>Action</TableHead>
-                  <TableHead className="text-right">Quantity</TableHead>
-                  <TableHead className="text-right">Price</TableHead>
-                  <TableHead className="text-right">Total Value</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Status</TableHead>
+                  <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Date</TableHead>
+                  <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Symbol</TableHead>
+                  <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Action</TableHead>
+                  <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-slate-500">Qty</TableHead>
+                  <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-slate-500">Price</TableHead>
+                  <TableHead className="text-right text-[11px] font-semibold uppercase tracking-wide text-slate-500">Value</TableHead>
+                  <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Type</TableHead>
+                  <TableHead className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Status</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {orders.map((order, idx) => (
                   <TableRow key={order.id || idx}>
                     <TableCell className="text-sm">
-                      {new Date(order.date).toLocaleDateString()}
+                      {new Date(order.date).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}
                     </TableCell>
                     <TableCell className="font-medium">{order.symbol}</TableCell>
                     <TableCell>
-                      <span className={`font-semibold ${order.action === 'BUY' ? 'text-green-600' : 'text-red-600'}`}>
+                      <span className={cn(
+                        "font-semibold",
+                        order.action === 'BUY' ? "text-emerald-700" : "text-red-600"
+                      )}>
                         {order.action}
                       </span>
                     </TableCell>
@@ -378,69 +310,94 @@ const PerformancePage = ({ isEmbedded = false }) => {
                     <TableCell className="text-right">{formatCurrency(order.price)}</TableCell>
                     <TableCell className="text-right">{formatCurrency(order.quantity * order.price)}</TableCell>
                     <TableCell>
-                      <span className={`text-xs px-2 py-1 rounded ${order.product_type === 'MIS' ? 'bg-orange-100 text-orange-800' : 'bg-blue-100 text-blue-800'}`}>
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold",
+                          order.product_type === 'MIS' ? "bg-amber-500/15 text-amber-800" : "bg-slate-900/5 text-slate-700"
+                        )}
+                      >
                         {order.product_type || 'CNC'}
                       </span>
                     </TableCell>
                     <TableCell>
-                      <span className="text-xs px-2 py-1 rounded bg-green-100 text-green-800 capitalize">
-                        {order.status}
+                      <span className="inline-flex items-center rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-800 capitalize">
+                        {order.status_display || order.status}
                       </span>
                     </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
+            </div>
+
+            <div className="md:hidden space-y-2">
+              {orders.map((order, idx) => (
+                <div
+                  key={order.id || `${order.symbol}-${idx}-mobile`}
+                  className="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">{order.symbol}</p>
+                      <p className="mt-1 text-xs font-medium text-slate-500">
+                        {new Date(order.date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className={cn(
+                        "text-sm font-semibold",
+                        order.action === 'BUY' ? "text-emerald-700" : "text-red-600"
+                      )}>
+                        {order.action}
+                      </p>
+                      <p className="mt-1 text-xs font-medium text-slate-500">Qty {order.quantity}</p>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2 rounded-2xl bg-slate-50/80 p-3 text-xs">
+                    <div>
+                      <p className="font-semibold uppercase tracking-wide text-slate-500">Price</p>
+                      <p className="font-semibold text-slate-900">{formatCurrency(order.price)}</p>
+                    </div>
+                    <div>
+                      <p className="font-semibold uppercase tracking-wide text-slate-500">Value</p>
+                      <p className="font-semibold text-slate-900">{formatCurrency(order.quantity * order.price)}</p>
+                    </div>
+                    <div>
+                      <p className="font-semibold uppercase tracking-wide text-slate-500">Type</p>
+                      <span className={cn(
+                        "inline-flex w-fit items-center rounded-full px-2.5 py-1 text-[11px] font-semibold",
+                        order.product_type === 'MIS' ? "bg-amber-500/15 text-amber-800" : "bg-slate-900/5 text-slate-700"
+                      )}>
+                        {order.product_type || 'CNC'}
+                      </span>
+                    </div>
+                    <div>
+                      <p className="font-semibold uppercase tracking-wide text-slate-500">Status</p>
+                      <span className="inline-flex w-fit items-center rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-800 capitalize">
+                        {order.status_display || order.status}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            </>
           ) : (
-            <div className="text-center py-12 text-gray-500">
+            <div className="rounded-3xl border border-dashed border-slate-200 bg-slate-50/50 p-10 text-center text-sm font-medium text-slate-600">
               No completed trades yet.
             </div>
           )}
         </CardContent>
       </Card>
 
-      {/* Info Note */}
-      <div className="mt-6 rounded-3xl border border-blue-100 bg-blue-50/70 p-6 text-blue-800">
-        <p className="text-sm text-blue-800">
+      <div className="rounded-3xl border border-slate-200 bg-white/70 p-4 text-slate-700 shadow-sm">
+        <p className="text-xs font-medium text-slate-600">
           <strong>Note:</strong> Realized P&L is calculated from positions that have been completely exited (bought and sold).
           Unrealized P&L shows the current profit/loss on your open positions based on live market prices.
         </p>
       </div>
       </motion.div>
-
-      <Dialog
-      open={isTradeModalOpen && Boolean(selectedHolding)}
-      onOpenChange={(open) => {
-        setIsTradeModalOpen(open);
-        if (!open) {
-          setSelectedHolding(null);
-        }
-      }}
-    >
-      <DialogContent className="max-w-2xl">
-        <>
-          <DialogHeader>
-            <DialogTitle>
-              {tradeModalAction === 'SELL' ? 'Modify Exit Plan' : 'Update Order'} - {selectedHolding?.symbol}
-            </DialogTitle>
-            <DialogDescription>
-              Fine-tune stop loss, targets, or switch product type without leaving the performance dashboard.
-            </DialogDescription>
-          </DialogHeader>
-          {selectedHolding && (
-            <TradeForm
-              symbol={selectedHolding.symbol}
-              action={tradeModalAction}
-              onTradeSuccess={() => {
-                closeTradeModal();
-                loadData();
-              }}
-              onClose={closeTradeModal}
-            />
-          )}
-        </>
-      </DialogContent>
-    </Dialog>
     </>
   );
 };

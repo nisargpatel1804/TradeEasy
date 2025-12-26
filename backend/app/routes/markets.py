@@ -1,8 +1,11 @@
+import csv
+import io
 import logging
 import time
 from flask import Blueprint, jsonify
 from flask_login import login_required
 from mongoengine.queryset.visitor import Q
+import requests
 from app.socket_manager import MO_WebSocket_Manager
 from app.models import AQScrip
 from app.utils.market_indices import MAJOR_INDEX_TARGETS
@@ -16,21 +19,28 @@ _api_cache = {}
 _index_lookup_warnings = set()
 CACHE_TTL_SECONDS = 30  # Cache API responses for 30 seconds to reduce load
 
-# --- Configuration for Major Market Indices ---
-MARKET_INDEX_CONFIG = {
-    "nifty50": {
-        "display": "Nifty 50",
-        "exchange": "NSE",
-        "terms": ["NIFTY 50", "NIFTY50"],
-        "codes": ["26009", "26000"],
-    },
-    "sensex": {
-        "display": "S&P BSE Sensex",
-        "exchange": "BSE",
-        "terms": ["SENSEX"],
-        "codes": ["999901"],
-    },
-}
+# Nifty 50 constituents CSV (official source)
+NIFTY50_CSV_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv"
+NIFTY50_CACHE_TTL_SECONDS = 6 * 60 * 60  # refresh every 6 hours
+_nifty50_cache = {"symbols": [], "timestamp": 0.0}
+
+# Static fallback list (used only when the CSV is unreachable and no cached list exists).
+# This keeps the app functional during transient network/provider issues.
+NIFTY50_STATIC_SYMBOLS = [
+    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
+    "BAJAJ-AUTO", "BAJFINANCE", "BAJAJFINSV", "BEL", "BHARTIARTL",
+    "BPCL", "BRITANNIA", "CIPLA", "COALINDIA", "DRREDDY",
+    "EICHERMOT", "ETERNAL", "GRASIM", "HCLTECH", "HDFCBANK",
+    "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDUNILVR", "ICICIBANK",
+    "ITC", "INDUSINDBK", "INFY", "JSWSTEEL", "KOTAKBANK",
+    "LT", "M&M", "MARUTI", "NESTLEIND", "NTPC",
+    "ONGC", "POWERGRID", "RELIANCE", "SBILIFE", "SBIN",
+    "SUNPHARMA", "TCS", "TATACONSUM", "TATAMOTORS", "TATASTEEL",
+    "TECHM", "TITAN", "TRENT", "ULTRACEMCO", "WIPRO",
+]
+
+# NOTE: This module now focuses on Nifty 50 via the official CSV.
+# Other market/constituent routes were intentionally removed per spec.
 
 PRICE_KEYS = ("ltp", "indexvalue", "indexValue", "lastprice", "lastPrice", "close", "Close")
 CHANGE_KEYS = ("change", "indexchange", "indexChange")
@@ -149,6 +159,33 @@ def _resolve_stock_price(entry, candidates):
     return 0.0
 
 
+def _resolve_stock_price_eod(entry, candidates):
+    """Extracts the first numeric price from EOD payload (values are already in rupees)."""
+    if not isinstance(entry, dict):
+        return 0.0
+
+    for key in candidates:
+        value = entry.get(key)
+        if value in (None, "", "NA", "NaN", "-", "null"):
+            value = None
+
+        if value is None:
+            matching_key = next((k for k in entry.keys() if isinstance(k, str) and k.lower() == key.lower()), None)
+            value = entry.get(matching_key) if matching_key else None
+
+        if value in (None, "", "NA", "NaN", "-", "null"):
+            continue
+
+        try:
+            numeric = float(value)
+            if numeric > 0:
+                return numeric
+        except (TypeError, ValueError):
+            continue
+
+    return 0.0
+
+
 def _split_movers(payload, limit=10):
     """Splits the stock payload into top gainers and losers."""
     gainers = [stock for stock in payload if stock.get("change", 0) > 0]
@@ -164,6 +201,186 @@ def _split_movers(payload, limit=10):
         "loser_count": len(losers),
         "unchanged_count": len(payload) - (len(gainers) + len(losers)),
     }
+
+
+def _fetch_nifty50_symbols() -> list[str]:
+    """Fetch Nifty 50 constituent symbols (tickers) from the official CSV."""
+    now = time.time()
+    if _nifty50_cache["symbols"] and (now - _nifty50_cache["timestamp"] < NIFTY50_CACHE_TTL_SECONDS):
+        return list(_nifty50_cache["symbols"])
+
+    try:
+        # Use browser-like headers to avoid being blocked by the server
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1"
+        }
+
+        # NiftyIndices can be slow/occasionally block default clients.
+        # Try a couple times before falling back.
+        resp = None
+        last_error = None
+        for attempt in range(2):
+            try:
+                resp = requests.get(NIFTY50_CSV_URL, headers=headers, timeout=(10, 30))
+                resp.raise_for_status()
+                break
+            except Exception as exc:
+                last_error = exc
+                # Short sleep before retry
+                time.sleep(1)
+
+        if resp is None:
+            raise last_error or RuntimeError("CSV fetch failed")
+
+        content = resp.content.decode("utf-8", errors="replace")
+        reader = csv.DictReader(io.StringIO(content))
+
+        symbols: list[str] = []
+        for row in reader:
+            # Column is typically "Symbol"
+            sym = (row.get("Symbol") or row.get("SYMBOL") or "").strip().upper()
+            if sym:
+                symbols.append(sym)
+
+        # Keep order stable, de-dup just in case
+        seen = set()
+        deduped = []
+        for sym in symbols:
+            if sym in seen:
+                continue
+            seen.add(sym)
+            deduped.append(sym)
+
+        if deduped:
+            _nifty50_cache["symbols"] = deduped
+            _nifty50_cache["timestamp"] = now
+            logger.info(f"Successfully fetched {len(deduped)} symbols from Nifty CSV.")
+        return deduped
+    except Exception as e:
+        # Warn but don't error out - fallback to static list to keep app running
+        logger.warning(f"Failed to fetch Nifty 50 CSV (using static fallback): {e}")
+        
+        # Best-effort fallback to last cached result
+        cached = list(_nifty50_cache.get("symbols") or [])
+        if cached:
+            return cached
+        return list(NIFTY50_STATIC_SYMBOLS)
+
+
+def _seed_and_subscribe_nifty50(socket_manager: MO_WebSocket_Manager) -> list[dict]:
+    """Ensure all Nifty 50 scrips are subscribed and seeded with initial snapshots."""
+    mo_api = socket_manager.mo_api
+    symbols = _fetch_nifty50_symbols()
+    if not symbols:
+        # Secondary fallback: derive constituents from the scrip master (index identifier)
+        # if available in the database.
+        try:
+            docs = _get_index_constituents("NSE", search_terms=["NIFTY 50", "NIFTY50"], preferred_codes=["26000", "26009"])
+            derived = []
+            for doc in docs:
+                if doc and doc.scripshortname:
+                    derived.append(str(doc.scripshortname).upper())
+            if derived:
+                symbols = derived
+        except Exception as e:
+            logger.warning(f"Unable to derive Nifty 50 constituents from DB: {e}")
+
+    if not symbols:
+        return []
+
+    # Resolve to MO scripcodes via master DB
+    aq_scrips = list(AQScrip.objects(exchangename="NSE", scripshortname__in=symbols).only(
+        "scripcode", "scripshortname", "scripname", "exchangename"
+    ))
+    by_short = {str(doc.scripshortname).upper(): doc for doc in aq_scrips if doc and doc.scripshortname}
+
+    # Fetch bulk EOD once for seeding prev_close + fallback price.
+    # NOTE: MO EOD values are already in rupees (not paisa).
+    eod_list = []
+    try:
+        eod_resp = _get_cached_or_fetch("eod_bulk_NSE", mo_api.get_eod_data, "NSE")
+        if eod_resp and eod_resp.get("status") == "SUCCESS":
+            eod_list = eod_resp.get("data", []) or []
+    except Exception as e:
+        logger.warning(f"Unable to fetch NSE EOD bulk for seeding: {e}")
+
+    eod_by_scrip = _normalize_price_map(eod_list, SCRIP_LOOKUP_KEYS) if eod_list else {}
+
+    constituents: list[dict] = []
+    subscribed_count = 0
+    seeded_count = 0
+
+    for ticker in symbols:
+        doc = by_short.get(ticker)
+        if not doc:
+            logger.debug(f"Nifty50 ticker '{ticker}' not found in AQScrip.")
+            continue
+
+        full_symbol = f"{ticker}.NSE"
+        scripcode = int(doc.scripcode)
+
+        # Queue websocket subscription (idempotent)
+        try:
+            socket_manager.register_scrip(symbol=full_symbol, exchange="NSE", scripcode=scripcode, exchange_type="CASH")
+            subscribed_count += 1
+        except Exception as e:
+            logger.warning(f"Failed to register websocket for {full_symbol}: {e}")
+
+        # Seed prev_close + initial snapshot (so % change works immediately)
+        price_data = eod_by_scrip.get(str(scripcode)) if eod_by_scrip else None
+        if isinstance(price_data, dict):
+            ltp = _resolve_stock_price_eod(price_data, STOCK_PRICE_KEYS)
+            prev_close = _resolve_stock_price_eod(price_data, STOCK_PREV_CLOSE_KEYS)
+
+            if prev_close > 0:
+                composite_key = f"NSE:{scripcode}"
+                with socket_manager.data_lock:
+                    socket_manager.scrip_prev_close[composite_key] = prev_close
+
+            if ltp > 0 and prev_close > 0:
+                change = ltp - prev_close
+                percent_change = (change / prev_close) * 100 if prev_close else 0.0
+                payload = {
+                    "symbol": full_symbol,
+                    "ltp": round(ltp, 2),
+                    "change": round(change, 2),
+                    "percent_change": round(percent_change, 2),
+                    "volume": int(price_data.get("volume", 0) or 0),
+                    "price_source": "eod_seed",
+                    "last_updated": int(time.time() * 1000),
+                }
+                with socket_manager.data_lock:
+                    # Don't clobber a fresher websocket value, but DO replace empty/zero snapshots.
+                    existing = socket_manager.latest_stock_data.get(full_symbol)
+                    existing_ltp = 0.0
+                    if isinstance(existing, dict):
+                        try:
+                            existing_ltp = float(existing.get("ltp") or 0.0)
+                        except (TypeError, ValueError):
+                            existing_ltp = 0.0
+
+                    if not existing or existing_ltp <= 0:
+                        socket_manager.latest_stock_data[full_symbol] = payload
+                seeded_count += 1
+
+        constituents.append({
+            "symbol": full_symbol,
+            "name": (doc.scripname or ticker).replace(" EQ", ""),
+            "exchange": "NSE",
+            "scripcode": scripcode,
+        })
+
+    logger.info(
+        "Nifty50 init complete: %s constituents, %s registered, %s seeded",
+        len(constituents),
+        subscribed_count,
+        seeded_count,
+    )
+    return constituents
 
 def _get_index_constituents(exchange, search_terms, preferred_codes=None):
     """Finds constituent scrips for a major index from the database."""
@@ -351,17 +568,11 @@ def get_market_indices():
             "indices": formatted_indices  # Return whatever we managed to fetch
         }), 500
 
-@markets_bp.route("/markets/<string:market_name>", methods=["GET"])
-@login_required
-def get_market_constituents(market_name):
-    """
-    Provides a detailed view of a specific market index, including the live prices
-    of its constituent stocks.
-    """
-    config = MARKET_INDEX_CONFIG.get(market_name.lower())
-    if not config:
-        return jsonify({"success": False, "message": "Unsupported market index."}), 404
 
+@markets_bp.route("/market", methods=["GET"])
+@login_required
+def get_market():
+    """Returns Nifty 50 constituents + real-time movers (server-side)."""
     try:
         socket_manager = MO_WebSocket_Manager()
         mo_api = socket_manager.mo_api
@@ -369,54 +580,49 @@ def get_market_constituents(market_name):
         if not mo_api.auth_token and not mo_api.login():
             return jsonify({"success": False, "message": "Market data provider is currently unavailable."}), 503
 
-        constituents = _get_index_constituents(config['exchange'], config.get('terms'), config.get('codes'))
+        constituents = _seed_and_subscribe_nifty50(socket_manager)
         if not constituents:
-            return jsonify({"success": False, "message": "Could not load market constituents."}), 404
+            return jsonify({"success": False, "message": "Could not load Nifty 50 constituents."}), 503
 
-        price_response = _get_cached_or_fetch(f"bulk_eod_{config['exchange']}", mo_api.get_bulk_eod_data, config['exchange'])
-        price_map = _normalize_price_map(price_response.get("data", {}) if price_response else {}, SCRIP_LOOKUP_KEYS)
+        market_status = "OPEN" if mo_api.market_hours.is_market_open() else "CLOSED"
+
+        # Build stock payload from the websocket manager's latest cache
+        symbols = [item["symbol"] for item in constituents]
+        latest_map = socket_manager.get_latest_stock_data(symbols=symbols)
 
         stocks_payload = []
-        for scrip in constituents:
-            price_data = price_map.get(str(scrip.scripcode))
-            if not price_data:
-                continue
-
-            ltp = _resolve_stock_price(price_data, STOCK_PRICE_KEYS)
-            prev_close = _resolve_stock_price(price_data, STOCK_PREV_CLOSE_KEYS)
-
-            if ltp <= 0 or prev_close <= 0:
-                continue
-
-            change = ltp - prev_close
-            percent_change = (change / prev_close) * 100 if prev_close else 0.0
-
+        for item in constituents:
+            symbol = item["symbol"]
+            latest = latest_map.get(symbol) or {}
+            ltp = float(latest.get("ltp") or 0.0)
+            change = float(latest.get("change") or 0.0)
+            percent_change = float(latest.get("percent_change") or 0.0)
             stocks_payload.append({
-                "symbol": f"{scrip.scripshortname}.{config['exchange']}",
-                "name": scrip.scripname.replace(" EQ", ""),
-                "price": round(ltp, 2),
+                "symbol": symbol,
+                "name": item.get("name") or symbol,
+                "ltp": round(ltp, 2),
                 "change": round(change, 2),
                 "percent_change": round(percent_change, 2),
-                "exchange": config['exchange'],
+                "exchange": "NSE",
             })
-        
-        stocks_payload.sort(key=lambda x: x['symbol'])
 
+        # Movers should be classified from live websocket-derived fields
         movers = _split_movers(stocks_payload, limit=10)
 
         return jsonify({
             "success": True,
-            "market_name": config['display'],
+            "market_name": "Nifty 50",
+            "market_status": market_status,
             "total_count": len(stocks_payload),
             "gainers": movers["gainers"],
             "losers": movers["losers"],
             "gainer_count": movers["gainer_count"],
             "loser_count": movers["loser_count"],
             "unchanged": movers["unchanged_count"],
-            "stocks": stocks_payload,
-            "last_updated": int(time.time() * 1000)
-        })
+            "stocks": sorted(stocks_payload, key=lambda x: x["symbol"]),
+            "last_updated": int(time.time() * 1000),
+        }), 200
 
     except Exception as e:
-        logger.error(f"Error in /markets/{market_name} endpoint: {e}", exc_info=True)
+        logger.error(f"Error in /market endpoint: {e}", exc_info=True)
         return jsonify({"success": False, "message": "An internal server error occurred."}), 500

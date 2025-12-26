@@ -238,6 +238,12 @@ def create_app():
                     manager.register_user_watchlist_stocks(current_user.id)
                 except Exception as e:
                     logger.error(f"Error registering watchlist stocks for user {current_user.id}: {e}")
+
+                # Also register current portfolio holdings for real-time updates
+                try:
+                    manager.register_user_portfolio_stocks(current_user.id)
+                except Exception as e:
+                    logger.error(f"Error registering portfolio stocks for user {current_user.id}: {e}")
             
             # Send the latest cached index data to the newly connected client
             latest_indices = manager.get_latest_indices_data()

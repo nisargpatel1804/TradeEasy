@@ -3,7 +3,7 @@ from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from mongoengine.errors import NotUniqueError
 
-from app.models import User, Stock, Watchlist
+from app.models import User, Stock, Watchlist, Holding, ShortPosition
 from app.socket_manager import MO_WebSocket_Manager
 from app.utils.cache import cached_route, cache as app_cache
 # Import the centralized, cached function for resolving stock data
@@ -55,9 +55,29 @@ def _get_watchlist_or_404(user: User, watchlist_name: str) -> Watchlist | None:
 
 
 def _is_stock_tracked_elsewhere(stock: Stock) -> bool:
-    """Checks whether the given stock is still referenced in any watchlist."""
-    # Use only('id') to minimize the fields pulled back from MongoDB.
-    return User.objects(watchlists__stocks=stock).only("id").first() is not None
+    """Checks whether the given stock is still referenced anywhere needing live ticks.
+
+    Live subscriptions are global (not per-user). We should only unsubscribe a scrip
+    when it is not referenced in *any* watchlist and not present in *any* active
+    holding/short position.
+    """
+    # Watchlists (any user)
+    if User.objects(watchlists__stocks=stock).only("id").first() is not None:
+        return True
+
+    symbol = getattr(stock, 'symbol', None)
+    if not symbol:
+        return False
+
+    # Holdings (any user)
+    if Holding.objects(symbol=symbol, quantity__gt=0).only('id').first() is not None:
+        return True
+
+    # Active shorts (any user)
+    if ShortPosition.objects(symbol=symbol, is_active=True).only('id').first() is not None:
+        return True
+
+    return False
 
 
 # --- API Routes ---

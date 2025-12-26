@@ -1,7 +1,6 @@
 import logging
 import time
 from flask import Blueprint, jsonify, request
-from functools import lru_cache
 from app.models import AQScrip, Stock
 from app.socket_manager import MO_WebSocket_Manager
 
@@ -9,19 +8,12 @@ from app.socket_manager import MO_WebSocket_Manager
 logger = logging.getLogger(__name__)
 stock_bp = Blueprint('stock', __name__)
 
-# Module-level cache for bulk EOD data to avoid redundant API calls
+# Module-level caches to avoid redundant API calls
 _eod_cache = {}
 EOD_CACHE_TTL = 300  # 5 minutes
 
-# --- Helper Functions ---
-
-def format_symbol(symbol: str) -> str:
-    """Cleans and standardizes a stock symbol by removing exchange suffixes."""
-    if not isinstance(symbol, str): return ""
-    clean_symbol = symbol.strip().upper()
-    if '.' in clean_symbol:
-        return clean_symbol.split('.')[0]
-    return clean_symbol
+_stock_data_cache = {}
+STOCK_DATA_CACHE_TTL = 2  # seconds; keep small so UI stays fresh
 
 def _get_cached_eod_data(mo_api, exchange: str) -> list:
     """Fetches and caches bulk EOD data for an exchange to minimize API calls."""
@@ -43,15 +35,48 @@ def _get_cached_eod_data(mo_api, exchange: str) -> list:
     
     return []
 
-# --- Helper Functions ---
-
 def format_symbol(symbol: str) -> str:
     """Cleans and standardizes a stock symbol by removing exchange suffixes."""
-    if not isinstance(symbol, str): return ""
+    if not isinstance(symbol, str):
+        return ""
     clean_symbol = symbol.strip().upper()
     if '.' in clean_symbol:
         return clean_symbol.split('.')[0]
     return clean_symbol
+
+
+def _iter_instrument_candidates(symbol: str) -> list[dict]:
+    """Return ordered list of instrument candidates for a given base symbol.
+
+    We prefer the daily master (AQScrip) and keep Stock docs as fallback.
+    This protects against stale/incorrect scripcodes stored in user watchlist.
+    """
+    candidates: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+
+    def _add(exchange: str, scripcode: int, source: str):
+        key = (exchange.upper(), int(scripcode))
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append({"exchange": key[0], "scripcode": key[1], "source": source})
+
+    # 1) Master table (preferred)
+    aq_nse = AQScrip.objects(exchangename='NSE', scripshortname=symbol).first()
+    if aq_nse:
+        _add('NSE', aq_nse.scripcode, 'AQScrip:NSE')
+
+    aq_bse = AQScrip.objects(exchangename='BSE', scripshortname=symbol).first()
+    if aq_bse:
+        _add('BSE', aq_bse.scripcode, 'AQScrip:BSE')
+
+    # 2) Any existing Stock docs (fallback)
+    # symbol is base (e.g., TCS); watchlist may store TCS.NS / TCS.NSE etc.
+    for stock_doc in Stock.objects(symbol__istartswith=symbol)[:5]:
+        if stock_doc.exchange and stock_doc.scripcode:
+            _add(stock_doc.exchange, stock_doc.scripcode, f"Stock:{stock_doc.symbol}")
+
+    return candidates
 
 def extract_price_with_fallback(api_data: dict) -> tuple[float, str]:
     """
@@ -84,7 +109,6 @@ def extract_price_with_fallback(api_data: dict) -> tuple[float, str]:
 
 # --- Core Data Fetching Logic ---
 
-@lru_cache(maxsize=512)
 def get_stock_data_from_api(symbol: str) -> dict | None:
     """
     The centralized, cached function to fetch comprehensive stock data for a given symbol.
@@ -95,6 +119,13 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
     if not clean_symbol:
         return None
 
+    now = time.time()
+    cached = _stock_data_cache.get(clean_symbol)
+    if cached:
+        cached_data, cached_at = cached
+        if now - cached_at < STOCK_DATA_CACHE_TTL:
+            return cached_data
+
     try:
         # Get the singleton instance of the manager and its authenticated API object
         socket_manager = MO_WebSocket_Manager()
@@ -103,41 +134,63 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
         if not mo_api.auth_token and not mo_api.login():
             raise ConnectionError("MO API login failed. Cannot fetch stock data.")
 
-        # --- Step 1: Resolve Symbol to Scripcode and Exchange ---
-        instrument = _resolve_instrument(clean_symbol)
-        if not instrument:
+        # --- Step 1: Resolve Symbol to candidate instruments ---
+        candidates = _iter_instrument_candidates(clean_symbol)
+        if not candidates:
             logger.warning(f"Could not resolve instrument for symbol: {clean_symbol}")
             return None
-        
-        exchange, scripcode = instrument['exchange'], instrument['scripcode']
 
-        # --- Step 2: Fetch Live/EOD Data from API ---
-        response = mo_api.get_ltp_data(exchange, scripcode)
-        if not response or response.get("status") != "SUCCESS" or not response.get("data"):
-            logger.warning(f"No valid LTP data from API for {clean_symbol} ({scripcode})")
-            return None
+        # --- Step 2: Try candidates until we get usable price data ---
+        data = None
+        exchange = None
+        scripcode = None
+        price_source = 'unavailable'
+        ltp = 0.0
 
-        # --- Step 3: Extract Price with Fallback Logic ---
-        data = response["data"]
-        
-        ltp, price_source = extract_price_with_fallback(data)
-        
-        # If still zero, try fetching from bulk EOD data as final fallback
-        if ltp <= 0:
-            logger.info(f"LTP is zero for {clean_symbol}, attempting bulk EOD fallback")
-            eod_data_list = _get_cached_eod_data(mo_api, exchange)
-            
-            # Find our scripcode in the bulk response
-            for eod_entry in eod_data_list:
-                if str(eod_entry.get("scripcode")) == str(scripcode):
-                    ltp, price_source = extract_price_with_fallback(eod_entry)
-                    if ltp > 0:
-                        data = eod_entry  # Use EOD entry for remaining fields
-                        logger.info(f"✓ Found {clean_symbol} in bulk EOD: ₹{ltp} (source: {price_source})")
-                        break
-        
-        if ltp <= 0:
-            logger.warning(f"No valid price available for {clean_symbol} ({scripcode}) - all fields zero")
+        for candidate in candidates:
+            exchange = candidate['exchange']
+            scripcode = candidate['scripcode']
+
+            response = mo_api.get_ltp_data(exchange, scripcode)
+            if not response or response.get("status") != "SUCCESS" or not response.get("data"):
+                logger.warning(
+                    f"No valid LTP data from API for {clean_symbol} ({exchange}:{scripcode}) [source={candidate.get('source')}]"
+                )
+                continue
+
+            data = response["data"]
+            ltp, price_source = extract_price_with_fallback(data)
+
+            if ltp <= 0:
+                logger.info(f"LTP is zero for {clean_symbol}, attempting bulk EOD fallback ({exchange}:{scripcode})")
+                eod_data_list = _get_cached_eod_data(mo_api, exchange)
+                for eod_entry in eod_data_list:
+                    if str(eod_entry.get("scripcode")) == str(scripcode):
+                        candidate_ltp, candidate_source = extract_price_with_fallback(eod_entry)
+                        if candidate_ltp > 0:
+                            data = eod_entry
+                            ltp = candidate_ltp
+                            price_source = candidate_source
+                            logger.info(
+                                f"✓ Found {clean_symbol} in bulk EOD: ₹{ltp} (source: {price_source}) [{exchange}:{scripcode}]"
+                            )
+                            break
+
+            if ltp > 0:
+                # Optional: heal stale Stock docs that share this base symbol.
+                try:
+                    Stock.objects(symbol__istartswith=clean_symbol).update(
+                        set__exchange=exchange,
+                        set__scripcode=int(scripcode),
+                    )
+                except Exception:
+                    # Best-effort only; do not fail the request.
+                    pass
+
+                break
+
+        if not data or not exchange or not scripcode or ltp <= 0:
+            logger.warning(f"No valid price available for {clean_symbol} (tried {len(candidates)} candidates)")
             return None
         
         # Get the actual previous day's close for accurate change calculation
@@ -163,7 +216,7 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
             change = 0.0
             percent_change = 0.0
 
-        return {
+        result = {
             'symbol': clean_symbol,
             'exchange': exchange,
             'scripcode': scripcode,
@@ -179,31 +232,15 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
             'last_updated': int(time.time() * 1000)
         }
 
+        # Cache only successful responses.
+        _stock_data_cache[clean_symbol] = (result, now)
+        return result
+
     except Exception as e:
         logger.error(f"Error in get_stock_data_from_api for '{clean_symbol}': {e}", exc_info=True)
         # Clear the cache for this specific symbol on failure to allow retries
         get_stock_data_from_api.cache_clear()
         return None
-
-def _resolve_instrument(symbol: str) -> dict | None:
-    """Finds the exchange and scripcode for a symbol using the database."""
-    # Priority 1: Check the Stock collection (user-specific/watchlist stocks)
-    stock_doc = Stock.objects(symbol__startswith=symbol).first()
-    if stock_doc:
-        return {'exchange': stock_doc.exchange, 'scripcode': stock_doc.scripcode}
-
-    # Priority 2: Check the master AQScrip collection
-    # Search NSE first as it's the most common
-    aq_scrip = AQScrip.objects(exchangename='NSE', scripshortname=symbol).first()
-    if aq_scrip:
-        return {'exchange': 'NSE', 'scripcode': aq_scrip.scripcode}
-    
-    # Fallback to BSE if not found on NSE
-    aq_scrip = AQScrip.objects(exchangename='BSE', scripshortname=symbol).first()
-    if aq_scrip:
-        return {'exchange': 'BSE', 'scripcode': aq_scrip.scripcode}
-        
-    return None
 
 # --- API Routes ---
 

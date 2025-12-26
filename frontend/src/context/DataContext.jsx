@@ -158,10 +158,9 @@ export const DataProvider = ({ children }) => {
         }
         return indices;
       } catch (err) {
-        console.error('Failed to load indices:', err);
         updateIndicesData([]);
         setIndicesError(err.message || 'Could not load market indices.');
-        throw err;
+        return [];
       } finally {
         setIsLoadingIndices(false);
       }

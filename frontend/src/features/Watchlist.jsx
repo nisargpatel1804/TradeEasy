@@ -15,7 +15,7 @@ import { Skeleton } from "../assets/ui/skeleton.jsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../assets/ui/table.jsx";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../assets/ui/dialog.jsx";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "../assets/ui/dropdown-menu.jsx";
-import { Search, Plus, PlusCircle, Trash2, Loader2, AlertTriangle, ArrowUpDown, ChevronUp, ChevronDown } from "lucide-react";
+import { Search, Plus, PlusCircle, Trash2, Loader2, AlertTriangle, ArrowUpDown, ChevronUp, ChevronDown, ArrowLeft } from "lucide-react";
 
 import TradeForm from "./TradeForm.jsx";
 import { Card, CardContent } from "../assets/ui/card.jsx";
@@ -33,6 +33,8 @@ const Watchlist = () => {
     const [sortConfig, setSortConfig] = useState({ column: null, direction: 'asc' });
     const [isLoading, setIsLoading] = useState(true);
     const [showTradeModal, setShowTradeModal] = useState(false);
+    const [isTradeSubmitting, setIsTradeSubmitting] = useState(false);
+    const [tradeCloseRequested, setTradeCloseRequested] = useState(false);
     const [selectedStock, setSelectedStock] = useState(null);
     const [tradeAction, setTradeAction] = useState('BUY');
     const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
@@ -133,21 +135,16 @@ const Watchlist = () => {
     }, []);
 
     const syncWatchlists = useCallback(async (preferredName) => {
-        try {
-            const data = await getWatchlists(true);
-            const resolvedWatchlists = Array.isArray(data?.watchlists) ? data.watchlists : [];
-            setWatchlists(resolvedWatchlists);
+        const data = await getWatchlists(true);
+        const resolvedWatchlists = Array.isArray(data?.watchlists) ? data.watchlists : [];
+        setWatchlists(resolvedWatchlists);
 
-            const nextActive = pickActiveWatchlist(
-                resolvedWatchlists,
-                preferredName || activeWatchlistNameRef.current
-            );
-            setActiveWatchlistName(nextActive?.name || "");
-            return nextActive;
-        } catch (error) {
-            console.error('Failed to refresh watchlists:', error);
-            throw error;
-        }
+        const nextActive = pickActiveWatchlist(
+            resolvedWatchlists,
+            preferredName || activeWatchlistNameRef.current
+        );
+        setActiveWatchlistName(nextActive?.name || "");
+        return nextActive;
     }, [getWatchlists, pickActiveWatchlist]);
 
     // --- Real-time Price Updates ---
@@ -293,7 +290,7 @@ const Watchlist = () => {
                     priceUpdateService.seedPrices(priceMap);
                 }
             } catch (error) {
-                console.error('Failed to fetch initial watchlist prices:', error);
+                // Non-critical: websocket updates will fill prices; this just seeds initial snapshot.
             }
         };
 
@@ -331,7 +328,7 @@ const Watchlist = () => {
         try {
             await syncWatchlists(watchlistNameForSync);
         } catch (refreshError) {
-            console.error('Failed to refresh watchlists after removing stock:', refreshError);
+            // Non-critical: local state already updated.
         }
     };
     
@@ -388,7 +385,7 @@ const Watchlist = () => {
         try {
             await syncWatchlists(watchlistNameForSync);
         } catch (refreshError) {
-            console.error('Failed to refresh watchlists after adding stock:', refreshError);
+            // Non-critical: local state already updated.
         }
         return true;
     };
@@ -433,18 +430,30 @@ const Watchlist = () => {
     };
 
     return (
-        <div className="p-4 md:p-8 max-w-7xl mx-auto">
-            <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
-                <div>
-                    <h1 className="text-3xl font-bold text-gray-900">Watchlist</h1>
-                    <p className="text-gray-500">Your curated list of stocks to track.</p>
+        <div className="mx-auto max-w-7xl space-y-3 pb-4 pt-2 px-2 sm:px-3 lg:px-4">
+            <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-3">
+                    <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={() => navigate(-1)}
+                        className="mt-0.5 h-9 w-9 rounded-full"
+                        aria-label="Go back"
+                    >
+                        <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+                    </Button>
+                    <div>
+                        <h1 className="text-xl font-semibold text-slate-900 sm:text-2xl">Watchlist</h1>
+                        <p className="text-sm text-slate-500">Your curated list of stocks to track.</p>
+                    </div>
                 </div>
-                 <div className="flex items-center gap-4 w-full md:w-auto">
-                    <StockSearch 
+                <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+                    <StockSearch
                         activeWatchlist={activeWatchlist}
                         onAddStock={handleAddStock}
                     />
-                    <WatchlistSelector 
+                    <WatchlistSelector
                         watchlists={watchlists}
                         active={activeWatchlistName}
                         onSelect={handleSelectWatchlist}
@@ -454,7 +463,7 @@ const Watchlist = () => {
             </header>
 
             {connectionStatus !== 'connected' && (
-                <div className="mb-6 flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                <div className="flex items-start gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
                     <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
                     <div>
                         <p className="font-semibold">
@@ -471,7 +480,7 @@ const Watchlist = () => {
                 </div>
             )}
             
-            <Card className="shadow-lg">
+            <Card className="overflow-hidden rounded-3xl border border-slate-100 bg-white shadow-sm">
                 <CardContent className="p-0">
                     <div className="hidden md:block">
                         <Table>
@@ -483,7 +492,7 @@ const Watchlist = () => {
                                         <button
                                             type="button"
                                             onClick={() => handleSort('name')}
-                                            className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900 focus:outline-none dark:text-gray-400 dark:hover:text-gray-200"
+                                            className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-900 focus:outline-none"
                                         >
                                             <span>Symbol / Name</span>
                                             {renderSortIcon('name')}
@@ -496,7 +505,7 @@ const Watchlist = () => {
                                         <button
                                             type="button"
                                             onClick={() => handleSort('ltp')}
-                                            className="flex w-full items-center justify-end gap-1 text-xs font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900 focus:outline-none dark:text-gray-400 dark:hover:text-gray-200"
+                                            className="flex w-full items-center justify-end gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-900 focus:outline-none"
                                         >
                                             <span>LTP (₹)</span>
                                             {renderSortIcon('ltp')}
@@ -510,7 +519,7 @@ const Watchlist = () => {
                                         <button
                                             type="button"
                                             onClick={() => handleSort('percent_change')}
-                                            className="flex w-full items-center justify-end gap-1 text-xs font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900 focus:outline-none dark:text-gray-400 dark:hover:text-gray-200"
+                                            className="flex w-full items-center justify-end gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-900 focus:outline-none"
                                         >
                                             <span>Change (%)</span>
                                             {renderSortIcon('percent_change')}
@@ -555,7 +564,7 @@ const Watchlist = () => {
                                 />
                             ))
                         ) : (
-                            <div className="rounded-2xl border border-dashed border-gray-200 bg-gray-50 p-6 text-center text-sm text-gray-500">
+                            <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center text-sm text-slate-500">
                                 Your watchlist is empty. Add stocks using the search bar.
                             </div>
                         )}
@@ -607,22 +616,45 @@ const Watchlist = () => {
                 </DialogContent>
             </Dialog>
 
-            <Dialog open={showTradeModal} onOpenChange={setShowTradeModal}>
-                <DialogContent>
-                    <DialogHeader>
-                        <DialogTitle>{tradeAction === 'BUY' ? 'Buy' : 'Sell'} {selectedStock?.symbol}</DialogTitle>
-                        <DialogDescription>
-                            {tradeAction === 'BUY' ? 'Place a buy order for' : 'Place a sell order for'} {selectedStock?.name || selectedStock?.symbol}
-                        </DialogDescription>
-                    </DialogHeader>
-                    <TradeForm
-                        symbol={selectedStock?.symbol}
-                        action={tradeAction}
-                        onTradeSuccess={() => {
-                            setShowTradeModal(false);
-                        }}
-                        onClose={() => setShowTradeModal(false)}
-                    />
+            <Dialog
+                open={showTradeModal}
+                onOpenChange={(open) => {
+                    if (open) {
+                        setShowTradeModal(true);
+                        return;
+                    }
+                    if (isTradeSubmitting) {
+                        setTradeCloseRequested(true);
+                        return;
+                    }
+                    setShowTradeModal(false);
+                    setIsTradeSubmitting(false);
+                    setTradeCloseRequested(false);
+                }}
+            >
+                <DialogContent
+                    className="w-[95vw] max-w-xl border-none bg-transparent p-0 shadow-none sm:w-full max-h-[90vh] overflow-y-auto"
+                    aria-describedby={undefined}
+                >
+                    <div className="p-3 sm:p-4">
+                        <DialogHeader className="sr-only">
+                            <DialogTitle>{tradeAction === 'BUY' ? 'Buy' : 'Sell'} {selectedStock?.symbol}</DialogTitle>
+                            <DialogDescription id="trade-dialog-description">
+                                {tradeAction === 'BUY' ? 'Place a buy order for' : 'Place a sell order for'} {selectedStock?.name || selectedStock?.symbol}
+                            </DialogDescription>
+                        </DialogHeader>
+                        <TradeForm
+                            symbol={selectedStock?.symbol}
+                            action={tradeAction}
+                            onTradeSuccess={() => {
+                                setShowTradeModal(false);
+                            }}
+                            onClose={() => setShowTradeModal(false)}
+                            onLoadingChange={setIsTradeSubmitting}
+                            closeRequested={tradeCloseRequested}
+                            onCloseRequestHandled={() => setTradeCloseRequested(false)}
+                        />
+                    </div>
                 </DialogContent>
             </Dialog>
         </div>
@@ -658,17 +690,17 @@ const StockRow = ({ stock, onTrade, onRemove }) => {
 
     return (
         <TableRow 
-            className="cursor-pointer hover:bg-gray-50" 
+            className="cursor-pointer hover:bg-slate-50" 
             onClick={() => navigate(`/stock/${cleanSymbol || stock.symbol}`)}
         >
             <TableCell>
-                <div className="font-medium text-gray-800">{stock.symbol}</div>
-                <div className="text-sm text-gray-500 truncate max-w-xs">{stock.name}</div>
+                <div className="font-medium text-slate-900">{stock.symbol}</div>
+                <div className="text-sm text-slate-500 truncate max-w-xs">{stock.name}</div>
             </TableCell>
             <TableCell className="text-right">
                 <div className="font-semibold">₹{ltp.toFixed(2)}</div>
                 {isFallbackPrice && (
-                    <div className="text-xs text-gray-400">Prev Close</div>
+                    <div className="text-xs text-slate-400">Prev Close</div>
                 )}
             </TableCell>
             <TableCell className={`text-right font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
@@ -679,8 +711,26 @@ const StockRow = ({ stock, onTrade, onRemove }) => {
             </TableCell>
             <TableCell className="text-center">
                  <div className="flex items-center justify-center gap-2" onClick={e => e.stopPropagation()}>
-                    <Button size="sm" variant="outline" className="text-green-600 border-green-600 hover:bg-green-50" onClick={() => onTrade(stock, 'BUY')}>Buy</Button>
-                    <Button size="sm" variant="outline" className="text-red-600 border-red-600 hover:bg-red-50" onClick={() => onTrade(stock, 'SELL')}>Sell</Button>
+                    <Button
+                        type="button"
+                        size="icon"
+                        className="h-8 w-8 rounded-lg bg-emerald-600 text-[12px] font-bold text-white shadow-sm hover:bg-emerald-700"
+                        onClick={() => onTrade(stock, 'BUY')}
+                        aria-label={`Buy ${cleanSymbol || stock.symbol}`}
+                        title="Buy"
+                    >
+                        B
+                    </Button>
+                    <Button
+                        type="button"
+                        size="icon"
+                        className="h-8 w-8 rounded-lg bg-red-600 text-[12px] font-bold text-white shadow-sm hover:bg-red-700"
+                        onClick={() => onTrade(stock, 'SELL')}
+                        aria-label={`Sell ${cleanSymbol || stock.symbol}`}
+                        title="Sell"
+                    >
+                        S
+                    </Button>
                     <Button size="icon" variant="ghost" className="hover:bg-red-50" onClick={onRemove} title="Remove from watchlist">
                         <Trash2 className="h-4 w-4 text-red-500 hover:text-red-700"/>
                     </Button>
@@ -708,16 +758,16 @@ const CompactStockCard = ({ stock, onTrade, onRemove }) => {
 
     return (
         <div
-            className="cursor-pointer rounded-3xl border border-gray-100 bg-white p-4 shadow-sm"
+            className="cursor-pointer rounded-3xl border border-slate-100 bg-white p-4 shadow-sm"
             onClick={() => navigate(`/stock/${cleanSymbol}`)}
         >
             <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                    <p className="text-lg font-semibold text-gray-900">{cleanSymbol}</p>
-                    <p className="text-sm text-gray-500 truncate">{stock.name || "--"}</p>
+                    <p className="text-lg font-semibold text-slate-900">{cleanSymbol}</p>
+                    <p className="text-sm text-slate-500 truncate">{stock.name || "--"}</p>
                 </div>
                 <div className="text-right">
-                    <p className="text-base font-semibold text-gray-900">₹{ltp.toFixed(2)}</p>
+                    <p className="text-base font-semibold text-slate-900">₹{ltp.toFixed(2)}</p>
                     <p className={`text-sm font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
                         {isPositive ? '+' : ''}{change.toFixed(2)} ({percentChange.toFixed(2)}%)
                     </p>
@@ -726,7 +776,7 @@ const CompactStockCard = ({ stock, onTrade, onRemove }) => {
             <div className="mt-4 flex flex-wrap items-center gap-3">
                 <Button
                     size="sm"
-                    className="bg-emerald-500 text-white hover:bg-emerald-600"
+                    className="bg-emerald-600 text-white hover:bg-emerald-700"
                     onClick={(event) => {
                         event.stopPropagation();
                         onTrade?.(stock, 'BUY');
@@ -736,7 +786,7 @@ const CompactStockCard = ({ stock, onTrade, onRemove }) => {
                 </Button>
                 <Button
                     size="sm"
-                    variant="destructive"
+                    className="bg-red-600 text-white hover:bg-red-700"
                     onClick={(event) => {
                         event.stopPropagation();
                         onTrade?.(stock, 'SELL');
@@ -775,7 +825,7 @@ const StockRowSkeleton = () => (
 );
 
 const CompactStockCardSkeleton = () => (
-    <div className="rounded-3xl border border-gray-100 bg-white p-4 shadow-sm">
+    <div className="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm">
         <div className="flex items-start justify-between gap-3">
             <div className="w-1/2 space-y-2">
                 <Skeleton className="h-5 w-24" />
@@ -822,7 +872,6 @@ const StockSearch = ({ activeWatchlist, onAddStock }) => {
             const data = await api.searchStocks(searchQuery);
             setResults(data || []);
         } catch (error) {
-            console.error("Search failed:", error);
             setResults([]);
         } finally {
             setIsLoading(false);
@@ -884,7 +933,7 @@ const StockSearch = ({ activeWatchlist, onAddStock }) => {
             <AnimatePresence>
                 {showDropdown && (
                 <motion.div
-                    className="absolute z-20 left-0 right-0 mt-2 bg-white dark:bg-gray-800 border rounded-xl shadow-lg overflow-hidden max-h-80 overflow-y-auto"
+                    className="absolute z-20 left-0 right-0 mt-2 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-lg max-h-80 overflow-y-auto"
                     initial={{ opacity: 0, y: -10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -10 }}
@@ -897,21 +946,21 @@ const StockSearch = ({ activeWatchlist, onAddStock }) => {
                         return (
                             <div 
                                 key={stock.symbol} 
-                                className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b dark:border-gray-700 last:border-b-0 flex items-center justify-between group"
+                                className="flex items-center justify-between border-b border-slate-100 px-4 py-3 last:border-b-0 hover:bg-slate-50"
                             >
                                 <div className="flex-1 min-w-0">
                                     <div className="font-medium">{stock.symbol}</div>
-                                    <div className="text-sm text-gray-600 dark:text-gray-400 truncate">{stock.name}</div>
+                                    <div className="truncate text-sm text-slate-600">{stock.name}</div>
                                 </div>
                                 {alreadyAdded ? (
-                                    <div className="text-xs text-green-600 dark:text-green-400 font-medium px-2">
+                                    <div className="px-2 text-xs font-medium text-emerald-600">
                                         Added ✓
                                     </div>
                                 ) : (
                                     <button
                                         type="button"
                                         onClick={(e) => handleAddStock(e, stock)}
-                                        className="shrink-0 ml-2 p-2 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                                        className="ml-2 shrink-0 rounded-xl p-2 transition-colors hover:bg-slate-200"
                                         aria-label={`Add ${stock.symbol} to watchlist`}
                                     >
                                         <Plus className="h-4 w-4" />
@@ -936,7 +985,7 @@ const WatchlistSelector = ({ watchlists, active, onSelect, onCreate }) => {
     return (
         <DropdownMenu>
             <DropdownMenuTrigger asChild>
-                <Button variant="outline">{active || 'Select Watchlist'}</Button>
+                <Button variant="outline" className="rounded-2xl">{active || 'Select Watchlist'}</Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent>
                 {watchlists.map(wl => (

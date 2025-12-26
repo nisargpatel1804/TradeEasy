@@ -5,8 +5,8 @@ import WatchlistSidebar from "./WatchlistSidebar.jsx";
 import { Button } from "../assets/ui/button.jsx";
 import { X } from "lucide-react";
 
-const NAVBAR_HEIGHT_DESKTOP = 108; // base height for the fixed header on large screens
-const NAVBAR_HEIGHT_MOBILE = 168; // mobile header is taller due to ticker chips row
+const NAVBAR_HEIGHT_DESKTOP = 108; // fallback
+const NAVBAR_HEIGHT_MOBILE = 168; // fallback
 const SIDEBAR_WIDTH = 340; // px – matches the visual reference width
 
 const DashboardLayout = () => {
@@ -14,17 +14,37 @@ const DashboardLayout = () => {
   const [navbarHeight, setNavbarHeight] = useState(NAVBAR_HEIGHT_DESKTOP);
 
   useEffect(() => {
-    const updateHeight = () => {
-      if (typeof window === "undefined") {
-        return;
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const fallback = () => (window.innerWidth >= 1024 ? NAVBAR_HEIGHT_DESKTOP : NAVBAR_HEIGHT_MOBILE);
+
+    const updateFromDom = () => {
+      const header = document.querySelector("header");
+      if (header) {
+        const measured = Math.round(header.getBoundingClientRect().height);
+        if (Number.isFinite(measured) && measured > 0) {
+          setNavbarHeight(measured);
+          return;
+        }
       }
-      const nextHeight = window.innerWidth >= 1024 ? NAVBAR_HEIGHT_DESKTOP : NAVBAR_HEIGHT_MOBILE;
-      setNavbarHeight(nextHeight);
+      setNavbarHeight(fallback());
     };
 
-    updateHeight();
-    window.addEventListener("resize", updateHeight);
-    return () => window.removeEventListener("resize", updateHeight);
+    updateFromDom();
+
+    const observer = window.ResizeObserver ? new ResizeObserver(updateFromDom) : null;
+    const header = document.querySelector("header");
+    if (observer && header) {
+      observer.observe(header);
+    }
+
+    window.addEventListener("resize", updateFromDom);
+    return () => {
+      window.removeEventListener("resize", updateFromDom);
+      observer?.disconnect?.();
+    };
   }, []);
 
   const layoutPaddingStyle = useMemo(() => ({
@@ -38,7 +58,7 @@ const DashboardLayout = () => {
   }), [navbarHeight]);
 
   return (
-    <div className="min-h-screen bg-slate-50 text-gray-900">
+    <div className="min-h-screen bg-slate-50 text-slate-900">
       <Navbar onToggleSidebar={() => setIsMobileSidebarOpen(true)} />
 
       {/* Desktop layout */}
@@ -47,12 +67,12 @@ const DashboardLayout = () => {
           className="hidden lg:block fixed left-0 border-r border-slate-200 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/75"
           style={sidebarStyle}
         >
-          <div className="h-full overflow-y-auto">
+          <div className="h-full overflow-hidden">
             <WatchlistSidebar />
           </div>
         </aside>
 
-        <main className="flex-1 w-full min-h-screen px-4 pb-10 lg:ml-[340px] lg:px-8">
+        <main className="flex-1 w-full min-h-screen px-2 pb-6 lg:ml-[340px] lg:px-3">
           <Outlet />
         </main>
       </div>
@@ -62,13 +82,13 @@ const DashboardLayout = () => {
         <div className="lg:hidden fixed inset-0 z-40">
           <div className="absolute inset-0 bg-slate-900/60" onClick={() => setIsMobileSidebarOpen(false)} />
           <div className="absolute inset-y-0 left-0 w-[85%] max-w-xs bg-white shadow-xl flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b">
+            <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
               <p className="text-sm font-semibold text-slate-700">Watchlist</p>
               <Button variant="ghost" size="icon" onClick={() => setIsMobileSidebarOpen(false)}>
                 <X className="h-4 w-4" />
               </Button>
             </div>
-            <div className="flex-1 overflow-y-auto">
+            <div className="flex-1 overflow-hidden">
               <WatchlistSidebar onClose={() => setIsMobileSidebarOpen(false)} isMobile />
             </div>
           </div>

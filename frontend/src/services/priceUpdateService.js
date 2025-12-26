@@ -35,7 +35,6 @@ class PriceUpdateService {
 
     this.socket = socketInstance;
     this._attachSocketListeners();
-    console.log("PriceUpdateService initialized and listening for socket events.");
   }
 
   /**

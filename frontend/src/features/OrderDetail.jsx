@@ -6,6 +6,8 @@ import * as api from "../services/api.js";
 import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx";
 import { Skeleton } from "../assets/ui/skeleton.jsx";
 import { ArrowLeft, ShoppingCart, Tag, Hash, Calendar, HelpCircle, TrendingUp, TrendingDown } from "lucide-react";
+import { Button } from "../assets/ui/button.jsx";
+import { cn } from "../utils/cn.js";
 
 const formatStatus = (status = "") => {
   if (!status) return "Unknown";
@@ -65,15 +67,21 @@ const OrderDetail = () => {
 
   if (isLoading) {
     return (
-        <div className="p-4 md:p-8 max-w-2xl mx-auto">
-            <Skeleton className="h-8 w-1/4 mb-6" />
-            <Card>
-                <CardHeader><Skeleton className="h-6 w-1/2" /></CardHeader>
-                <CardContent className="space-y-4">
-                    {[...Array(5)].map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}
-                </CardContent>
-            </Card>
+      <div className="mx-auto max-w-7xl space-y-3 pb-4 pt-2 px-2 sm:px-3 lg:px-4">
+        <div className="flex items-center gap-2">
+          <Skeleton className="h-9 w-9 rounded-full" />
+          <div className="space-y-1">
+            <Skeleton className="h-5 w-40" />
+            <Skeleton className="h-3 w-56" />
+          </div>
         </div>
+        <Card className="mx-auto w-full max-w-3xl rounded-3xl border border-slate-100 shadow-sm">
+          <CardHeader><Skeleton className="h-6 w-1/2" /></CardHeader>
+          <CardContent className="space-y-4">
+            {[...Array(5)].map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}
+          </CardContent>
+        </Card>
+      </div>
     );
   }
 
@@ -88,35 +96,44 @@ const OrderDetail = () => {
   const isBuy = order.action === "BUY";
 
   return (
-    <div className="p-4 md:p-8 max-w-2xl mx-auto">
-        <Link to="/orders" className="flex items-center text-sm text-gray-600 hover:text-gray-900 mb-4">
-            <ArrowLeft className="w-4 h-4 mr-2" />
-            Back to All Orders
-        </Link>
+    <div className="mx-auto max-w-7xl space-y-3 pb-4 pt-2 px-2 sm:px-3 lg:px-4">
+      <div className="mx-auto w-full max-w-3xl">
+        <Button
+          asChild
+          type="button"
+          variant="outline"
+          className="h-9 rounded-full border-slate-200 px-4 font-semibold"
+        >
+          <Link to="/orders" aria-label="Back to orders">
+            <ArrowLeft className="h-4 w-4" />
+            Back to Orders
+          </Link>
+        </Button>
+      </div>
 
-      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
-        <Card className="shadow-lg">
+      <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mx-auto w-full max-w-3xl">
+        <Card className="rounded-3xl border border-slate-100 shadow-sm">
           <CardHeader>
-            <CardTitle>Order Details</CardTitle>
+            <CardTitle className="text-base font-semibold text-slate-900">Order Details</CardTitle>
           </CardHeader>
-          <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-            <DetailItem icon={ShoppingCart} label="Symbol" value={order.symbol} className="font-bold text-lg" />
+          <CardContent className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+            <DetailItem icon={ShoppingCart} label="Symbol" value={order.symbol} className="font-bold text-slate-900" />
             <DetailItem 
                 icon={isBuy ? TrendingUp : TrendingDown} 
                 label="Action" 
                 value={order.action}
-                className={isBuy ? 'text-green-600' : 'text-red-600'}
+                className={cn(isBuy ? 'text-emerald-700' : 'text-red-600')}
             />
             <DetailItem icon={Hash} label="Quantity" value={order.quantity} />
             <DetailItem icon={Tag} label="Price" value={`₹${order.price.toFixed(2)}`} />
             <DetailItem icon={HelpCircle} label="Order Type" value={order.order_type} />
-            <DetailItem icon={Calendar} label="Date" value={new Date(order.date).toLocaleString()} />
+            <DetailItem icon={Calendar} label="Date" value={new Date(order.date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} />
             <div className="sm:col-span-2">
                  <DetailItem 
                   icon={HelpCircle} 
                   label="Status" 
                   value={formatStatus(order.status_display || order.status)}
-                  className="font-bold"
+                  className="font-bold text-slate-900"
                 />
             </div>
           </CardContent>

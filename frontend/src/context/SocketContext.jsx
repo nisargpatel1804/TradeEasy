@@ -133,7 +133,6 @@ export const SocketProvider = ({ children }) => {
       if (isShuttingDown) {
         return;
       }
-      console.log('Socket.IO connected successfully.');
       transitionStatus('connected');
     };
 
@@ -141,7 +140,6 @@ export const SocketProvider = ({ children }) => {
       if (isShuttingDown) {
         return;
       }
-      console.warn('Socket.IO disconnected.', reason);
       if (reason === 'io server disconnect') {
         newSocket.connect();
       }
@@ -154,7 +152,6 @@ export const SocketProvider = ({ children }) => {
       if (isShuttingDown) {
         return;
       }
-      console.error('Socket.IO connection error:', error);
       transitionStatus('reconnecting', {
         message: 'Unable to reach live market data. Retrying…',
         error,
@@ -187,7 +184,6 @@ export const SocketProvider = ({ children }) => {
 
     return () => {
       isShuttingDown = true;
-      console.log('Closing Socket.IO connection.');
       newSocket.off('connect', handleConnect);
       newSocket.off('disconnect', handleDisconnect);
       newSocket.off('connect_error', handleConnectError);

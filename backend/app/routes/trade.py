@@ -1,5 +1,6 @@
 import logging
 import secrets
+import time
 from decimal import Decimal
 from datetime import datetime
 from flask import Blueprint, request, jsonify
@@ -1075,6 +1076,163 @@ def market_status():
     except Exception as e:
         logger.error(f"Error fetching market status: {e}", exc_info=True)
         return jsonify({"success": False, "message": "Failed to fetch market status"}), 500
+
+
+@trade_bp.route('/exit-plan', methods=['PATCH'])
+@login_required
+def update_exit_plan():
+    """Create or update stoploss/target exit plan for an active holding.
+
+    Expected payload:
+      - symbol (required)
+      - product_type (optional, default CNC)
+      - stop_order_id (optional)
+      - target_order_id (optional)
+      - stop_loss_price (required)
+      - target_price (required)
+    """
+    data = request.get_json() or {}
+
+    symbol = data.get('symbol')
+    if not symbol:
+        return jsonify({"success": False, "message": "Symbol is required."}), 400
+
+    product_type = (data.get('product_type') or 'CNC').upper()
+    stop_order_id = data.get('stop_order_id')
+    target_order_id = data.get('target_order_id')
+
+    try:
+        stop_loss_price = float(data.get('stop_loss_price'))
+        target_price = float(data.get('target_price'))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Stoploss and target must be valid numbers."}), 400
+
+    if stop_loss_price <= 0 or target_price <= 0:
+        return jsonify({"success": False, "message": "Stoploss and target must be positive."}), 400
+
+    # Ensure holding exists (we only allow exit-plan edits for active holdings)
+    holding = Holding.objects(user=current_user, symbol=symbol, product_type=product_type).first()
+    if not holding:
+        return jsonify({"success": False, "message": f"No active holding found for {symbol} ({product_type})."}), 404
+
+    available_qty = int(getattr(holding, 'quantity', 0) or 0) - int(getattr(holding, 'reserved_quantity', 0) or 0)
+    if int(getattr(holding, 'quantity', 0) or 0) <= 0:
+        return jsonify({"success": False, "message": "Holding quantity is zero."}), 400
+
+    def _get_pending_by_id(order_id):
+        if not order_id:
+            return None
+        try:
+            return Transaction.objects(id=order_id, user=current_user, status='PENDING').first()
+        except Exception:
+            return None
+
+    stop_txn = _get_pending_by_id(stop_order_id)
+    target_txn = _get_pending_by_id(target_order_id)
+
+    # Fallback lookup if ids not supplied
+    if not stop_txn:
+        stop_txn = Transaction.objects(
+            user=current_user,
+            status='PENDING',
+            action='SELL',
+            symbol=symbol,
+            product_type=product_type,
+        ).filter(Q(order_type='STOP_LOSS') | Q(bracket_order_type='STOP_LOSS')).order_by('-transaction_date').first()
+
+    if not target_txn:
+        target_txn = Transaction.objects(
+            user=current_user,
+            status='PENDING',
+            action='SELL',
+            symbol=symbol,
+            product_type=product_type,
+        ).filter(Q(bracket_order_type='TARGET') | (Q(order_type='LIMIT') & Q(target_price__ne=None))).order_by('-transaction_date').first()
+
+    # If there is no existing exit plan, create bracket-style SELL legs (OCO) for the holding.
+    # This allows users to set stoploss/target directly after an executed BUY (holding exists).
+    if not stop_txn and not target_txn:
+        if available_qty <= 0:
+            return jsonify({
+                "success": False,
+                "message": "No available quantity to protect (all shares are already reserved by pending sells)."
+            }), 400
+
+        # Reserve once for both legs (they compete; only one can execute).
+        holding.reload()
+        available_after_reload = int(getattr(holding, 'quantity', 0) or 0) - int(getattr(holding, 'reserved_quantity', 0) or 0)
+        if available_after_reload < available_qty:
+            available_qty = available_after_reload
+        if available_qty <= 0:
+            return jsonify({
+                "success": False,
+                "message": "No available quantity to protect."
+            }), 400
+
+        holding.reserved_quantity += int(available_qty)
+        holding.save()
+
+        parent_key = f"EXITPLAN:{current_user.id}:{symbol}:{product_type}:{int(time.time() * 1000)}"
+
+        stop_txn = Transaction(
+            user=current_user,
+            symbol=symbol,
+            action='SELL',
+            quantity=int(available_qty),
+            price=float(stop_loss_price),
+            status='PENDING',
+            order_type='STOP_LOSS',
+            product_type=product_type,
+            stop_loss_price=float(stop_loss_price),
+            parent_order_id=parent_key,
+            bracket_order_type='STOP_LOSS',
+            idempotency_key=_generate_idempotency_key(),
+        )
+        stop_txn.save()
+
+        target_txn = Transaction(
+            user=current_user,
+            symbol=symbol,
+            action='SELL',
+            quantity=int(available_qty),
+            price=float(target_price),
+            status='PENDING',
+            order_type='LIMIT',
+            product_type=product_type,
+            target_price=float(target_price),
+            parent_order_id=parent_key,
+            bracket_order_type='TARGET',
+            idempotency_key=_generate_idempotency_key(),
+        )
+        target_txn.save()
+
+    if stop_txn:
+        if stop_txn.action != 'SELL' or stop_txn.symbol != symbol or (getattr(stop_txn, 'product_type', 'CNC') or 'CNC') != product_type:
+            return jsonify({"success": False, "message": "Stoploss order does not match the selected holding."}), 400
+        stop_txn.stop_loss_price = float(stop_loss_price)
+        stop_txn.price = float(stop_loss_price)
+        stop_txn.save()
+
+    if target_txn:
+        if target_txn.action != 'SELL' or target_txn.symbol != symbol or (getattr(target_txn, 'product_type', 'CNC') or 'CNC') != product_type:
+            return jsonify({"success": False, "message": "Target order does not match the selected holding."}), 400
+        target_txn.target_price = float(target_price)
+        target_txn.price = float(target_price)
+        target_txn.save()
+
+    # Invalidate portfolio cache so UI reflects updates immediately
+    app_cache.invalidate_pattern(f"route:get_portfolio:user:{current_user.id}")
+
+    return jsonify({
+        "success": True,
+        "message": "Exit plan updated successfully.",
+        "exit_plan": {
+            "stop_order_id": str(stop_txn.id) if stop_txn else None,
+            "stop_loss_price": float(stop_txn.stop_loss_price) if stop_txn and stop_txn.stop_loss_price else None,
+            "target_order_id": str(target_txn.id) if target_txn else None,
+            "target_price": float(target_txn.target_price) if target_txn and target_txn.target_price else None,
+        }
+    }), 200
 
 
 @trade_bp.route('/cancel-order/<order_id>', methods=['DELETE'])

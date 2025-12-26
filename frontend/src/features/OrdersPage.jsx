@@ -7,7 +7,8 @@ import { Card, CardContent } from "../assets/ui/card.jsx";
 import { Button } from "../assets/ui/button.jsx";
 import { Skeleton } from "../assets/ui/skeleton.jsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../assets/ui/Tabs.jsx";
-import { Scroll, History, Ban, TrendingUp, Target, AlertCircle, X } from "lucide-react";
+import { Scroll, History, Ban, TrendingUp, Target, AlertCircle, X, ArrowLeft } from "lucide-react";
+import { cn } from "../utils/cn.js";
 
 const STATUS_TABS = [
   { value: "executed", label: "Executed", icon: History },
@@ -73,6 +74,14 @@ const OrdersPage = () => {
     loadOrders();
   }, []);
 
+  useEffect(() => {
+    const handler = () => {
+      loadOrders();
+    };
+    window.addEventListener('te:trade-success', handler);
+    return () => window.removeEventListener('te:trade-success', handler);
+  }, []);
+
   const handleCancelOrder = async (orderId) => {
     setCancellingOrderId(orderId);
     try {
@@ -97,15 +106,37 @@ const OrdersPage = () => {
     navigate(`/order-detail/${order.id}`);
   };
 
-
-  const pageShellClasses = "mx-auto max-w-6xl space-y-6 px-2 pb-10 pt-4 sm:px-4 lg:px-8";
+  const pageShellClasses = "mx-auto max-w-7xl space-y-3 pb-4 pt-2 px-2 sm:px-3 lg:px-4";
 
   return (
     <div className={pageShellClasses}>
-      <header className="space-y-2">
-        <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">Order Desk</p>
-        <h1 className="text-3xl font-bold text-slate-900">Orders</h1>
-        <p className="text-sm text-slate-500">Monitor fills, manage pending legs, and inspect detailed execution history.</p>
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-9 w-9 shrink-0 rounded-full border-slate-200"
+            onClick={() => navigate(-1)}
+            aria-label="Back"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Order Desk</p>
+            <h1 className="text-lg font-semibold text-slate-900 sm:text-xl">Orders</h1>
+            <p className="text-xs font-medium text-slate-500">Monitor fills, manage pending legs, and inspect execution history.</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className={cn(
+            "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold",
+            "border-slate-200 bg-slate-50 text-slate-600"
+          )}>
+            Total {Object.values(orders || {}).reduce((sum, bucket) => sum + (Array.isArray(bucket) ? bucket.length : 0), 0)}
+          </span>
+        </div>
       </header>
 
       <Card className="rounded-3xl border border-slate-100 shadow-sm">
@@ -287,7 +318,7 @@ const OrderCard = ({ order, index, isPending = false, onCancel, isCancelling = f
             </div>
             <div className="col-span-1 md:col-span-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Date</p>
-              <p className="text-sm font-semibold text-slate-900">{new Date(order.date).toLocaleString()}</p>
+              <p className="text-sm font-semibold text-slate-900">{new Date(order.date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</p>
             </div>
             {showCancel && (
               <div className="flex justify-end" onClick={(e) => e.stopPropagation()}>

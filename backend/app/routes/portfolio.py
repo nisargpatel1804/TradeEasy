@@ -1,5 +1,6 @@
 import logging
 from decimal import Decimal
+from collections import defaultdict, deque
 from flask import Blueprint, jsonify
 from flask_login import login_required, current_user
 from app.models import Holding, Transaction, Lot, ShortPosition
@@ -45,76 +46,63 @@ def _calculate_realized_pnl(user) -> Decimal:
     Returns:
         Decimal: Total realized P&L across all closed positions
     """
+    # NOTE: Older databases may not have Lot documents for historical trades.
+    # To make realized P&L reliable across all users, compute FIFO P&L directly
+    # from executed BUY/SELL transactions.
     realized_pnl = Decimal('0')
-    
-    # Track total matched quantity per lot across ALL sells
-    lot_matched_totals = {}  # lot_id -> total_matched_qty
-    
-    # Get all executed sell transactions
-    sell_transactions = Transaction.objects(
-        user=user, 
-        action="SELL", 
-        status="EXECUTED"
-    ).order_by('transaction_date')
 
-    for sell_txn in sell_transactions:
-        # Skip if this is a bracket order leg (already counted with parent)
-        if sell_txn.bracket_order_type in ('STOP_LOSS', 'TARGET'):
+    executed = list(
+        Transaction.objects(user=user, status="EXECUTED").order_by('transaction_date')
+    )
+
+    # FIFO queues by (symbol, product_type)
+    fifo = defaultdict(deque)
+
+    def _txn_dt(txn: Transaction):
+        return txn.execution_date or txn.transaction_date
+
+    # Process in chronological order of execution when possible.
+    executed.sort(key=_txn_dt)
+
+    for txn in executed:
+        symbol = getattr(txn, 'symbol', None)
+        action = (getattr(txn, 'action', '') or '').upper()
+        product_type = getattr(txn, 'product_type', None) or 'CNC'
+
+        if not symbol or action not in ('BUY', 'SELL'):
             continue
-            
-        sell_qty_remaining = sell_txn.quantity
-        sell_price = Decimal(str(sell_txn.price))
-        
-        # Find lots to match against (FIFO - oldest first)
-        # Match ALL lots including fully sold ones (quantity=0, is_active=False)
-        # This is critical for accurate P&L calculation
-        lots = Lot.objects(
-            user=user,
-            symbol=sell_txn.symbol,
-            product_type=sell_txn.product_type if hasattr(sell_txn, 'product_type') else 'CNC',
-            purchase_date__lte=sell_txn.transaction_date
-        ).order_by('purchase_date')
-        
-        # Match lots in FIFO order
-        for lot in lots:
-            if sell_qty_remaining <= 0:
-                break
-            
-            lot_id = str(lot.id)
-            
-            # Calculate how much of this lot has been matched across ALL previous sells
-            already_matched_total = lot_matched_totals.get(lot_id, 0)
-            available_from_lot = lot.original_quantity - already_matched_total
-            
-            if available_from_lot <= 0:
-                continue
-            
-            # Determine how many shares from this lot to match for THIS sell
-            qty_to_match = min(sell_qty_remaining, available_from_lot)
-            
-            # Calculate P&L for this matched portion
-            purchase_price = Decimal(str(lot.purchase_price))
-            pnl_for_lot = (sell_price - purchase_price) * Decimal(qty_to_match)
-            realized_pnl += pnl_for_lot
-            
-            sell_qty_remaining -= qty_to_match
-            
-            # Update global tracking of this lot's matched quantity
-            lot_matched_totals[lot_id] = already_matched_total + qty_to_match
-            
-            logger.debug(
-                f"FIFO Match: Sold {qty_to_match} of {sell_txn.symbol} "
-                f"@{sell_price} (bought @{purchase_price}) = P&L: {pnl_for_lot}"
-            )
-        
-        # If there's still quantity remaining, it might be a short sale
-        # (for MIS intraday trading) - handle separately
-        if sell_qty_remaining > 0:
+
+        qty = int(getattr(txn, 'quantity', 0) or 0)
+        if qty <= 0:
+            continue
+
+        price = Decimal(str(getattr(txn, 'price', 0) or 0))
+        key = (symbol, product_type)
+
+        if action == 'BUY':
+            fifo[key].append([qty, price])
+            continue
+
+        # SELL: match against prior buys for this symbol/product_type
+        sell_remaining = qty
+        while sell_remaining > 0 and fifo[key]:
+            buy_qty, buy_price = fifo[key][0]
+            matched = min(sell_remaining, buy_qty)
+            realized_pnl += (price - buy_price) * Decimal(matched)
+            buy_qty -= matched
+            sell_remaining -= matched
+            if buy_qty <= 0:
+                fifo[key].popleft()
+            else:
+                fifo[key][0][0] = buy_qty
+
+        if sell_remaining > 0:
+            # Unmatched SELL (short sell or missing BUY history). Ignore for realized P&L.
             logger.warning(
-                f"Sell transaction {sell_txn.id} has {sell_qty_remaining} shares "
-                f"not matched to any lots (possible short sale or data inconsistency)"
+                f"Realized P&L: Unmatched SELL for user {getattr(user, 'client_id', 'unknown')} "
+                f"{symbol} {product_type}: qty={sell_remaining} (txn={txn.id})"
             )
-    
+
     return realized_pnl
 
 # --- API Routes ---
@@ -133,9 +121,76 @@ def get_portfolio():
         cnc_holdings = Holding.objects(user=user, product_type='CNC')
         mis_holdings = Holding.objects(user=user, product_type='MIS')
         short_positions = ShortPosition.objects(user=user, is_active=True)
+
+        # Build an exit-plan lookup from existing pending bracket legs (if any)
+        holding_keys = [(h.symbol, 'CNC') for h in cnc_holdings] + [(h.symbol, 'MIS') for h in mis_holdings]
+        symbols_for_plans = list({sym for sym, _pt in holding_keys if sym})
+        exit_plan_map = {}
+        if symbols_for_plans:
+            pending_plans = Transaction.objects(
+                user=user,
+                status='PENDING',
+                action='SELL',
+                symbol__in=symbols_for_plans,
+            ).only(
+                'id', 'symbol', 'product_type', 'order_type', 'bracket_order_type',
+                'stop_loss_price', 'target_price', 'price', 'transaction_date'
+            )
+
+            def _dt(txn: Transaction):
+                return txn.execution_date or txn.transaction_date
+
+            for txn in pending_plans:
+                symbol = getattr(txn, 'symbol', None)
+                product_type = getattr(txn, 'product_type', None) or 'CNC'
+                if not symbol:
+                    continue
+
+                key = (symbol, product_type)
+                plan = exit_plan_map.setdefault(key, {
+                    'stop_order_id': None,
+                    'stop_loss_price': None,
+                    'stop_dt': None,
+                    'target_order_id': None,
+                    'target_price': None,
+                    'target_dt': None,
+                })
+
+                bracket_type = getattr(txn, 'bracket_order_type', None)
+                order_type = getattr(txn, 'order_type', None)
+                txn_dt = _dt(txn)
+
+                if bracket_type == 'STOP_LOSS' or order_type == 'STOP_LOSS':
+                    if plan['stop_dt'] is None or (txn_dt and txn_dt > plan['stop_dt']):
+                        plan['stop_dt'] = txn_dt
+                        plan['stop_order_id'] = str(txn.id)
+                        if getattr(txn, 'stop_loss_price', None):
+                            plan['stop_loss_price'] = float(txn.stop_loss_price)
+
+                if bracket_type == 'TARGET' or (order_type == 'LIMIT' and getattr(txn, 'target_price', None) is not None):
+                    if plan['target_dt'] is None or (txn_dt and txn_dt > plan['target_dt']):
+                        plan['target_dt'] = txn_dt
+                        plan['target_order_id'] = str(txn.id)
+                        if getattr(txn, 'target_price', None) is not None:
+                            plan['target_price'] = float(txn.target_price)
+                        else:
+                            try:
+                                plan['target_price'] = float(getattr(txn, 'price', 0) or 0)
+                            except (TypeError, ValueError):
+                                plan['target_price'] = None
         
         # --- Batch Fetch Live Prices (MAJOR OPTIMIZATION) ---
         all_symbols = [h.symbol for h in cnc_holdings] + [h.symbol for h in mis_holdings] + [s.symbol for s in short_positions]
+
+        # Ensure these symbols are subscribed to the live websocket feed.
+        # This makes the frontend totals/holdings update in real-time via Socket.IO.
+        try:
+            from app.socket_manager import MO_WebSocket_Manager
+
+            MO_WebSocket_Manager().register_symbols_for_realtime(all_symbols)
+        except Exception as sub_err:
+            logger.warning("Portfolio realtime subscription failed: %s", sub_err)
+
         live_price_map = _get_live_price_map(all_symbols)
 
         # --- Initialize Metrics ---
@@ -167,7 +222,13 @@ def get_portfolio():
                 "investment_value": float(investment_value),
                 "market_value": float(market_value),
                 "unrealized_pnl": float(pnl),
-                "product_type": "CNC"
+                "product_type": "CNC",
+                "exit_plan": {
+                    "stop_order_id": exit_plan_map.get((holding.symbol, 'CNC'), {}).get('stop_order_id'),
+                    "stop_loss_price": exit_plan_map.get((holding.symbol, 'CNC'), {}).get('stop_loss_price'),
+                    "target_order_id": exit_plan_map.get((holding.symbol, 'CNC'), {}).get('target_order_id'),
+                    "target_price": exit_plan_map.get((holding.symbol, 'CNC'), {}).get('target_price'),
+                } if exit_plan_map.get((holding.symbol, 'CNC')) else None,
             })
             total_investment += investment_value
             current_holdings_value += market_value
@@ -194,7 +255,13 @@ def get_portfolio():
                 "investment_value": float(investment_value),
                 "market_value": float(market_value),
                 "unrealized_pnl": float(pnl),
-                "product_type": "MIS"
+                "product_type": "MIS",
+                "exit_plan": {
+                    "stop_order_id": exit_plan_map.get((holding.symbol, 'MIS'), {}).get('stop_order_id'),
+                    "stop_loss_price": exit_plan_map.get((holding.symbol, 'MIS'), {}).get('stop_loss_price'),
+                    "target_order_id": exit_plan_map.get((holding.symbol, 'MIS'), {}).get('target_order_id'),
+                    "target_price": exit_plan_map.get((holding.symbol, 'MIS'), {}).get('target_price'),
+                } if exit_plan_map.get((holding.symbol, 'MIS')) else None,
             })
             total_investment += investment_value
             current_holdings_value += market_value

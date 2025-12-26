@@ -412,7 +412,35 @@ class MO_WebSocket_Manager:
         # Price validation: Check for anomalous price movements
         prev_close = self.scrip_prev_close.get(composite_key, 0.0)
         if prev_close > 0:
-            price_change_pct = abs((ltp - prev_close) / prev_close * 100)
+            def _pct_change(reference: float) -> float:
+                try:
+                    return abs((ltp - reference) / reference * 100)
+                except ZeroDivisionError:
+                    return 0.0
+
+            price_change_pct = _pct_change(prev_close)
+
+            # Self-heal common unit mismatch: prev_close seeded as 1/100th (or 100x)
+            # compared to live websocket LTP.
+            if price_change_pct > 50:
+                candidates = [
+                    (prev_close, price_change_pct),
+                    (prev_close * 100.0, _pct_change(prev_close * 100.0)),
+                    (prev_close / 100.0, _pct_change(prev_close / 100.0)),
+                ]
+                best_prev_close, best_pct = min(candidates, key=lambda item: item[1])
+                if best_prev_close > 0 and best_pct < 20:
+                    logger.warning(
+                        "⚠️ Corrected prev_close scale for %s: %s -> %s (%.1f%%)",
+                        symbol,
+                        prev_close,
+                        best_prev_close,
+                        best_pct,
+                    )
+                    prev_close = best_prev_close
+                    self.scrip_prev_close[composite_key] = best_prev_close
+                    price_change_pct = best_pct
+
             # Flag if price moved more than 20% (circuit limit is typically 10-20%)
             if price_change_pct > 20:
                 logger.warning(f"⚠️ Anomalous price for {symbol}: LTP={ltp}, PrevClose={prev_close}, Change={price_change_pct:.1f}%")
@@ -650,8 +678,9 @@ class MO_WebSocket_Manager:
         error_msg = str(error)
         
         # Don't log normal disconnection as error
-        if "Connection to remote host was lost" in error_msg:
-            logger.warning(f"⚠️ MO WebSocket disconnected: {error_msg}")
+        # Fix: Check for specific connection lost messages common on weekends/market closed
+        if "Connection to remote host was lost" in error_msg or "Remote end closed connection" in error_msg:
+            logger.warning(f"⚠️ MO WebSocket disconnected (Provider closed connection): {error_msg}")
         else:
             logger.error(f"❌ MO WebSocket error: {error_msg}")
         
@@ -808,6 +837,96 @@ class MO_WebSocket_Manager:
     def get_latest_indices_data(self):
         """Returns the current cached state of all tracked indices."""
         return list(self.latest_indices_data.values())
+
+    def register_symbols_for_realtime(self, symbols):
+        """Registers a batch of symbols for real-time updates.
+
+        This is used to ensure portfolio holdings (and other symbol lists) get
+        live ticks without requiring the symbol to be present in any watchlist.
+        """
+        if not symbols:
+            return 0
+
+        try:
+            from app.models import Stock
+
+            unique_symbols = {str(s).strip() for s in symbols if s}
+            unique_symbols.discard('')
+            if not unique_symbols:
+                return 0
+
+            stocks = list(
+                Stock.objects(symbol__in=list(unique_symbols))
+                .only('symbol', 'exchange', 'scripcode')
+            )
+            if not stocks:
+                return 0
+
+            registered = 0
+            for stock in stocks:
+                try:
+                    exchange = (getattr(stock, 'exchange', None) or 'NSE').upper()
+                    raw_scripcode = getattr(stock, 'scripcode', None)
+                    if raw_scripcode is None:
+                        continue
+                    scripcode = int(raw_scripcode)
+                    composite_key = f"{exchange}:CASH:{scripcode}"
+                    if composite_key in self.registered_scrips:
+                        continue
+
+                    self.register_scrip(stock.symbol, exchange, scripcode)
+                    registered += 1
+                except Exception as e:
+                    logger.warning(
+                        "Failed to register symbol %s for realtime: %s",
+                        getattr(stock, 'symbol', '?'),
+                        e,
+                    )
+
+            if registered:
+                logger.info("Registered %s new portfolio/adhoc symbol(s) for live updates", registered)
+            return registered
+        except Exception as e:
+            logger.error("Failed to register symbols for realtime: %s", e, exc_info=True)
+            return 0
+
+    def register_user_portfolio_stocks(self, user_id):
+        """Registers a user's current portfolio symbols for real-time updates."""
+        try:
+            from app.models import Holding, ShortPosition
+
+            user_id_str = str(user_id)
+
+            holding_symbols = list(
+                Holding.objects(user=user_id, quantity__gt=0)
+                .only('symbol')
+                .scalar('symbol')
+            )
+            short_symbols = list(
+                ShortPosition.objects(user=user_id, is_active=True)
+                .only('symbol')
+                .scalar('symbol')
+            )
+
+            symbols = [s for s in (holding_symbols + short_symbols) if s]
+            if not symbols:
+                return 0
+
+            # Register globally.
+            registered = self.register_symbols_for_realtime(symbols)
+
+            # Track for reconnect (best-effort; merges with existing watchlist subscriptions).
+            with self.subscription_lock:
+                current = set(self.user_subscriptions.get(user_id_str, set()))
+                # We don't have composite keys for all symbols here without re-querying,
+                # so we just keep existing; reconnect logic primarily relies on the
+                # global registered_scrips set and watchlists.
+                self.user_subscriptions[user_id_str] = current
+
+            return registered
+        except Exception as e:
+            logger.error("Failed to register portfolio stocks for user %s: %s", user_id, e, exc_info=True)
+            return 0
     
     def register_user_watchlist_stocks(self, user_id):
         """
@@ -860,4 +979,3 @@ class MO_WebSocket_Manager:
         except Exception as e:
             logger.error(f"Failed to register watchlist stocks for user {user_id}: {e}", exc_info=True)
             return 0
-

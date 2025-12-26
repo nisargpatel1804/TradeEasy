@@ -3,8 +3,6 @@ import { useAuth } from "./context/AuthContext.jsx";
 
 // Import Page Components
 import LandingPage from './features/LandingPage.jsx';
-import LoginPage from './features/LoginPage.jsx';
-import SignupPage from './features/SignupPage.jsx';
 import DashboardPage from './features/DashboardPage.jsx';
 import PortfolioPage from './features/PortfolioPage.jsx';
 import Watchlist from './features/Watchlist.jsx';
@@ -26,10 +24,16 @@ import { Toaster } from "./assets/ui/toaster.jsx";
  * Otherwise, it redirects the user to the login page.
  */
 const ProtectedRoute = ({ children }) => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
+  
+  if (isLoading) {
+      // Optional: Render a loading spinner here while auth check completes
+      return <div className="flex min-h-screen items-center justify-center bg-gray-50">Loading...</div>;
+  }
+
   if (!isAuthenticated) {
     // The 'replace' prop prevents the user from navigating back to the protected route
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/" replace />;
   }
   return children;
 };
@@ -40,21 +44,23 @@ const ProtectedRoute = ({ children }) => {
  */
 const TradePage = () => {
   const { symbol } = useParams();
-  return <TradeForm symbol={symbol} onClose={() => {}} onTradeSuccess={() => {}} />;
+  // Using a key forces the component to remount if the symbol changes in the URL
+  return <TradeForm key={symbol} symbol={symbol} onClose={() => {}} onTradeSuccess={() => {}} />;
 };
 
 function App() {
   const { isAuthenticated } = useAuth();
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900">
+    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans antialiased">
       <Routes>
         {/* --- Public Routes --- */}
-        <Route path="/" element={isAuthenticated ? <Navigate to="/dashboard" /> : <LandingPage />} />
-        <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" /> : <LoginPage />} />
-        <Route path="/signup" element={isAuthenticated ? <Navigate to="/dashboard" /> : <SignupPage />} />
+        <Route path="/" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <LandingPage initialMode="login" />} />
+        <Route path="/login" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <LandingPage initialMode="login" />} />
+        <Route path="/signup" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <LandingPage initialMode="signup" />} />
 
         {/* --- Protected Routes w/ Dashboard layout --- */}
+        {/* The Layout is rendered only if authenticated */}
         <Route element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/portfolio" element={<PortfolioPage />} />
@@ -62,11 +68,19 @@ function App() {
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/performance" element={<PerformancePage />} />
           <Route path="/profile" element={<ProfilePage />} />
+          
+          {/* Market Routes */}
+          {/* Legacy redirect for any old links to /markets */}
+          <Route path="/markets" element={<Navigate to="/market" replace />} />
           <Route path="/market" element={<MarketPage />} />
           <Route path="/indices" element={<Indices />} />
+          
+          {/* Stock & Trading Routes */}
           <Route path="/trade/:symbol" element={<TradePage />} />
+          {/* Support both URL patterns for stock details */}
           <Route path="/stock/overview/:symbol" element={<StockOverview />} />
           <Route path="/stock/:symbol" element={<StockOverview />} />
+          
           <Route path="/order-detail/:orderId" element={<OrderDetail />} />
         </Route>
 
@@ -79,4 +93,3 @@ function App() {
 }
 
 export default App;
-

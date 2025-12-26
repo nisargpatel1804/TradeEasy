@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useAuth } from "../context/AuthContext.jsx";
 import * as api from "../services/api.js";
 import { Input } from "../assets/ui/input.jsx";
@@ -18,15 +18,23 @@ const generateIdempotencyKey = () => {
   return `te-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 };
 
-const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action: initialAction = "BUY" }) => {
+const TradeForm = ({
+  symbol: initialSymbol = "",
+  onTradeSuccess,
+  onClose,
+  action: initialAction = "BUY",
+  onLoadingChange,
+  closeRequested,
+  onCloseRequestHandled,
+}) => {
   const { isAuthenticated } = useAuth();
   const [action, setAction] = useState(initialAction);
-  const [productType, setProductType] = useState("CNC");
+  const [productType, setProductType] = useState(initialAction === "SELL" ? "MIS" : "CNC");
   const [quantity, setQuantity] = useState("");
   const [entryPrice, setEntryPrice] = useState("");
   const [stopLoss, setStopLoss] = useState("");
   const [target, setTarget] = useState("");
-  const [timeframe, setTimeframe] = useState("delivery");
+  const [timeframe, setTimeframe] = useState(initialAction === "SELL" ? "intraday" : "delivery");
   const [symbol, setSymbol] = useState(initialSymbol);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -34,11 +42,104 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
   const [stockData, setStockData] = useState(null);
   const [livePrice, setLivePrice] = useState(null);
   const [portfolioData, setPortfolioData] = useState(null);
+  const cancelAfterCreateRef = useRef(false);
+  const isMountedRef = useRef(true);
+
+  const refreshPortfolioData = useCallback(async () => {
+    try {
+      const data = await api.fetchPortfolio();
+      if (data?.success) {
+        setPortfolioData(data);
+      }
+    } catch {
+      // Non-critical.
+    }
+  }, []);
 
   const subscriptionSymbols = useMemo(
     () => getSymbolVariants(symbol, stockData?.exchange),
     [symbol, stockData?.exchange]
   );
+
+  useEffect(() => {
+    setAction(initialAction);
+    if (initialAction === 'SELL') {
+      setTimeframe('intraday');
+      setProductType('MIS');
+    } else {
+      setTimeframe('delivery');
+      setProductType('CNC');
+    }
+  }, [initialAction]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof onLoadingChange === 'function') {
+      onLoadingChange(isLoading);
+    }
+  }, [isLoading, onLoadingChange]);
+
+  useEffect(() => {
+    if (!closeRequested) {
+      return;
+    }
+
+    // Parent attempted to close the dialog.
+    // If a trade is in-flight, mark it for cancellation once created so it shows in Orders.
+    if (isLoading) {
+      cancelAfterCreateRef.current = true;
+      toast.error("Close requested: will cancel this order once it is placed.");
+      if (typeof onCloseRequestHandled === 'function') {
+        onCloseRequestHandled();
+      }
+      return;
+    }
+
+    if (typeof onCloseRequestHandled === 'function') {
+      onCloseRequestHandled();
+    }
+    if (typeof onClose === 'function') {
+      onClose();
+    }
+  }, [closeRequested, isLoading, onClose, onCloseRequestHandled]);
+
+  const holdingsForSymbol = useMemo(() => {
+    const list = Array.isArray(portfolioData?.holdings)
+      ? portfolioData.holdings
+      : [
+          ...(Array.isArray(portfolioData?.cnc_holdings) ? portfolioData.cnc_holdings : []),
+          ...(Array.isArray(portfolioData?.mis_holdings) ? portfolioData.mis_holdings : []),
+        ];
+
+    const base = (value) => String(value || "").toUpperCase().split(".")[0];
+    const target = base(symbol);
+    if (!target) {
+      return [];
+    }
+
+    return list.filter((holding) => base(holding?.symbol) === target);
+  }, [portfolioData, symbol]);
+
+  const cncHoldingQty = useMemo(() => {
+    return holdingsForSymbol
+      .filter((h) => (h?.product_type || "CNC").toUpperCase() === "CNC")
+      .reduce((sum, h) => sum + (Number(h?.quantity) || 0), 0);
+  }, [holdingsForSymbol]);
+
+  const misHoldingQty = useMemo(() => {
+    return holdingsForSymbol
+      .filter((h) => (h?.product_type || "CNC").toUpperCase() === "MIS")
+      .reduce((sum, h) => sum + (Number(h?.quantity) || 0), 0);
+  }, [holdingsForSymbol]);
+
+  const hasPositionalHolding = cncHoldingQty > 0;
+  const hasIntradayHolding = misHoldingQty > 0;
 
   // Update symbol if the initial prop changes
   useEffect(() => {
@@ -47,7 +148,13 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
     if (normalized) {
       fetchStockData(normalized);
     }
+    refreshPortfolioData();
   }, [initialSymbol]);
+
+  useEffect(() => {
+    // Keep holdings snapshot fresh when user switches BUY/SELL.
+    refreshPortfolioData();
+  }, [action, refreshPortfolioData]);
 
   // Fetch portfolio data on mount
   useEffect(() => {
@@ -58,7 +165,7 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
           setPortfolioData(data);
         }
       } catch (err) {
-        console.error('Failed to fetch portfolio:', err);
+        // Non-critical: portfolio is used only for optional UI hints.
       }
     };
     fetchPortfolio();
@@ -106,7 +213,7 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
         setSymbol((priceData.symbol || "").toUpperCase());
       }
     } catch (err) {
-      console.error('Failed to fetch stock data:', err);
+      // Non-critical: user can still place orders if data fetch fails.
     }
   };
 
@@ -123,7 +230,7 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
           });
         }
       } catch (err) {
-        console.error('Failed to fetch market status:', err);
+        // Non-critical: treat as unknown/closed if status can't be fetched.
       }
     };
     fetchMarketStatus();
@@ -154,15 +261,45 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
   };
 
   // Handle timeframe change
-  const handleTimeframeChange = (value) => {
+  const handleTimeframeChange = useCallback((value) => {
+    if (action === "SELL" && value === "delivery" && !hasPositionalHolding) {
+      toast.error("No delivery (positional) holding available to sell.");
+      return;
+    }
+
+    if (action === "SELL" && value === "intraday" && hasPositionalHolding && !hasIntradayHolding) {
+      toast.error("Intraday short-sell is disabled when you already hold this stock as delivery.");
+      return;
+    }
+
     setTimeframe(value);
-    // Map timeframe to product type
-    if (value === "intraday") {
+    setProductType(value === "intraday" ? "MIS" : "CNC");
+  }, [action, hasIntradayHolding, hasPositionalHolding]);
+
+  useEffect(() => {
+    // Keep timeframe/productType consistent when action or symbol changes.
+    if (action === "BUY") {
+      if (timeframe !== "intraday" && timeframe !== "delivery") {
+        setTimeframe("delivery");
+        setProductType("CNC");
+      }
+      return;
+    }
+
+    // SELL defaults:
+    // - If delivery holding exists, default to delivery sell.
+    // - Otherwise default to intraday (square-off or short-sell).
+    if (timeframe === "delivery" && !hasPositionalHolding) {
+      setTimeframe("intraday");
       setProductType("MIS");
-    } else {
+      return;
+    }
+
+    if (timeframe === "intraday" && hasPositionalHolding && !hasIntradayHolding) {
+      setTimeframe("delivery");
       setProductType("CNC");
     }
-  };
+  }, [action, hasIntradayHolding, hasPositionalHolding, timeframe]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -171,6 +308,7 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
       return;
     }
     setError(null);
+    cancelAfterCreateRef.current = false;
     setIsLoading(true);
 
     const qty = parseInt(quantity, 10);
@@ -185,32 +323,38 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
       orderPrice = parseFloat(entryPrice);
     }
 
-    // For SELL with MIS, check if it's a short sell
-    const isShortSell = action === "SELL" && productType === "MIS";
+    // For SELL with MIS, check if it's a short sell (only when no existing position)
+    const isShortSell = action === "SELL" && productType === "MIS" && !hasPositionalHolding && !hasIntradayHolding;
+
+    // Short selling support is only implemented for immediate execution.
+    // Prevent creating a pending MIS short-sell order that would later be cancelled by the processor.
+    const session = marketStatus?.session;
+    const isMarketRegular = session === 'REGULAR';
+    if (isShortSell) {
+      if (!isMarketRegular) {
+        toast.error("Intraday short sell is only allowed during regular market hours.");
+        setIsLoading(false);
+        return;
+      }
+      if (entryPrice && parseFloat(entryPrice) > 0) {
+        toast.error("Short sell supports MARKET orders only. Remove the limit price.");
+        setIsLoading(false);
+        return;
+      }
+    }
+
+    if (action === "SELL" && productType === "MIS" && !isShortSell && !hasIntradayHolding) {
+      toast.error("No intraday position available to sell.");
+      setIsLoading(false);
+      return;
+    }
     
     if (isShortSell) {
-      // Show confirmation toast for short sell
-      const confirmShortSell = await new Promise((resolve) => {
-        toast((t) => (
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="h-5 w-5 text-orange-600" />
-              <span className="font-semibold">Confirm Short Sell</span>
-            </div>
-            <p className="text-sm">You are placing a short sell order for {symbol}. This position must be covered by 3:25 PM.</p>
-            <div className="flex gap-2 mt-2">
-              <Button size="sm" onClick={() => { toast.dismiss(t.id); resolve(true); }}>
-                Confirm
-              </Button>
-              <Button size="sm" variant="outline" onClick={() => { toast.dismiss(t.id); resolve(false); }}>
-                Cancel
-              </Button>
-            </div>
-          </div>
-        ), { duration: 10000 });
-      });
-      
+      const confirmShortSell = window.confirm(
+        `Confirm short sell for ${symbol}?\n\nThis is an intraday (MIS) short position and must be covered by 3:25 PM.`
+      );
       if (!confirmShortSell) {
+        toast.error("Short sell cancelled.");
         setIsLoading(false);
         return;
       }
@@ -248,6 +392,27 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
           toast.success(successMessage, { id: toastId });
         }
         
+        const orderId = result.order_id || result.orderId || result.id;
+        const statusValue = String(result.status || "").toUpperCase();
+        const isPending = statusValue === 'PENDING';
+
+        // If user requested close while loading, auto-cancel only PENDING orders.
+        if (cancelAfterCreateRef.current && orderId && isPending) {
+          try {
+            await api.cancelOrder(orderId);
+            toast.success("Order cancelled.", { id: toastId });
+          } catch (cancelErr) {
+            toast.error(cancelErr?.message || "Failed to cancel order.", { id: toastId });
+          } finally {
+            cancelAfterCreateRef.current = false;
+          }
+        }
+
+        window.dispatchEvent(new CustomEvent('te:trade-success', { detail: { orderId } }));
+
+        // Refresh holdings snapshot for accurate intraday/positional gating.
+        refreshPortfolioData();
+
         // Reset form state after successful trade
         setQuantity("");
         setEntryPrice("");
@@ -256,10 +421,10 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
         if (onTradeSuccess) onTradeSuccess(result);
         if (onClose) onClose();
       } else {
-        throw new Error(result.message);
+        throw new Error(result?.message || 'Order failed.');
       }
     } catch (err) {
-      const errorMessage = err.message || "An unexpected error occurred.";
+      const errorMessage = err?.message || "An unexpected error occurred.";
       setError(errorMessage);
       toast.error(errorMessage, { id: toastId });
     } finally {
@@ -311,12 +476,12 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
   const availableBalance = portfolioData?.summary?.available_balance || portfolioData?.summary?.cash_balance || 0;
 
   return (
-    <Card className="w-full max-w-3xl mx-auto rounded-[32px] border border-slate-100/80 bg-white/95 shadow-2xl shadow-slate-200/70">
-      <CardHeader className="gap-3 pb-0">
+    <Card className="w-full max-w-none rounded-3xl border border-slate-100 bg-white shadow-sm">
+      <CardHeader className="gap-2 pb-0 px-4 pt-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400">Smart Ticket</p>
-            <CardTitle className="text-2xl font-semibold text-slate-900">Trade Form</CardTitle>
+            <CardTitle className="text-xl font-semibold text-slate-900">Trade Form</CardTitle>
           </div>
           {symbol && (
             <span className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600">
@@ -326,14 +491,14 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
         </div>
         {getMarketStatusBadge()}
       </CardHeader>
-      <CardContent className="pt-6">
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_260px]">
-            <div className="space-y-6">
+      <CardContent className="px-4 pb-4 pt-4">
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_240px]">
+            <div className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-2">
                 {[
                   { key: "BUY", label: "Buy", helper: "Delivery / Long", accent: "emerald", icon: TrendingUp },
-                  { key: "SELL", label: "Sell", helper: "Exit / Short", accent: "rose", icon: TrendingDown },
+                  { key: "SELL", label: "Sell", helper: "Exit / Short", accent: "red", icon: TrendingDown },
                 ].map((option) => {
                   const isActive = action === option.key;
                   const accentClasses = option.accent === "emerald"
@@ -342,12 +507,16 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
                         icon: "bg-emerald-50 text-emerald-600",
                         text: "text-emerald-700",
                         glow: "shadow-[0_18px_45px_rgba(16,185,129,0.18)]",
+                        active: "border-emerald-600 bg-emerald-600",
+                        activeIcon: "bg-white/15 text-white",
                       }
                     : {
-                        border: "border-rose-200",
-                        icon: "bg-rose-50 text-rose-600",
-                        text: "text-rose-700",
-                        glow: "shadow-[0_18px_45px_rgba(244,63,94,0.18)]",
+                        border: "border-red-200",
+                        icon: "bg-red-50 text-red-600",
+                        text: "text-red-700",
+                        glow: "shadow-[0_18px_45px_rgba(239,68,68,0.18)]",
+                        active: "border-red-600 bg-red-600",
+                        activeIcon: "bg-white/15 text-white",
                       };
 
                   return (
@@ -355,21 +524,25 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
                       key={option.key}
                       type="button"
                       onClick={() => setAction(option.key)}
-                      className={`rounded-3xl border bg-white/95 p-4 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/10 ${
+                      className={`rounded-2xl border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/10 ${
                         isActive
-                          ? `${accentClasses.border} ${accentClasses.glow}`
-                          : "border-slate-200 hover:border-slate-300"
+                          ? `${accentClasses.active} ${accentClasses.glow}`
+                          : "border-slate-200 bg-white/95 hover:border-slate-300"
                       }`}
                     >
                       <div className="flex items-center gap-3">
-                        <div className={`flex h-11 w-11 items-center justify-center rounded-2xl ${accentClasses.icon}`}>
-                          <option.icon className="h-5 w-5" />
+                        <div
+                          className={`flex h-10 w-10 items-center justify-center rounded-2xl ${
+                            isActive ? accentClasses.activeIcon : accentClasses.icon
+                          }`}
+                        >
+                          <option.icon className="h-4 w-4" />
                         </div>
                         <div>
-                          <p className={`text-base font-semibold ${isActive ? accentClasses.text : "text-slate-900"}`}>
+                          <p className={`text-sm font-semibold ${isActive ? "text-white" : "text-slate-900"}`}>
                             {option.label}
                           </p>
-                          <p className="text-xs text-slate-500">{option.helper}</p>
+                          <p className={`text-xs ${isActive ? "text-white/80" : "text-slate-500"}`}>{option.helper}</p>
                         </div>
                       </div>
                     </button>
@@ -377,7 +550,7 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
                 })}
               </div>
 
-              <div className="grid gap-5 md:grid-cols-2">
+              <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="symbol" className="text-xs font-semibold uppercase tracking-wide text-slate-500">Symbol</Label>
                   <Input
@@ -409,7 +582,7 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
                 </div>
               </div>
 
-              <div className="grid gap-5 md:grid-cols-2">
+              <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="entryPrice" className="text-xs font-semibold uppercase tracking-wide text-slate-500">Price (Optional)</Label>
                   <Input
@@ -433,20 +606,20 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="intraday">Intraday (auto square-off 3:25 PM)</SelectItem>
-                      {action === "BUY" && <SelectItem value="delivery">Delivery</SelectItem>}
-                      {action === "SELL" && (
-                        <>
-                          <SelectItem value="delivery">Position (until exit)</SelectItem>
-                          <SelectItem value="1month">Park for 1 Month</SelectItem>
-                          <SelectItem value="1year">Park for 1 Year</SelectItem>
-                        </>
-                      )}
+                      <SelectItem value="delivery" disabled={action === "SELL" && !hasPositionalHolding}>
+                        {action === "SELL" ? "Delivery (positional exit)" : "Delivery (positional)"}
+                      </SelectItem>
                     </SelectContent>
                   </Select>
+                  {action === "SELL" && hasPositionalHolding && !hasIntradayHolding && (
+                    <p className="text-xs text-slate-500">
+                      Intraday short-sell is disabled for this symbol because you already hold it as delivery.
+                    </p>
+                  )}
                 </div>
               </div>
 
-              <div className="grid gap-5 md:grid-cols-2">
+              <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="stopLoss" className="text-xs font-semibold uppercase tracking-wide text-slate-500">Stop Loss</Label>
                   <Input
@@ -474,11 +647,11 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
               </div>
             </div>
 
-            <aside className="space-y-4 rounded-3xl border border-slate-100/80 bg-slate-50/60 p-4">
+            <aside className="space-y-3 rounded-2xl border border-slate-100 bg-slate-50/60 p-3">
               {currentLtp > 0 ? (
-                <div className="rounded-2xl border border-white/70 bg-white/80 p-4">
+                <div className="rounded-2xl border border-white/70 bg-white/80 p-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Live LTP</p>
-                  <p className="text-3xl font-bold text-slate-900">{formatCurrency(currentLtp)}</p>
+                  <p className="text-2xl font-bold text-slate-900">{formatCurrency(currentLtp)}</p>
                   <div className={`mt-2 flex items-center gap-2 text-sm font-semibold ${getPriceChangeColor(priceChange)}`}>
                     {priceChange > 0 ? <TrendingUp className="h-4 w-4" /> : <TrendingDown className="h-4 w-4" />}
                     {formatCurrency(Math.abs(priceChange))}
@@ -486,12 +659,12 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
                   </div>
                 </div>
               ) : (
-                <div className="rounded-2xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
+                <div className="rounded-2xl border border-dashed border-slate-200 p-3 text-sm text-slate-500">
                   LTP will appear once a valid symbol is selected.
                 </div>
               )}
 
-              <div className="space-y-3 rounded-2xl border border-slate-200/80 bg-white/70 p-4">
+              <div className="space-y-2.5 rounded-2xl border border-slate-200/80 bg-white/70 p-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Available</span>
                   <span className="text-base font-semibold text-slate-900">{formatCurrency(availableBalance)}</span>
@@ -523,7 +696,7 @@ const TradeForm = ({ symbol: initialSymbol = "", onTradeSuccess, onClose, action
 
           <Button
             type="submit"
-            className="w-full rounded-2xl py-6 text-base font-semibold"
+            className="w-full rounded-2xl py-4 text-sm font-semibold"
             disabled={isLoading || (action === "BUY" && marginRequired > availableBalance)}
           >
             {isLoading ? <Loader2 className="mx-auto animate-spin" /> : `Place ${action} Order`}

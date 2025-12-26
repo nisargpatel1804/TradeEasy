@@ -1,380 +1,362 @@
-import React, { useState, useEffect } from "react";
-import { Link } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "../context/AuthContext.jsx";
+import { signup as register } from "../services/auth.js";
+import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx";
 import { Button } from "../assets/ui/button.jsx";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../assets/ui/dropdown-menu.jsx";
-import {
-  TrendingUp,
-  Menu,
-  BarChart3,
-  LineChart,
-  Shield,
-  Zap,
-  Target,
-  ArrowRight,
-  Users,
-  Clock,
-  DollarSign,
-  Award,
-  CheckCircle2,
-  Sparkles,
-} from "lucide-react";
-import "../assets/css/Landing.css";
+import { Input } from "../assets/ui/input.jsx";
+import { Label } from "../assets/ui/label.jsx";
+import { useToast } from "../assets/ui/use-toast.js";
+import { Loader2, TrendingUp } from "lucide-react";
 
-// The words to animate in the hero section
-const words = ["trader", "investor", "analyst", "enthusiast"];
-const MotionLink = motion(Link);
+const MODE = {
+  login: "login",
+  signup: "signup",
+};
 
-const LandingPage = () => {
-  // State for the animated hero text
-  const [wordIndex, setWordIndex] = useState(0);
+const LandingPage = ({ initialMode = MODE.login }) => {
+  const { login } = useAuth();
+  const { toast } = useToast();
 
-  // Get authentication state and logout function from the AuthContext
-  const { isAuthenticated, logout } = useAuth();
+  const [mode, setMode] = useState(initialMode === MODE.signup ? MODE.signup : MODE.login);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState("");
 
-  // Effect to cycle through the animated words
+  const [loginForm, setLoginForm] = useState({ client_id: "", password: "", remember_me: false });
+  const [signupForm, setSignupForm] = useState({ email: "", mobile: "", password: "", confirmPassword: "" });
+
   useEffect(() => {
-    const interval = setInterval(() => {
-      setWordIndex((prev) => (prev + 1) % words.length);
-    }, 2500);
-    return () => clearInterval(interval);
-  }, []);
+    setMode(initialMode === MODE.signup ? MODE.signup : MODE.login);
+    setError("");
+    setIsSubmitting(false);
+  }, [initialMode]);
+
+  const subtitle = useMemo(() => {
+    return mode === MODE.login
+      ? "Log in to access your dashboard."
+      : "Create your account and start trading with virtual money.";
+  }, [mode]);
+
+  const handleSubmitLogin = async (event) => {
+    event.preventDefault();
+    setError("");
+
+    if (!loginForm.client_id || !loginForm.password) {
+      setError("Client ID and password are required.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await login({
+        client_id: loginForm.client_id.toUpperCase().trim(),
+        password: loginForm.password,
+        remember_me: Boolean(loginForm.remember_me),
+      });
+      toast({ title: "Welcome back", description: "Logged in successfully." });
+    } catch (err) {
+      const message = err?.message || "Invalid credentials. Please try again.";
+      setError(message);
+      toast({ title: "Login failed", description: message, variant: "destructive" });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSubmitSignup = async (event) => {
+    event.preventDefault();
+    setError("");
+
+    if (signupForm.password !== signupForm.confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+    if ((signupForm.password || "").length < 8) {
+      setError("Password must be at least 8 characters long.");
+      return;
+    }
+    if (!/^\d{10}$/.test(signupForm.mobile || "")) {
+      setError("Please enter a valid 10-digit mobile number.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const response = await register({
+        email: signupForm.email.trim(),
+        mobile: `+91${signupForm.mobile.trim()}`,
+        password: signupForm.password,
+        confirm_password: signupForm.confirmPassword,
+      });
+
+      if (!response?.success || !response?.client_id) {
+        const message = response?.message || "Signup failed. Please try again.";
+        setError(message);
+        toast({ title: "Signup failed", description: message, variant: "destructive" });
+        return;
+      }
+
+      // Auto-login after signup (no separate login step).
+      await login({
+        client_id: String(response.client_id).toUpperCase().trim(),
+        password: signupForm.password,
+        remember_me: true,
+      });
+
+      toast({
+        title: "Account created",
+        description: "You are now logged in and being redirected to your dashboard.",
+      });
+    } catch (err) {
+      const message = err?.message || "Signup failed. Please try again.";
+      setError(message);
+      toast({ title: "Signup failed", description: message, variant: "destructive" });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
-    <div className="landing-container">
-      {/* --- Header --- */}
-      <header className="landing-header">
-        <nav className="landing-nav">
-          <Link to="/" className="landing-logo">
-            <TrendingUp className="landing-logo-icon h-7 w-7" />
-            <span>TradeEasy</span>
-          </Link>
-
-          {/* Desktop Navigation */}
-          <div className="hidden md:flex items-center gap-4">
-            {isAuthenticated ? (
-              <>
-                <Button asChild variant="ghost">
-                  <Link to="/dashboard">Dashboard</Link>
-                </Button>
-                <Button onClick={logout} variant="secondary">
-                  Logout
-                </Button>
-              </>
-            ) : (
-              <>
-                <Button asChild variant="ghost">
-                  <Link to="/login">Login</Link>
-                </Button>
-                <Button asChild>
-                  <Link to="/signup">Sign Up</Link>
-                </Button>
-              </>
-            )}
-          </div>
-
-          {/* Mobile Menu */}
-          <div className="md:hidden">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon">
-                  <Menu className="h-6 w-6" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                {isAuthenticated ? (
-                  <>
-                    <DropdownMenuItem asChild>
-                      <Link to="/dashboard">Dashboard</Link>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem onClick={logout} className="text-red-600">
-                      Logout
-                    </DropdownMenuItem>
-                  </>
-                ) : (
-                  <>
-                    <DropdownMenuItem asChild>
-                      <Link to="/login">Login</Link>
-                    </DropdownMenuItem>
-                    <DropdownMenuItem asChild>
-                      <Link to="/signup">Sign Up</Link>
-                    </DropdownMenuItem>
-                  </>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </nav>
-      </header>
-
-      {/* --- Main Content --- */}
-      <main>
-        {/* Hero Section */}
-        <section className="landing-hero">
-          <div className="landing-hero-content">
-            <motion.h1
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.8 }}
-              className="landing-hero-title"
-            >
-              Every{" "}
-              <span className="landing-hero-animated-word">
-                <AnimatePresence mode="wait">
-                  <motion.span
-                    key={words[wordIndex]}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -20 }}
-                    transition={{ duration: 0.5 }}
-                    className="inline-block"
-                  >
-                    {words[wordIndex]}
-                  </motion.span>
-                </AnimatePresence>
-              </span>
-              <br />
-              needs a great platform.
-            </motion.h1>
-            <motion.p
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.8, delay: 0.2 }}
-              className="landing-hero-subtitle"
-            >
-              Practice trading with virtual money in real market conditions.
-              Learn, strategize, and master the art of trading without risking real capital.
-            </motion.p>
-            {!isAuthenticated && (
-              <motion.div
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.8, delay: 0.4 }}
-                className="landing-hero-cta"
-              >
-                <Link to="/signup" className="landing-btn-primary">
-                  <span>Get Started Free</span>
-                  <ArrowRight className="h-5 w-5" />
-                </Link>
-              </motion.div>
-            )}
-          </div>
-        </section>
-
-        {/* Stats Section */}
-        <section className="landing-stats">
-          <div className="landing-stats-grid">
-            <motion.div
-              initial={{ opacity: 0, y: 30 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5 }}
-              className="landing-stat-card"
-            >
-              <Users className="w-10 h-10 mx-auto mb-3 text-blue-600" />
-              <div className="landing-stat-number">10K+</div>
-              <div className="landing-stat-label">Active Traders</div>
-            </motion.div>
-            <motion.div
-              initial={{ opacity: 0, y: 30 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5, delay: 0.1 }}
-              className="landing-stat-card"
-            >
-              <Clock className="w-10 h-10 mx-auto mb-3 text-purple-600" />
-              <div className="landing-stat-number">24/7</div>
-              <div className="landing-stat-label">Market Access</div>
-            </motion.div>
-            <motion.div
-              initial={{ opacity: 0, y: 30 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5, delay: 0.2 }}
-              className="landing-stat-card"
-            >
-              <DollarSign className="w-10 h-10 mx-auto mb-3 text-green-600" />
-              <div className="landing-stat-number">₹10L</div>
-              <div className="landing-stat-label">Virtual Capital</div>
-            </motion.div>
-            <motion.div
-              initial={{ opacity: 0, y: 30 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5, delay: 0.3 }}
-              className="landing-stat-card"
-            >
-              <Award className="w-10 h-10 mx-auto mb-3 text-yellow-600" />
-              <div className="landing-stat-number">100%</div>
-              <div className="landing-stat-label">Risk-Free</div>
-            </motion.div>
-          </div>
-        </section>
-
-        {/* Features Section */}
-        <section className="landing-features">
-          <div className="landing-section-header">
-            <h2 className="landing-section-title">Why Choose TradeEasy?</h2>
-            <p className="landing-section-subtitle">
-              The tools you need to succeed in a risk-free environment.
-            </p>
-          </div>
-          <div className="landing-features-grid">
-            {features.map((feature, index) => (
-              <motion.div
-                key={index}
-                initial={{ opacity: 0, y: 30 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ duration: 0.5, delay: index * 0.1 }}
-                className="landing-feature-card"
-              >
-                <div className="landing-feature-icon-wrapper">
-                  <feature.icon className="h-7 w-7" />
-                </div>
-                <h3 className="landing-feature-title">{feature.title}</h3>
-                <p className="landing-feature-description">{feature.description}</p>
-              </motion.div>
-            ))}
-          </div>
-        </section>
-
-        {/* Benefits Section */}
-        <section className="py-20 px-6 bg-gradient-to-br from-slate-50 to-blue-50">
-          <div className="max-w-6xl mx-auto">
-            <div className="landing-section-header">
-              <h2 className="landing-section-title">Everything You Need to Succeed</h2>
-              <p className="landing-section-subtitle">
-                A complete trading platform designed for learning and growth.
-              </p>
+    <div className="min-h-screen bg-gray-50">
+      <div className="mx-auto flex min-h-screen max-w-5xl items-center px-4 py-10">
+        <div className="grid w-full gap-6 lg:grid-cols-2">
+          <div className="hidden lg:flex flex-col justify-center">
+            <div className="mb-6 flex items-center gap-2 text-slate-900">
+              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
+                <TrendingUp className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">TradeEasy</p>
+                <p className="text-2xl font-bold leading-tight">A clean dashboard-first trading experience</p>
+              </div>
             </div>
-            <div className="grid md:grid-cols-2 gap-8 mt-12">
-              {benefits.map((benefit, index) => (
-                <motion.div
-                  key={index}
-                  initial={{ opacity: 0, x: index % 2 === 0 ? -30 : 30 }}
-                  whileInView={{ opacity: 1, x: 0 }}
-                  viewport={{ once: true }}
-                  transition={{ duration: 0.5, delay: index * 0.1 }}
-                  className="flex gap-4 p-6 bg-white rounded-xl shadow-sm border border-slate-200 hover:shadow-md transition-shadow"
-                >
-                  <div className="flex-shrink-0">
-                    <div className="w-12 h-12 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
-                      <CheckCircle2 className="w-6 h-6 text-white" />
-                    </div>
+
+            <div className="space-y-3 rounded-3xl border border-slate-100 bg-white p-5 shadow-sm">
+              <p className="text-sm font-semibold text-slate-900">What you get</p>
+              <ul className="space-y-2 text-sm text-slate-600">
+                <li className="flex items-start gap-2">
+                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-amber-500" />
+                  Real-time market data + compact dashboard UI
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-amber-500" />
+                  Watchlist, movers, orders, portfolio in one place
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="mt-1 h-1.5 w-1.5 rounded-full bg-amber-500" />
+                  Safe auth flow with clean UX feedback
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <Card className="w-full rounded-3xl border border-slate-100 shadow-sm">
+            <CardHeader className="space-y-3 pb-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm lg:hidden">
+                    <TrendingUp className="h-5 w-5" />
                   </div>
                   <div>
-                    <h3 className="text-lg font-semibold text-slate-900 mb-2">{benefit.title}</h3>
-                    <p className="text-slate-600">{benefit.description}</p>
+                    <CardTitle className="text-xl font-semibold text-slate-900">
+                      {mode === MODE.login ? "Login" : "Sign up"}
+                    </CardTitle>
+                    <p className="text-xs font-medium text-slate-500">{subtitle}</p>
                   </div>
-                </motion.div>
-              ))}
-            </div>
-          </div>
-        </section>
+                </div>
 
-        {/* CTA Section */}
-        {!isAuthenticated && (
-          <section className="landing-cta">
-            <div className="landing-cta-content">
-              <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                whileInView={{ opacity: 1, scale: 1 }}
-                viewport={{ once: true }}
-                transition={{ duration: 0.6 }}
-              >
-                <Sparkles className="w-16 h-16 mx-auto mb-6 text-yellow-300" />
-                <h2 className="landing-cta-title">Ready to Start Your Trading Journey?</h2>
-                <p className="landing-cta-subtitle">
-                  Join thousands of traders learning and growing on TradeEasy. 
-                  Start with ₹10,00,000 virtual capital today.
-                </p>
-                <Link to="/signup" className="landing-cta-button">
-                  <span>Create Free Account</span>
-                  <ArrowRight className="h-5 w-5" />
-                </Link>
-              </motion.div>
-            </div>
-          </section>
-        )}
-      </main>
+                <div className="flex rounded-full border border-slate-200 bg-slate-50 p-1 text-[11px]">
+                  <button
+                    type="button"
+                    className={`rounded-full px-3 py-1 font-semibold transition-colors ${
+                      mode === MODE.login ? "bg-slate-900 text-white" : "text-slate-600 hover:text-slate-900"
+                    }`}
+                    onClick={() => {
+                      setMode(MODE.login);
+                      setError("");
+                    }}
+                  >
+                    Login
+                  </button>
+                  <button
+                    type="button"
+                    className={`rounded-full px-3 py-1 font-semibold transition-colors ${
+                      mode === MODE.signup ? "bg-slate-900 text-white" : "text-slate-600 hover:text-slate-900"
+                    }`}
+                    onClick={() => {
+                      setMode(MODE.signup);
+                      setError("");
+                    }}
+                  >
+                    Sign up
+                  </button>
+                </div>
+              </div>
+            </CardHeader>
 
-      {/* --- Footer --- */}
-      <footer className="landing-footer">
-        <div className="landing-footer-content">
-          <p className="landing-footer-text">© {new Date().getFullYear()} TradeEasy. All rights reserved.</p>
-          <p className="landing-footer-subtext">A virtual trading platform for educational purposes.</p>
+            <CardContent className="pt-2">
+              {error && (
+                <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-red-700">
+                  {error}
+                </div>
+              )}
+
+              {mode === MODE.login ? (
+                <form onSubmit={handleSubmitLogin} className="space-y-4">
+                  <div className="grid gap-4">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="client_id" className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Client ID
+                      </Label>
+                      <Input
+                        id="client_id"
+                        name="client_id"
+                        value={loginForm.client_id}
+                        onChange={(e) => setLoginForm((prev) => ({ ...prev, client_id: e.target.value.toUpperCase() }))}
+                        placeholder="e.g. ABC1234"
+                        required
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label htmlFor="password" className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Password
+                      </Label>
+                      <Input
+                        id="password"
+                        name="password"
+                        type="password"
+                        value={loginForm.password}
+                        onChange={(e) => setLoginForm((prev) => ({ ...prev, password: e.target.value }))}
+                        placeholder="••••••••"
+                        required
+                      />
+                    </div>
+
+                    <label className="flex items-center gap-2 text-sm text-slate-600">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(loginForm.remember_me)}
+                        onChange={(e) => setLoginForm((prev) => ({ ...prev, remember_me: e.target.checked }))}
+                        className="h-4 w-4 rounded border-slate-300 text-slate-900"
+                      />
+                      Remember me
+                    </label>
+                  </div>
+
+                  <Button type="submit" className="w-full rounded-2xl font-semibold" disabled={isSubmitting}>
+                    {isSubmitting ? <Loader2 className="h-5 w-5 animate-spin" /> : "Log In"}
+                  </Button>
+
+                  <p className="text-center text-xs text-slate-500">
+                    New here?{" "}
+                    <button
+                      type="button"
+                      className="font-semibold text-slate-900 hover:underline"
+                      onClick={() => {
+                        setMode(MODE.signup);
+                        setError("");
+                      }}
+                    >
+                      Create an account
+                    </button>
+                  </p>
+                </form>
+              ) : (
+                <form onSubmit={handleSubmitSignup} className="space-y-4">
+                  <div className="grid gap-4">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="email" className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Email
+                      </Label>
+                      <Input
+                        id="email"
+                        name="email"
+                        type="email"
+                        value={signupForm.email}
+                        onChange={(e) => setSignupForm((prev) => ({ ...prev, email: e.target.value }))}
+                        placeholder="you@example.com"
+                        required
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label htmlFor="mobile" className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Mobile
+                      </Label>
+                      <div className="flex">
+                        <span className="inline-flex items-center rounded-l-2xl border border-r-0 border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-700">
+                          +91
+                        </span>
+                        <Input
+                          id="mobile"
+                          name="mobile"
+                          inputMode="numeric"
+                          value={signupForm.mobile}
+                          onChange={(e) => setSignupForm((prev) => ({ ...prev, mobile: e.target.value.replace(/\D/g, "").slice(0, 10) }))}
+                          placeholder="9876543210"
+                          className="rounded-l-none"
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="signup_password" className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Password
+                        </Label>
+                        <Input
+                          id="signup_password"
+                          name="password"
+                          type="password"
+                          value={signupForm.password}
+                          onChange={(e) => setSignupForm((prev) => ({ ...prev, password: e.target.value }))}
+                          required
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="confirmPassword" className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Confirm
+                        </Label>
+                        <Input
+                          id="confirmPassword"
+                          name="confirmPassword"
+                          type="password"
+                          value={signupForm.confirmPassword}
+                          onChange={(e) => setSignupForm((prev) => ({ ...prev, confirmPassword: e.target.value }))}
+                          required
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <Button type="submit" className="w-full rounded-2xl font-semibold" disabled={isSubmitting}>
+                    {isSubmitting ? <Loader2 className="h-5 w-5 animate-spin" /> : "Create Account"}
+                  </Button>
+
+                  <p className="text-center text-xs text-slate-500">
+                    Already have an account?{" "}
+                    <button
+                      type="button"
+                      className="font-semibold text-slate-900 hover:underline"
+                      onClick={() => {
+                        setMode(MODE.login);
+                        setError("");
+                      }}
+                    >
+                      Login
+                    </button>
+                  </p>
+                </form>
+              )}
+            </CardContent>
+          </Card>
         </div>
-      </footer>
+      </div>
     </div>
   );
-}
-
-const features = [
-  {
-    title: "Real-Time Market Data",
-    description: "Practice with live market data from major exchanges with real-time price updates.",
-    icon: TrendingUp,
-  },
-  {
-    title: "Virtual Portfolio",
-    description: "Track your virtual investments and performance with detailed analytics and reporting.",
-    icon: BarChart3,
-  },
-  {
-    title: "Advanced Analysis",
-    description: "Access professional-grade tools, interactive charts, and market research.",
-    icon: LineChart,
-  },
-  {
-    title: "Risk-Free Learning",
-    description: "Improve your skills without risking real money in a safe, simulated environment.",
-    icon: Shield,
-  },
-  {
-    title: "Lightning Fast",
-    description: "Experience ultra-fast order execution for the most seamless trading experience.",
-    icon: Zap,
-  },
-  {
-    title: "Performance Tracking",
-    description: "Get detailed insights from your trading history to improve your strategy.",
-    icon: Target,
-  },
-];
-
-const benefits = [
-  {
-    title: "No Credit Card Required",
-    description: "Start trading immediately with no payment information needed. Just sign up and go.",
-  },
-  {
-    title: "Real Market Conditions",
-    description: "Experience live market data and prices from NSE and BSE exchanges.",
-  },
-  {
-    title: "Comprehensive Analytics",
-    description: "Track your performance with detailed charts, reports, and insights.",
-  },
-  {
-    title: "Multiple Watchlists",
-    description: "Create and manage multiple watchlists to organize your trading ideas.",
-  },
-  {
-    title: "Order History",
-    description: "Review all your past trades with complete transaction history and details.",
-  },
-  {
-    title: "Educational Platform",
-    description: "Learn trading strategies and market analysis in a zero-risk environment.",
-  },
-];
+};
 
 export default LandingPage;
+
 

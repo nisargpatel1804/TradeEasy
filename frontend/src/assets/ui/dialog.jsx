@@ -52,7 +52,7 @@ const DialogContent = React.forwardRef(({ className, children, size, ...props },
     >
       {children}
       <DialogPrimitive.Close
-        className="absolute right-4 top-4 rounded-full border border-transparent bg-muted/40 p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2"
+        className="absolute right-4 top-4 inline-flex h-9 w-9 items-center justify-center rounded-full border border-border bg-background/95 text-foreground shadow-sm transition hover:bg-muted focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2"
       >
         <Cross2Icon className="h-4 w-4" />
         <span className="sr-only">Close dialog</span>

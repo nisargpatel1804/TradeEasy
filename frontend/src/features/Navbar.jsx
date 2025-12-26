@@ -19,6 +19,37 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { LogOut, User, Menu, Bell, Plus, ArrowRight, Loader2 } from 'lucide-react';
 import { useToast } from '../assets/ui/use-toast.js';
 
+const readCachedHeadlineIndices = (cacheKey) => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(cacheKey);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    const data = parsed?.data;
+    if (!data || typeof data !== 'object') {
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+};
+
+const writeCachedHeadlineIndices = (cacheKey, data) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data }));
+  } catch {
+    // Ignore storage errors (quota, disabled, etc.)
+  }
+};
+
 const TICKER_CONFIG = [
   {
     key: 'nifty50',
@@ -26,9 +57,9 @@ const TICKER_CONFIG = [
     hints: ['NSE:26000', 'NIFTY 50', 'NIFTY50'],
   },
   {
-    key: 'gift_nifty',
-    label: 'Gift Nifty',
-    hints: ['NSEIFSC:NIFTY', 'GIFT NIFTY', 'GIFTNIFTY'],
+    key: 'sensex',
+    label: 'Sensex',
+    hints: ['SENSEX', 'BSE:SENSEX', 'S&P BSE SENSEX', 'BSE SENSEX'],
   },
   {
     key: 'india_vix',
@@ -72,12 +103,46 @@ const Navbar = ({ onToggleSidebar }) => {
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const [headlineIndices, setHeadlineIndices] = useState(() =>
-    TICKER_CONFIG.reduce((acc, item) => {
+  const headlineCacheKey = useMemo(() => {
+    const username = (user?.username || profileData?.username || 'anon').toLowerCase();
+    return `te:headline_indices:${username}`;
+  }, [user?.username, profileData?.username]);
+
+  const [headlineIndices, setHeadlineIndices] = useState(() => {
+    const empty = TICKER_CONFIG.reduce((acc, item) => {
       acc[item.key] = null;
       return acc;
-    }, {})
-  );
+    }, {});
+
+    const cached = readCachedHeadlineIndices(`te:headline_indices:${(user?.username || 'anon').toLowerCase()}`);
+    if (!cached) {
+      return empty;
+    }
+
+    return {
+      ...empty,
+      ...cached,
+    };
+  });
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
+    const cached = readCachedHeadlineIndices(headlineCacheKey);
+    if (!cached) {
+      return;
+    }
+
+    setHeadlineIndices((prev) => {
+      const hasAny = Object.values(prev || {}).some((value) => typeof value?.price === 'number');
+      if (hasAny) {
+        return prev;
+      }
+      return { ...prev, ...cached };
+    });
+  }, [headlineCacheKey, isAuthenticated]);
   const [isWalletDialogOpen, setIsWalletDialogOpen] = useState(false);
   const [selectedWalletLimit, setSelectedWalletLimit] = useState(null);
   const [isUpdatingWallet, setIsUpdatingWallet] = useState(false);
@@ -96,8 +161,20 @@ const Navbar = ({ onToggleSidebar }) => {
     };
 
     const price = coerceNumber(payload.price ?? payload.ltp ?? payload.last_price ?? payload.lastTradedPrice ?? payload.value);
-    const change = coerceNumber(payload.change ?? payload.net_change ?? payload.netChange ?? payload.change_amount);
-    const percentChange = coerceNumber(payload.percent_change ?? payload.percentChange ?? payload.change_percent ?? payload.pChange);
+
+    const changeKeys = ['change', 'net_change', 'netChange', 'change_amount'];
+    const percentKeys = ['percent_change', 'percentChange', 'change_percent', 'pChange'];
+
+    const hasExplicitChange = changeKeys.some((key) => payload?.[key] !== undefined && payload?.[key] !== null);
+    const hasExplicitPercent = percentKeys.some((key) => payload?.[key] !== undefined && payload?.[key] !== null);
+
+    const change = hasExplicitChange
+      ? coerceNumber(payload.change ?? payload.net_change ?? payload.netChange ?? payload.change_amount)
+      : null;
+
+    const percentChange = hasExplicitPercent
+      ? coerceNumber(payload.percent_change ?? payload.percentChange ?? payload.change_percent ?? payload.pChange)
+      : null;
 
     if (price === null) {
       return null;
@@ -108,8 +185,8 @@ const Navbar = ({ onToggleSidebar }) => {
       name: payload.name || config.label || payload.symbol,
       label: config.label || payload.name || payload.symbol,
       price,
-      change: change ?? 0,
-      percentChange: percentChange ?? 0,
+      change,
+      percentChange,
     };
   }, []);
 
@@ -130,12 +207,18 @@ const Navbar = ({ onToggleSidebar }) => {
         }
 
         const current = prev[config.key];
+        const merged = {
+          ...normalized,
+          change: normalized.change ?? current?.change ?? 0,
+          percentChange: normalized.percentChange ?? current?.percentChange ?? 0,
+        };
+
         if (!current ||
-          current.price !== normalized.price ||
-          current.change !== normalized.change ||
-          current.percentChange !== normalized.percentChange ||
-          current.name !== normalized.name) {
-          next[config.key] = normalized;
+          current.price !== merged.price ||
+          current.change !== merged.change ||
+          current.percentChange !== merged.percentChange ||
+          current.name !== merged.name) {
+          next[config.key] = merged;
           mutated = true;
         }
       });
@@ -149,7 +232,6 @@ const Navbar = ({ onToggleSidebar }) => {
       await logout();
       toast({ title: 'Logged Out', description: 'You have been successfully logged out.' });
     } catch (error) {
-      console.error("Logout failed:", error);
       toast({ 
         title: 'Logout Failed', 
         description: 'Could not log out. Please try again or clear your cookies.',
@@ -159,6 +241,10 @@ const Navbar = ({ onToggleSidebar }) => {
   };
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
     if (!Array.isArray(indicesData) || indicesData.length === 0) {
       return;
     }
@@ -171,9 +257,13 @@ const Navbar = ({ onToggleSidebar }) => {
     }, {});
 
     updateHeadlineFromMap(map);
-  }, [indicesData, updateHeadlineFromMap]);
+  }, [indicesData, updateHeadlineFromMap, isAuthenticated]);
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
     const unsubscribe = priceUpdateService.subscribe((payload = {}) => {
       updateHeadlineFromMap(payload.allPrices || {});
     });
@@ -183,11 +273,14 @@ const Navbar = ({ onToggleSidebar }) => {
         unsubscribe();
       }
     };
-  }, [updateHeadlineFromMap]);
+  }, [updateHeadlineFromMap, isAuthenticated]);
 
-  if (!isAuthenticated) {
-    return null; // Don't render navbar on auth pages
-  }
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+    writeCachedHeadlineIndices(headlineCacheKey, headlineIndices);
+  }, [headlineCacheKey, headlineIndices, isAuthenticated]);
 
   const profileInitial = profileData?.username?.charAt(0).toUpperCase() || user?.username?.charAt(0).toUpperCase() || 'U';
   const walletBalance = useMemo(() => {
@@ -244,6 +337,10 @@ const Navbar = ({ onToggleSidebar }) => {
     });
   }, [headlineIndices]);
 
+  if (!isAuthenticated) {
+    return null; // Don't render navbar on auth pages
+  }
+
   return (
     <header className="fixed inset-x-0 top-0 z-50 border-b border-slate-200 bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60">
       <div className="flex items-center justify-between gap-4 px-4 py-3 lg:px-8">
@@ -268,7 +365,7 @@ const Navbar = ({ onToggleSidebar }) => {
           </Link>
         </div>
 
-        <div className="hidden flex-1 items-center justify-center gap-4 overflow-x-auto md:flex">
+        <div className="hidden flex-1 items-center justify-center gap-4 overflow-hidden md:flex">
           {tickerItems.map((item) => (
             <TickerChip key={item.key} label={item.label} price={item.price} change={item.change} percent={item.percent} />
           ))}

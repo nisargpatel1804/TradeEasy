@@ -1,4 +1,4 @@
-import React, { createContext, useState, useEffect, useContext, useCallback } from 'react';
+import React, { createContext, useState, useEffect, useContext, useCallback, useRef } from 'react';
 import * as authService from '../services/auth.js'; // Using the dedicated auth service with .js extension
 import { useNavigate } from 'react-router-dom';
 
@@ -26,23 +26,43 @@ export const AuthProvider = ({ children }) => {
   const [isLoading, setIsLoading] = useState(true); // Manages loading for the initial session check
   const navigate = useNavigate();
 
+  const isLoggingOutRef = useRef(false);
+
+  const clearAuthState = useCallback(() => {
+    setUser(null);
+    setIsAuthenticated(false);
+    navigate('/');
+  }, [navigate]);
+
   /**
    * Memoized logout function. It calls the logout service, updates state,
    * and navigates the user to the login page only on successful logout.
    */
   const handleLogout = useCallback(async () => {
-    try {
-      await authService.logout();
-      // Only clear state and navigate if logout succeeds
-      setUser(null);
-      setIsAuthenticated(false);
-      navigate('/login');
-    } catch (error) {
-      console.error("Logout failed:", error);
-      // Keep user on current page and let them know logout failed
-      throw error; // Re-throw so calling components can handle it
+    if (isLoggingOutRef.current) {
+      return;
     }
-  }, [navigate]);
+    isLoggingOutRef.current = true;
+
+    try {
+      try {
+        await authService.logout();
+      } catch (error) {
+        // If session is already expired, backend may return 401.
+        // Treat it as success so UI can still log out cleanly.
+        if (error?.status !== 401) {
+          throw error;
+        }
+      }
+
+      clearAuthState();
+    } catch (error) {
+      // If we can't log out server-side, still clear local state to prevent broken sessions.
+      clearAuthState();
+    } finally {
+      isLoggingOutRef.current = false;
+    }
+  }, [clearAuthState]);
   
   // Effect to verify user session on initial application load.
   useEffect(() => {
@@ -69,8 +89,13 @@ export const AuthProvider = ({ children }) => {
   // Effect to listen for the global 'unauthorized' event dispatched by api.js
   useEffect(() => {
     const onUnauthorized = () => {
-      console.log("Session expired or invalid. Logging out.");
-      handleLogout();
+      // Important: do NOT call server logout here.
+      // When the session is already invalid, calling /logout can 401 and create loops.
+      if (!isLoggingOutRef.current) {
+        isLoggingOutRef.current = true;
+        clearAuthState();
+        isLoggingOutRef.current = false;
+      }
     };
 
     window.addEventListener('unauthorized', onUnauthorized);
@@ -78,7 +103,7 @@ export const AuthProvider = ({ children }) => {
     return () => {
       window.removeEventListener('unauthorized', onUnauthorized);
     };
-  }, [handleLogout]);
+  }, [clearAuthState]);
 
   /**
    * Login function to be called from components.

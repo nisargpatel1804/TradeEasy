@@ -105,6 +105,29 @@
   background: hsl(var(--muted-foreground) / 0.5);
 }
 
+/* Watchlist Sidebar: thinner, subtler scrollbar */
+.watchlist-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground) / 0.35) transparent;
+}
+
+.watchlist-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.watchlist-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.watchlist-scroll::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.25);
+  border-radius: 999px;
+}
+
+.watchlist-scroll::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.4);
+}
+
 /* Smooth scrolling */
 html {
   scroll-behavior: smooth;

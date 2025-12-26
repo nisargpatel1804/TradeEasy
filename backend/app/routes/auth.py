@@ -122,12 +122,18 @@ def login():
         return jsonify({"success": False, "message": "An internal server error occurred."}), 500
 
 @auth_bp.route('/logout', methods=['POST'])
-@login_required
 def logout():
-    """Logs out the current user and clears the session."""
+    """Logs out the current user and clears the session.
+
+    This endpoint is intentionally idempotent: calling it when the session is
+    already expired/logged out should still return 200 so clients can safely
+    clear local state without getting stuck in 401 loops.
+    """
     try:
-        user_id = current_user.client_id
-        logout_user()
+        user_id = current_user.client_id if current_user.is_authenticated else None
+
+        if current_user.is_authenticated:
+            logout_user()
 
         # Remove application-specific session data while preserving
         # Flask-Login's internal markers (e.g. _remember) so the
@@ -137,24 +143,29 @@ def logout():
                 session.pop(key, None)
 
         session.modified = True
-        logger.info(f"User {user_id} logged out.")
+        if user_id:
+            logger.info(f"User {user_id} logged out.")
         return jsonify({"success": True, "message": "You have been successfully logged out."}), 200
     except Exception as e:
         logger.error(f"Error during logout: {e}", exc_info=True)
         return jsonify({"success": False, "message": "An internal server error occurred during logout."}), 500
 
 @auth_bp.route('/check-auth', methods=['GET'])
-@login_required
 def check_auth():
+    """Verify whether the client's session is still valid.
+
+    This endpoint intentionally returns 200 even when the user is not
+    authenticated to avoid noisy 401 console/network errors during normal
+    logged-out states.
     """
-    A protected endpoint to verify if the client's session is still valid.
-    The @login_required decorator handles the authentication check.
-    """
+    if not current_user.is_authenticated:
+        return jsonify({"isAuthenticated": False, "user": None}), 200
+
     return jsonify({
         "isAuthenticated": True,
         "user": {
             "client_id": current_user.client_id,
-            "username": current_user.username
+            "username": current_user.username,
         }
     }), 200
 
