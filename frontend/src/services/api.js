@@ -3,7 +3,9 @@ import axios from "axios";
 // --- Configuration ---
 
 // Load API base URL from environment variables, with a fallback for local development.
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+// NOTE: In production we may intentionally set VITE_API_BASE_URL to an empty string
+// to use same-origin requests (e.g., behind Vercel rewrites).
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:5000";
 const DEFAULT_TIMEOUT = 15000; // 15 seconds
 
 /**
@@ -86,10 +88,11 @@ const fetchData = async (endpoint, options = {}) => {
 // =========================================================================
 
 // --- Authentication ---
-export const signup = (credentials) => apiClient.post('/auth/signup', credentials).then(res => res.data);
-export const login = (credentials) => apiClient.post('/auth/login', credentials).then(res => res.data);
-export const logout = () => apiClient.post('/auth/logout').then(res => res.data);
-export const checkAuth = () => fetchData('/auth/check-auth');
+// Backend routes are mounted at /api (no extra /auth prefix)
+export const signup = (credentials) => apiClient.post('/signup', credentials).then(res => res.data);
+export const login = (credentials) => apiClient.post('/login', credentials).then(res => res.data);
+export const logout = () => apiClient.post('/logout').then(res => res.data);
+export const checkAuth = () => fetchData('/check-auth');
 
 // --- User Profile ---
 export const getProfile = () => fetchData('/profile');

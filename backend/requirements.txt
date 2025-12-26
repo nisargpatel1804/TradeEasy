@@ -2,6 +2,8 @@
 
 # Core framework
 Flask>=2.2,<2.3  # Keep Flask 2.2.x to align with flask-mongoengine and existing project code
+# Werkzeug 3.x drops APIs Flask 2.2 expects; pin to <3 for compatibility.
+Werkzeug>=2.2.2,<3
 Flask-Cors>=4.0
 Flask-Login>=0.6
 Flask-Session>=0.5

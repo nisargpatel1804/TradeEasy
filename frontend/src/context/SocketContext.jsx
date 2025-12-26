@@ -49,7 +49,10 @@ export const SocketProvider = ({ children }) => {
       return undefined;
     }
 
-    const socketIoUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+    // If VITE_API_BASE_URL is an empty string (production behind same-origin rewrites),
+    // pass undefined so socket.io-client uses the current origin.
+    const socketIoUrlRaw = import.meta.env.VITE_API_BASE_URL;
+    const socketIoUrl = socketIoUrlRaw === '' ? undefined : (socketIoUrlRaw ?? 'http://localhost:5000');
 
     const newSocket = io(socketIoUrl, {
       withCredentials: true,

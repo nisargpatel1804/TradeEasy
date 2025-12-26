@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://tradeeasy-backend-4see.onrender.com/api/:path*"
+    },
+    {
+      "source": "/socket.io/:path*",
+      "destination": "https://tradeeasy-backend-4see.onrender.com/socket.io/:path*"
+    }
+  ]
+}
