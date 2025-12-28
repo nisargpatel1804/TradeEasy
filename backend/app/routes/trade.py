@@ -199,20 +199,7 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
         return {"success": False, "message": error_msg}, 400
 
     # --- Step 2: Market Hours Validation ---
-    # Auto-convert MARKET orders to LIMIT during POST_MARKET session
-    session = get_market_session()
-    original_order_type = order_type
-    was_auto_converted = False
-    
-    if session == 'POST_MARKET' and order_type == 'MARKET' and product_type == 'CNC':
-        # Fetch current price to use as limit price
-        api_data_preview = get_stock_data_from_api(symbol_input)
-        if api_data_preview and api_data_preview.get('ltp', 0) > 0:
-            order_type = 'LIMIT'
-            data['price'] = str(api_data_preview['ltp'])
-            was_auto_converted = True
-            logger.info(f"Auto-converted MARKET order to LIMIT at ₹{data['price']} for AMO")
-    
+    # Trading is allowed only during REGULAR market hours.
     is_timing_valid, timing_message = validate_order_timing(order_type, product_type)
     if not is_timing_valid:
         return {"success": False, "message": timing_message}, 400
@@ -238,35 +225,27 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
     execution_price = None
     status = "PENDING"  # Default for orders that need processing
     
-    # Check if this is an AMO (After Market Order) - should always be pending
-    is_amo = (session == 'POST_MARKET')
-    
     if order_type == 'MARKET':
         # Market orders execute immediately at LTP (only during market hours)
         execution_price = current_ltp
-        status = "PENDING" if is_amo else "EXECUTED"
+        status = "EXECUTED"
     
     elif order_type == 'LIMIT':
         limit_price = Decimal(str(data.get('price', 0)))
         if limit_price <= 0:
             return {"success": False, "message": "A positive limit price is required for LIMIT orders."}, 400
         
-        if is_amo:
-            # AMO orders always go to pending, regardless of price
+        # Check if limit order can execute immediately (during market hours)
+        if action == 'BUY' and current_ltp <= limit_price:
+            execution_price = current_ltp  # Execute at market price (better than limit)
+            status = "EXECUTED"
+        elif action == 'SELL' and current_ltp >= limit_price:
+            execution_price = current_ltp  # Execute at market price (better than limit)
+            status = "EXECUTED"
+        else:
+            # Limit order goes to pending
             execution_price = limit_price
             status = "PENDING"
-        else:
-            # Check if limit order can execute immediately (during market hours)
-            if action == 'BUY' and current_ltp <= limit_price:
-                execution_price = current_ltp  # Execute at market price (better than limit)
-                status = "EXECUTED"
-            elif action == 'SELL' and current_ltp >= limit_price:
-                execution_price = current_ltp  # Execute at market price (better than limit)
-                status = "EXECUTED"
-            else:
-                # Limit order goes to pending
-                execution_price = limit_price
-                status = "PENDING"
     
     elif order_type == 'STOP_LOSS':
         # Reserve funds based on the trigger price to avoid underfunded executions
@@ -287,9 +266,9 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
         status = "PENDING"
     
     elif order_type == 'BRACKET':
-        # Bracket orders: entry executes immediately during market hours, pending for AMO
+        # Bracket orders: entry executes immediately during market hours
         execution_price = current_ltp
-        status = "PENDING" if is_amo else "EXECUTED"
+        status = "EXECUTED"
 
     total_amount = execution_price * Decimal(quantity)
 
@@ -314,7 +293,6 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
             "target_price": data.get('target_price'),
             "trailing_stop_pct": data.get('trailing_stop_pct'),
             "current_ltp": current_ltp,
-            "was_auto_converted": was_auto_converted
         }
     }, 200
 
@@ -795,18 +773,7 @@ def buy():
             # They will be created by order_processor.py when the order actually executes
             # This prevents premature lot allocation for orders that might be cancelled
             
-            # Determine appropriate success message
-            session = get_market_session()
-            if session == 'POST_MARKET':
-                from app.utils.market_hours import get_next_trading_day
-                next_day = get_next_trading_day()
-                base_msg = f"After Market Order (AMO) placed successfully. Will execute on {next_day.strftime('%Y-%m-%d')} at market open."
-                if trade_data.get('was_auto_converted'):
-                    message = f"{base_msg} (Market order converted to Limit at ₹{trade_data['execution_price']:.2f})"
-                else:
-                    message = base_msg
-            else:
-                message = f"Buy order placed successfully. Order is pending execution."
+            message = "Buy order placed successfully. Order is pending execution."
             
             logger.info(f"Pending BUY order created for {user.client_id}: {trade_data['quantity']} of {trade_data['symbol']}")
             
@@ -1014,18 +981,7 @@ def sell():
             # They will be processed by order_processor.py when the order executes
             # This prevents premature deduction for orders that might be cancelled
             
-            # Determine appropriate success message
-            session = get_market_session()
-            if session == 'POST_MARKET':
-                from app.utils.market_hours import get_next_trading_day
-                next_day = get_next_trading_day()
-                base_msg = f"After Market Order (AMO) placed successfully. Will execute on {next_day.strftime('%Y-%m-%d')} at market open."
-                if trade_data.get('was_auto_converted'):
-                    message = f"{base_msg} (Market order converted to Limit at ₹{trade_data['execution_price']:.2f})"
-                else:
-                    message = base_msg
-            else:
-                message = f"Sell order placed successfully. Order is pending execution."
+            message = "Sell order placed successfully. Order is pending execution."
             
             logger.info(f"Pending SELL order created for {user.client_id}: {trade_data['quantity']} of {trade_data['symbol']}")
             
@@ -1068,10 +1024,10 @@ def market_status():
             "session": session,  # Already a string
             "is_holiday": is_holiday,
             "status_message": status_message,
-            "can_place_orders": True,  # API always accepts orders (validated later)
+            "can_place_orders": bool(is_open),
             "regular_hours": "9:15 AM - 3:30 PM IST",
             "pre_market": "9:00 AM - 9:15 AM IST",
-            "post_market": "3:40 PM onwards (AMO)"
+            "post_market": "After-hours (trading disabled)"
         }), 200
     except Exception as e:
         logger.error(f"Error fetching market status: {e}", exc_info=True)
@@ -1100,6 +1056,12 @@ def update_exit_plan():
     product_type = (data.get('product_type') or 'CNC').upper()
     stop_order_id = data.get('stop_order_id')
     target_order_id = data.get('target_order_id')
+
+    if not is_market_open():
+        return jsonify({
+            "success": False,
+            "message": "Modify/exit is allowed only during market hours: 9:15 AM - 3:30 PM IST"
+        }), 400
 
     try:
         stop_loss_price = float(data.get('stop_loss_price'))

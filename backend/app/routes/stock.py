@@ -15,7 +15,7 @@ EOD_CACHE_TTL = 300  # 5 minutes
 _stock_data_cache = {}
 STOCK_DATA_CACHE_TTL = 2  # seconds; keep small so UI stays fresh
 
-def _get_cached_eod_data(mo_api, exchange: str) -> list:
+def _get_cached_eod_data(mo_api, exchange: str, provider_available: bool = True) -> list:
     """Fetches and caches bulk EOD data for an exchange to minimize API calls."""
     cache_key = f"eod_bulk_{exchange}"
     now = time.time()
@@ -26,7 +26,12 @@ def _get_cached_eod_data(mo_api, exchange: str) -> list:
             logger.debug(f"EOD cache HIT for {exchange}")
             return cached_data
     
-    logger.info(f"EOD cache MISS for {exchange}, fetching from API")
+    logger.info(f"EOD cache MISS for {exchange}")
+    # If provider is unavailable, avoid remote call and return empty list
+    if not provider_available:
+        logger.debug("MO provider unavailable - skipping remote EOD fetch")
+        return []
+
     response = mo_api.get_eod_data(exchange)
     if response and response.get("status") == "SUCCESS":
         eod_data = response.get("data", [])
@@ -131,8 +136,12 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
         socket_manager = MO_WebSocket_Manager()
         mo_api = socket_manager.mo_api
 
-        if not mo_api.auth_token and not mo_api.login():
-            raise ConnectionError("MO API login failed. Cannot fetch stock data.")
+        provider_available = True
+        if not getattr(mo_api, "auth_token", None):
+            # avoid raising - prefer local fallbacks when provider is down
+            if not mo_api.login():
+                provider_available = False
+                logger.warning("MO API login failed; falling back to cached/local data where possible.")
 
         # --- Step 1: Resolve Symbol to candidate instruments ---
         candidates = _iter_instrument_candidates(clean_symbol)
@@ -151,19 +160,25 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
             exchange = candidate['exchange']
             scripcode = candidate['scripcode']
 
-            response = mo_api.get_ltp_data(exchange, scripcode)
-            if not response or response.get("status") != "SUCCESS" or not response.get("data"):
-                logger.warning(
-                    f"No valid LTP data from API for {clean_symbol} ({exchange}:{scripcode}) [source={candidate.get('source')}]"
-                )
-                continue
+            data = None
+            # Only call remote API if provider available
+            if provider_available:
+                response = mo_api.get_ltp_data(exchange, scripcode)
+                if response and response.get("status") == "SUCCESS" and response.get("data"):
+                    data = response.get("data")
+                else:
+                    logger.debug(
+                        f"No valid LTP data from API for {clean_symbol} ({exchange}:{scripcode}) [source={candidate.get('source')}]"
+                    )
+            else:
+                logger.debug(f"Skipping remote LTP fetch for {clean_symbol} because provider is unavailable")
 
-            data = response["data"]
+            # 'data' is already set when provider is available; use it directly.
             ltp, price_source = extract_price_with_fallback(data)
 
             if ltp <= 0:
                 logger.info(f"LTP is zero for {clean_symbol}, attempting bulk EOD fallback ({exchange}:{scripcode})")
-                eod_data_list = _get_cached_eod_data(mo_api, exchange)
+                eod_data_list = _get_cached_eod_data(mo_api, exchange, provider_available=provider_available)
                 for eod_entry in eod_data_list:
                     if str(eod_entry.get("scripcode")) == str(scripcode):
                         candidate_ltp, candidate_source = extract_price_with_fallback(eod_entry)
@@ -238,8 +253,8 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
 
     except Exception as e:
         logger.error(f"Error in get_stock_data_from_api for '{clean_symbol}': {e}", exc_info=True)
-        # Clear the cache for this specific symbol on failure to allow retries
-        get_stock_data_from_api.cache_clear()
+        # Clear only this symbol's cached entry on failure to allow retries
+        _stock_data_cache.pop(clean_symbol, None)
         return None
 
 # --- API Routes ---

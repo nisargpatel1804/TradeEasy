@@ -451,7 +451,10 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
               key={result.symbol}
               type="button"
               className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-slate-50"
-              onClick={() => handleAddStock(result)}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                handleAddStock(result);
+              }}
             >
               <div className="min-w-0">
                 <p className="text-sm font-semibold text-slate-900">{result.symbol}</p>

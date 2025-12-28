@@ -19,6 +19,10 @@ _api_cache = {}
 _index_lookup_warnings = set()
 CACHE_TTL_SECONDS = 30  # Cache API responses for 30 seconds to reduce load
 
+# Last-good market snapshot (used when provider is down / after-hours).
+_market_snapshot_cache = {"payload": None, "timestamp": 0.0}
+MARKET_SNAPSHOT_TTL_SECONDS = 12 * 60 * 60
+
 # Nifty 50 constituents CSV (official source)
 NIFTY50_CSV_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv"
 NIFTY50_CACHE_TTL_SECONDS = 6 * 60 * 60  # refresh every 6 hours
@@ -575,8 +579,7 @@ def get_market():
         socket_manager = MO_WebSocket_Manager()
         mo_api = socket_manager.mo_api
 
-        if not mo_api.auth_token and not mo_api.login():
-            return jsonify({"success": False, "message": "Market data provider is currently unavailable."}), 503
+        provider_available = bool(mo_api.auth_token) or bool(mo_api.login())
 
         constituents = _seed_and_subscribe_nifty50(socket_manager)
         if not constituents:
@@ -607,8 +610,9 @@ def get_market():
         # Movers should be classified from live websocket-derived fields
         movers = _split_movers(stocks_payload, limit=10)
 
-        return jsonify({
+        payload = {
             "success": True,
+            "provider_available": bool(provider_available),
             "market_name": "Nifty 50",
             "market_status": market_status,
             "total_count": len(stocks_payload),
@@ -619,7 +623,25 @@ def get_market():
             "unchanged": movers["unchanged_count"],
             "stocks": sorted(stocks_payload, key=lambda x: x["symbol"]),
             "last_updated": int(time.time() * 1000),
-        }), 200
+        }
+
+        # If provider is unavailable, serve the last-good snapshot (best-effort).
+        now = time.time()
+        cached_snapshot = _market_snapshot_cache.get("payload")
+        cached_at = float(_market_snapshot_cache.get("timestamp") or 0.0)
+        if not provider_available and cached_snapshot and (now - cached_at) < MARKET_SNAPSHOT_TTL_SECONDS:
+            cached_payload = dict(cached_snapshot)
+            cached_payload["provider_available"] = False
+            cached_payload["market_status"] = market_status
+            cached_payload["last_updated"] = int(time.time() * 1000)
+            return jsonify(cached_payload), 200
+
+        # Cache only when we have provider-backed values (not all-zero placeholders).
+        if provider_available and payload.get("total_count"):
+            _market_snapshot_cache["payload"] = payload
+            _market_snapshot_cache["timestamp"] = now
+
+        return jsonify(payload), 200
 
     except Exception as e:
         logger.error(f"Error in /market endpoint: {e}", exc_info=True)

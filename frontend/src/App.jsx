@@ -17,6 +17,7 @@ import OrderDetail from "./features/OrderDetail.jsx";
 import NotFoundPage from './features/NotFoundPage.jsx';
 import DashboardLayout from "./features/DashboardLayout.jsx";
 import { Toaster } from "./assets/ui/toaster.jsx";
+import { Toaster as HotToaster } from "react-hot-toast";
 
 /**
  * A wrapper component that protects routes requiring authentication.
@@ -53,6 +54,8 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900 font-sans antialiased">
+      <HotToaster />
+      <Toaster />
       <Routes>
         {/* --- Public Routes --- */}
         <Route path="/" element={isAuthenticated ? <Navigate to="/dashboard" replace /> : <LandingPage initialMode="login" />} />
@@ -87,7 +90,6 @@ function App() {
         {/* --- 404 Not Found Route --- */}
         <Route path="*" element={<NotFoundPage />} />
       </Routes>
-      <Toaster />
     </div>
   );
 }

@@ -7,7 +7,7 @@ from mongoengine import connect
 from app import create_app
 from app.models import Transaction, Holding, User, Lot, ShortPosition
 from app.socket_manager import MO_WebSocket_Manager
-from app.utils.market_hours import should_auto_squareoff_mis
+from app.utils.market_hours import should_auto_squareoff_mis, get_current_ist_time
 # Import the centralized, cached function for all stock data lookups
 from app.routes.stock import get_stock_data_from_api, format_symbol
 from app.routes.trade import _create_bracket_order_legs
@@ -34,8 +34,9 @@ class OrderProcessor:
         self.stop_thread = False
         # Reuse the already-created Flask app when available (prevents
         # starting scheduler/socket manager twice inside the worker thread).
-        self.app = app or create_app()
+        self.app = app or create_app()  # Create a Flask app instance for the thread's context
         self.trailing_stop_triggers = {}  # Track trailing stop trigger prices
+        self._last_auto_squareoff_date = None
 
     def run(self):
         """The main loop for the processor thread."""
@@ -214,7 +215,12 @@ class OrderProcessor:
         Auto square-off MIS (intraday) positions before market close.
         Executes at 3:25 PM IST (5 minutes before market close).
         """
-        if not should_auto_squareoff_mis():
+        now_ist = get_current_ist_time()
+        if not should_auto_squareoff_mis(now_ist):
+            return
+
+        # Run at most once per trading day per process.
+        if self._last_auto_squareoff_date == now_ist.date():
             return
         
         logger.info("⏰ Auto square-off time reached for MIS positions...")
@@ -258,6 +264,11 @@ class OrderProcessor:
                     logger.info(f"Cancelled pending MIS order {order.id} during auto square-off")
                 except Exception as cancel_error:
                     logger.error(f"Error cancelling MIS order {order.id} during auto square-off: {cancel_error}", exc_info=True)
+            
+            self._last_auto_squareoff_date = now_ist.date()
+        
+        except Exception as e:
+            logger.error(f"Error during auto square-off: {e}", exc_info=True)
         
         except Exception as e:
             logger.error(f"Error during auto square-off: {e}", exc_info=True)

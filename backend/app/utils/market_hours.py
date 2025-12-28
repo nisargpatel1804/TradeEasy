@@ -147,14 +147,10 @@ def is_market_open_for_trading(product_type='CNC', dt=None):
         return True, "Market is open"
     
     if session == MarketSession.PRE_MARKET:
-        return False, "Pre-market session (orders accepted but not executed)"
+        return False, "Market is not open for trading yet"
     
     if session == MarketSession.POST_MARKET:
-        # Only allow AMO (After Market Orders) for CNC
-        if product_type == 'CNC':
-            return True, "Post-market session (AMO - orders will execute next trading day)"
-        else:
-            return False, "Intraday (MIS) orders not allowed in post-market session"
+        return False, "Market is closed for trading (after-hours)"
     
     return False, "Unknown session"
 
@@ -172,10 +168,11 @@ def should_auto_squareoff_mis(dt=None):
     if dt is None:
         dt = get_current_ist_time()
     
-    # Only during regular market hours
-    if get_market_session(dt) != MarketSession.REGULAR:
+    # Only on trading days
+    if is_market_holiday(dt):
         return False
     
+    # Allow catch-up after 3:25 PM IST even if the worker was down.
     return dt.time() >= MIS_AUTO_SQUAREOFF_TIME
 
 
@@ -283,10 +280,7 @@ def validate_order_timing(order_type, product_type='CNC', dt=None):
     
     # Pre-market session
     if session == MarketSession.PRE_MARKET:
-        # Only limit orders allowed in pre-market
-        if order_type in ('MARKET', 'STOP_LOSS', 'STOP_LIMIT', 'TRAILING_STOP'):
-            return False, "Only LIMIT orders allowed during pre-market session (9:00-9:15 AM)"
-        return True, "Order accepted (will execute when market opens)"
+        return False, "Trading is allowed only during regular market hours: 9:15 AM - 3:30 PM IST"
     
     # Regular market hours
     if session == MarketSession.REGULAR:
@@ -297,14 +291,7 @@ def validate_order_timing(order_type, product_type='CNC', dt=None):
     
     # Post-market session
     if session == MarketSession.POST_MARKET:
-        if product_type == 'MIS':
-            return False, "Intraday (MIS) orders not allowed in post-market session"
-        
-        # Only limit orders for AMO
-        if order_type != 'LIMIT':
-            return False, "Only LIMIT orders allowed for After Market Orders (AMO)"
-        
-        return True, f"AMO accepted (will execute on next trading day: {get_next_trading_day(dt).strftime('%Y-%m-%d')})"
+        return False, "Trading is allowed only during regular market hours: 9:15 AM - 3:30 PM IST"
     
     return False, "Unknown session"
 
@@ -326,11 +313,11 @@ def get_market_status_message(dt=None):
         return f"✅ Market Open - Regular trading (closes at 3:30 PM IST)"
     
     elif session == MarketSession.PRE_MARKET:
-        return f"🟡 Pre-Market Session (9:00-9:15 AM) - LIMIT orders only"
+        return f"🟡 Pre-Market Session (9:00-9:15 AM) - Trading disabled"
     
     elif session == MarketSession.POST_MARKET:
         next_day = get_next_trading_day(dt)
-        return f"🌙 Post-Market Session - AMO orders for {next_day.strftime('%Y-%m-%d')}"
+        return f"🌙 After-hours - Trading disabled (Next trading day: {next_day.strftime('%Y-%m-%d')})"
     
     else:
         if is_market_holiday(dt):

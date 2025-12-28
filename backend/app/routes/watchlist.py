@@ -3,7 +3,7 @@ from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from mongoengine.errors import NotUniqueError
 
-from app.models import User, Stock, Watchlist, Holding, ShortPosition
+from app.models import User, Stock, Watchlist, Holding, ShortPosition, AQScrip
 from app.socket_manager import MO_WebSocket_Manager
 from app.utils.cache import cached_route, cache as app_cache
 # Import the centralized, cached function for resolving stock data
@@ -137,7 +137,7 @@ def add_stock_to_watchlist(watchlist_name):
     Adds a stock to a specific watchlist and triggers a real-time data subscription
     by leveraging the centralized stock data function.
     """
-    data = request.get_json()
+    data = request.get_json() or {}
     symbol_input = data.get('symbol')
 
     if not symbol_input:
@@ -152,14 +152,53 @@ def add_stock_to_watchlist(watchlist_name):
         return jsonify({"success": False, "message": f"Watchlist limit of {MAX_STOCKS_PER_WATCHLIST} stocks reached."}), 409
 
     try:
-        # --- Centralized Data Fetching ---
-        api_data = get_stock_data_from_api(symbol_input)
-        if not api_data:
-            return jsonify({"success": False, "message": f"Could not find a valid instrument for symbol '{format_symbol(symbol_input)}'."}), 404
-        
-        scripcode = api_data['scripcode']
-        exchange = api_data['exchange']
-        full_symbol = f"{api_data['symbol']}.{exchange}"
+        # Prefer the search/master-table payload so watchlist add doesn't depend on MO availability.
+        exchange = (data.get("exchange") or "").strip().upper()
+        scripcode = data.get("scripcode")
+
+        clean_symbol = format_symbol(symbol_input)
+        if "." in str(symbol_input or ""):
+            # Trust suffix for exchange if provided in symbol (e.g., TCS.NSE)
+            try:
+                clean_symbol = format_symbol(str(symbol_input).split(".")[0])
+                exchange = exchange or str(symbol_input).split(".")[-1].strip().upper()
+            except Exception:
+                pass
+
+        resolved_name = (data.get("name") or "").strip() or clean_symbol
+
+        resolved_from_master = False
+        if exchange and scripcode not in (None, ""):
+            try:
+                scripcode = int(scripcode)
+            except (TypeError, ValueError):
+                return jsonify({"success": False, "message": "Invalid scripcode."}), 400
+
+            master_doc = AQScrip.objects(exchangename=exchange, scripcode=scripcode).only(
+                "scripshortname", "scripname", "scripfullname", "issuspended", "isbanscrip"
+            ).first()
+            if not master_doc:
+                return jsonify({"success": False, "message": "Instrument not found."}), 404
+            if getattr(master_doc, "issuspended", "N") == "Y" or getattr(master_doc, "isbanscrip", "N") == "Y":
+                return jsonify({"success": False, "message": "Instrument is not tradable."}), 409
+
+            if master_doc.scripshortname:
+                clean_symbol = format_symbol(master_doc.scripshortname)
+            resolved_name = resolved_name or (master_doc.scripname or clean_symbol)
+            resolved_from_master = True
+
+        # Minimal fallback: if we couldn't resolve from payload, use existing centralized resolver.
+        if not resolved_from_master:
+            api_data = get_stock_data_from_api(symbol_input)
+            if not api_data:
+                return jsonify({"success": False, "message": f"Could not find a valid instrument for symbol '{format_symbol(symbol_input)}'."}), 404
+
+            scripcode = int(api_data["scripcode"])
+            exchange = str(api_data["exchange"]).strip().upper()
+            clean_symbol = format_symbol(api_data["symbol"])
+            resolved_name = resolved_name or clean_symbol
+
+        full_symbol = f"{clean_symbol}.{exchange}"
 
         if any(
             s and s.scripcode == scripcode and s.exchange == exchange
@@ -169,24 +208,24 @@ def add_stock_to_watchlist(watchlist_name):
 
         # Use the resolved data to create or update the Stock document
         # Since symbol is the primary key, we need to handle get_or_create differently
-        stock = Stock.objects(scripcode=scripcode, exchange=exchange).first()
+        stock = Stock.objects(scripcode=int(scripcode), exchange=exchange).first()
         if not stock:
             stock = Stock(
                 symbol=full_symbol,
-                name=data.get('name') or api_data['symbol'],
+                name=resolved_name,
                 exchange=exchange,
-                scripcode=scripcode
+                scripcode=int(scripcode)
             )
             try:
                 stock.save()
             except NotUniqueError:
-                stock = Stock.objects(scripcode=scripcode, exchange=exchange).first()
+                stock = Stock.objects(scripcode=int(scripcode), exchange=exchange).first()
                 if not stock:
                     raise
         else:
             # Refresh key metadata on the existing document when supplied
             updates_required = False
-            preferred_name = data.get('name') or api_data['symbol']
+            preferred_name = resolved_name
             if preferred_name and stock.name != preferred_name:
                 stock.name = preferred_name
                 updates_required = True

@@ -146,7 +146,13 @@ class MotilalOswalAPI:
         self.base_url = self._normalise_base_url(os.getenv("MO_BASE_URL", self.REST_BASE_URL))
 
         self.session = session or requests.Session()
-        self.request_timeout = int(os.getenv("MO_API_TIMEOUT", "30"))
+        # Requests timeout supports (connect, read). Keep backward compatibility:
+        # - MO_API_TIMEOUT (legacy): used as default read timeout
+        # - MO_API_CONNECT_TIMEOUT / MO_API_READ_TIMEOUT (preferred): split timeouts
+        legacy_timeout = os.getenv("MO_API_TIMEOUT", "30")
+        connect_timeout = float(os.getenv("MO_API_CONNECT_TIMEOUT", "10"))
+        read_timeout = float(os.getenv("MO_API_READ_TIMEOUT", str(legacy_timeout)))
+        self.request_timeout = (connect_timeout, read_timeout)
 
         self.device_info = self._build_device_info()
 
