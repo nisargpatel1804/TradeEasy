@@ -2,7 +2,6 @@
 
 # Byte-compiled files and cache
 __pycache__/
-**/__pycache__/
 *.py[cod]
 *.pyo
 *.pyd
@@ -11,21 +10,17 @@ __pycache__/
 env/
 venv/
 .venv/
-backend/.env
+winvenv/
 
 # Flask-related
 instance/
+flask_session/
 *.log
 
 # Testing
-backend/.coverage
-backend/pytest_cache/
-backend/htmlcov/
-backend/tevenv/
-backend/flask_session/
-backend/migrations
-backend/check_flask_shell.py
-backend/insert_demo_user.py
+.coverage
+pytest_cache/
+htmlcov/
 
 # Build artifacts
 *.egg-info/
@@ -34,29 +29,51 @@ dist/
 
 # ---- Node.js / Frontend ----
 
-# Dependency and build directories
-frontend/node_modules/
-frontend/dist/
-frontend/dist-ssr/
-frontend/.vite/
+# Dependencies
+**/node_modules/
 
-# Environment files
-frontend/.env
-frontend/.env.*.local
+# Production builds
+**/dist/
+**/build/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
 # Logs
-*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-pnpm-debug.log*
+
+# Coverage
+coverage/
+*.lcov
+
+# Cache
+.vite/
+.eslintcache
+.npm
+
+# Temporary folders
+tmp/
+temp/
+
+# Misc
+*.tgz
+*.tar.gz
 
 # ---- IDE / Editor / OS ----
 
 .vscode/
 !.vscode/extensions.json
 .idea/
-.DS_Store
+*.swp
+*.swo
+*~
+ehthumbs.db
 Thumbs.db
 *.suo
 *.sw?
@@ -66,9 +83,10 @@ Thumbs.db
 
 # ---- Custom / Project Specific ----
 
-# Temporary folders
-npm-temp/
+# Package lock files (choose one)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
 
-# Project root environment files
-.env
-.env.*.local
+# Optional REPL history
+.node_repl_history
