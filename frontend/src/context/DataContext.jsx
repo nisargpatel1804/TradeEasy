@@ -29,6 +29,7 @@ export const DataProvider = ({ children }) => {
   const [profileData, setProfileData] = useState(null);
   const [watchlistsData, setWatchlistsData] = useState(null);
   const [indicesData, setIndicesData] = useState([]);
+  const [livePrices, setLivePrices] = useState({});
 
   const profileRef = useRef(profileData);
   const watchlistsRef = useRef(watchlistsData);
@@ -61,6 +62,7 @@ export const DataProvider = ({ children }) => {
     updateProfileData(null);
     updateWatchlistsData(null);
     updateIndicesData([]);
+    setLivePrices({});
     setIsLoading(false);
     setIsLoadingProfile(false);
     setIsLoadingWatchlists(false);
@@ -68,6 +70,27 @@ export const DataProvider = ({ children }) => {
     setError(null);
     setIndicesError(null);
   }, [updateProfileData, updateWatchlistsData, updateIndicesData]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setLivePrices({});
+      return;
+    }
+
+    const unsubscribe = priceUpdateService.subscribe((payload = {}) => {
+      setLivePrices((prev) => {
+        if (payload.type === "snapshot" || payload.type === "reset") {
+          return payload.allPrices || {};
+        }
+        if (payload.changedPrices && Object.keys(payload.changedPrices).length > 0) {
+          return { ...prev, ...payload.changedPrices };
+        }
+        return prev;
+      });
+    });
+
+    return () => unsubscribe?.();
+  }, [isAuthenticated]);
 
   const getProfile = useCallback(
     async (force = false) => {
@@ -127,6 +150,53 @@ export const DataProvider = ({ children }) => {
       }
     },
     [isAuthenticated, updateWatchlistsData]
+  );
+
+  const refreshWatchlists = useCallback(() => getWatchlists(true), [getWatchlists]);
+
+  const createWatchlist = useCallback(
+    async (name) => {
+      const response = await api.createWatchlist(name);
+      await getWatchlists(true);
+      return response;
+    },
+    [getWatchlists]
+  );
+
+  const renameWatchlist = useCallback(
+    async (watchlistName, newName) => {
+      const response = await api.renameWatchlist(watchlistName, newName);
+      await getWatchlists(true);
+      return response;
+    },
+    [getWatchlists]
+  );
+
+  const deleteWatchlist = useCallback(
+    async (watchlistName) => {
+      const response = await api.deleteWatchlist(watchlistName);
+      await getWatchlists(true);
+      return response;
+    },
+    [getWatchlists]
+  );
+
+  const addStockToWatchlist = useCallback(
+    async (watchlistName, stockData) => {
+      const response = await api.addStockToWatchlist(watchlistName, stockData);
+      await getWatchlists(true);
+      return response;
+    },
+    [getWatchlists]
+  );
+
+  const removeStockFromWatchlist = useCallback(
+    async (watchlistName, symbol) => {
+      const response = await api.removeStockFromWatchlist(watchlistName, symbol);
+      await getWatchlists(true);
+      return response;
+    },
+    [getWatchlists]
   );
 
   const getInitialIndices = useCallback(
@@ -201,6 +271,7 @@ export const DataProvider = ({ children }) => {
     profileData,
     watchlistsData,
     indicesData,
+    livePrices,
     isLoading,
     isLoadingProfile,
     isLoadingWatchlists,
@@ -210,6 +281,12 @@ export const DataProvider = ({ children }) => {
     getProfile,
     refreshProfile,
     getWatchlists,
+    refreshWatchlists,
+    createWatchlist,
+    renameWatchlist,
+    deleteWatchlist,
+    addStockToWatchlist,
+    removeStockFromWatchlist,
     getInitialIndices,
     // Backwards compatibility conveniences
     profile: profileData,

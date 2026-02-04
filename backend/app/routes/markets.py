@@ -8,7 +8,7 @@ from mongoengine.queryset.visitor import Q
 import requests
 from app.socket_manager import MO_WebSocket_Manager
 from app.models import AQScrip
-from app.utils.market_indices import MAJOR_INDEX_TARGETS
+from app.services.market_data import MAJOR_INDEX_TARGETS
 
 # --- Configuration ---
 logger = logging.getLogger(__name__)
@@ -280,18 +280,11 @@ def _seed_and_subscribe_nifty50(socket_manager: MO_WebSocket_Manager) -> list[di
     mo_api = socket_manager.mo_api
     symbols = _fetch_nifty50_symbols()
     if not symbols:
-        # Secondary fallback: derive constituents from the scrip master (index identifier)
-        # if available in the database.
-        try:
-            docs = _get_index_constituents("NSE", search_terms=["NIFTY 50", "NIFTY50"], preferred_codes=["26000", "26009"])
-            derived = []
-            for doc in docs:
-                if doc and doc.scripshortname:
-                    derived.append(str(doc.scripshortname).upper())
-            if derived:
-                symbols = derived
-        except Exception as e:
-            logger.warning(f"Unable to derive Nifty 50 constituents from DB: {e}")
+        # Fallback to the well-known static NIFTY 50 symbol list. Deriving from DB can be
+        # unreliable at first startup if CSV fetch fails and database index metadata is missing
+        # or inconsistent. The static fallback is a safer default to avoid showing unrelated
+        # watchlist symbols as Nifty constituents.
+        symbols = list(NIFTY50_STATIC_SYMBOLS)
 
     if not symbols:
         return []

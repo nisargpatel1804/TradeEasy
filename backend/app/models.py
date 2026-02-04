@@ -70,6 +70,7 @@ class User(Document, UserMixin):
     watchlists = ListField(EmbeddedDocumentField(Watchlist))
     
     # Password reset fields
+    # Stores HMAC-SHA256(token) rather than the plaintext token to prevent token leakage
     reset_token = StringField(max_length=100)
     reset_token_expiry = DateTimeField()
 
@@ -258,7 +259,14 @@ class AQScrip(Document):
             'exchangename',
             'instrumentname',
             'scripshortname',
-            {'fields': ['issuspended', 'isbanscrip']}
+            {'fields': ['exchangename', 'scripshortname']},  # helpful for prefix+exchange queries
+            {'fields': ['issuspended', 'isbanscrip']},
+            # Text index to accelerate 'contains' searches; weights favor shortname
+            {
+                'fields': ['$scripshortname', '$scripname', '$scripfullname'],
+                'default_language': 'english',
+                'weights': {'scripshortname': 10, 'scripname': 5, 'scripfullname': 2}
+            }
         ]
     }
 
@@ -293,6 +301,27 @@ def clean_aqscrip_data(sender, document, **kwargs):
 # Connect signals to the corresponding models
 signals.pre_save.connect(clean_user_data, sender=User)
 signals.pre_save.connect(clean_aqscrip_data, sender=AQScrip)
+
+
+def _invalidate_search_cache_on_scrip_change(sender, document, **kwargs):
+    try:
+        from app.routes import search as search_module
+        prefixes = search_module.build_invalidation_prefixes([
+            document.scripshortname or "",
+            document.scripname or "",
+            document.scripfullname or ""
+        ])
+        if prefixes:
+            search_module.invalidate_search_cache(prefixes)
+        else:
+            search_module.invalidate_search_cache()
+    except Exception:
+        # Avoid breaking writes if cache invalidation fails
+        pass
+
+
+signals.post_save.connect(_invalidate_search_cache_on_scrip_change, sender=AQScrip)
+signals.post_delete.connect(_invalidate_search_cache_on_scrip_change, sender=AQScrip)
 
 
 def normalize_transaction_status(sender, document, **kwargs):

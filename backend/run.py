@@ -1,6 +1,11 @@
 from app import create_app, socketio
 import os
-from app.tasks.order_processor import start_order_processor
+# Support running both as a script (python run.py) and as a package (python -m backend.run)
+try:
+    from backend.app.services.order_processor import start_order_processor
+except ModuleNotFoundError:
+    # If 'backend' isn't on sys.path (script mode), import the sibling package directly
+    from app.services.order_processor import start_order_processor
 
 
 def _env_flag(name: str, default: bool = False) -> bool:

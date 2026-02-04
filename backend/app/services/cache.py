@@ -75,14 +75,27 @@ def cached(ttl=300, key_prefix=''):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            # Generate cache key from function name and arguments
-            cache_key = f"{key_prefix}:{func.__name__}:"
-            cache_key += ':'.join(str(arg) for arg in args)
-            if kwargs:
-                cache_key += ':' + ':'.join(f"{k}={v}" for k, v in sorted(kwargs.items()))
+            # Generate deterministic cache key using JSON serialization + short SHA256 hash
+            try:
+                import json, hashlib
+                key_payload = {
+                    "args": args,
+                    "kwargs": kwargs
+                }
+                serialized = json.dumps(key_payload, default=str, sort_keys=True, separators=(',', ':'))
+                digest = hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:16]
+                cache_key = f"{key_prefix}:{func.__name__}:{digest}"
+            except Exception as e:
+                logger.exception("Failed to generate cache key, skipping cache: %s", e)
+                return func(*args, **kwargs)
             
-            # Try to get from cache
-            cached_value = cache.get(cache_key)
+            # Try to get from cache (safe - don't fail caller on cache errors)
+            try:
+                cached_value = cache.get(cache_key)
+            except Exception as e:
+                logger.exception("Cache get failed for %s: %s", cache_key, e)
+                cached_value = None
+
             if cached_value is not None:
                 logger.debug(f"Cache HIT for {cache_key}")
                 return cached_value
@@ -90,7 +103,10 @@ def cached(ttl=300, key_prefix=''):
             # Cache miss - call function and cache result
             logger.debug(f"Cache MISS for {cache_key}")
             result = func(*args, **kwargs)
-            cache.set(cache_key, result, ttl)
+            try:
+                cache.set(cache_key, result, ttl)
+            except Exception as e:
+                logger.exception("Cache set failed for %s: %s", cache_key, e)
             return result
         
         return wrapper
@@ -119,16 +135,33 @@ def cached_route(ttl=300, key_func=None):
             from flask_login import current_user
             
             # Generate cache key
-            if key_func:
-                cache_key = key_func()
-            elif current_user and hasattr(current_user, 'id'):
-                cache_key = f"route:{func.__name__}:user:{current_user.id}"
-            else:
-                # No caching if no user context
+            try:
+                if key_func:
+                    cache_key = key_func()
+                elif current_user and hasattr(current_user, 'id'):
+                    cache_key = f"route:{func.__name__}:user:{current_user.id}"
+                else:
+                    # Fallback: use request path and sorted query params if available
+                    from flask import request
+                    args_items = request.args.items() if request else []
+                    key_payload = {
+                        "path": request.path if request else func.__name__,
+                        "args": sorted(list(args_items))
+                    }
+                    import json, hashlib
+                    serialized = json.dumps(key_payload, default=str, sort_keys=True, separators=(',', ':'))
+                    cache_key = f"route:{func.__name__}:" + hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:12]
+            except Exception as e:
+                logger.exception("Failed to build route cache key, skipping cache: %s", e)
                 return func(*args, **kwargs)
-            
-            # Try cache
-            cached_response = cache.get(cache_key)
+
+            # Try cache (safe)
+            try:
+                cached_response = cache.get(cache_key)
+            except Exception as e:
+                logger.exception("Route cache get failed for %s: %s", cache_key, e)
+                cached_response = None
+
             if cached_response is not None:
                 logger.debug(f"Route cache HIT for {cache_key}")
                 return cached_response
@@ -136,18 +169,21 @@ def cached_route(ttl=300, key_func=None):
             # Execute route and cache
             logger.debug(f"Route cache MISS for {cache_key}")
             response = func(*args, **kwargs)
-            
+
             # Only cache successful responses (status 200-299)
-            if hasattr(response, 'status_code'):
-                if 200 <= response.status_code < 300:
+            try:
+                if hasattr(response, 'status_code'):
+                    if 200 <= response.status_code < 300:
+                        cache.set(cache_key, response, ttl)
+                elif isinstance(response, tuple) and len(response) == 2:
+                    # Handle (response, status_code) tuple
+                    if 200 <= response[1] < 300:
+                        cache.set(cache_key, response, ttl)
+                else:
                     cache.set(cache_key, response, ttl)
-            elif isinstance(response, tuple) and len(response) == 2:
-                # Handle (response, status_code) tuple
-                if 200 <= response[1] < 300:
-                    cache.set(cache_key, response, ttl)
-            else:
-                cache.set(cache_key, response, ttl)
-            
+            except Exception as e:
+                logger.exception("Route cache set failed for %s: %s", cache_key, e)
+
             return response
         
         return wrapper

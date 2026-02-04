@@ -289,8 +289,8 @@ const MarketPage = () => {
         </div>
 
         <div className="grid gap-4 lg:grid-cols-2">
-          <MoversCard title="Top Gainers" items={movers.gainers} tone="positive" onSelect={handleStockClick} isLoading={isLoading && !movers.gainers.length} />
-          <MoversCard title="Top Losers" items={movers.losers} tone="negative" onSelect={handleStockClick} isLoading={isLoading && !movers.losers.length} />
+          <MoversCard title="Top Gainers" items={movers.gainers} tone="positive" onSelect={handleStockClick} isLoading={isLoading || marketData.stocks.length === 0} />
+          <MoversCard title="Top Losers" items={movers.losers} tone="negative" onSelect={handleStockClick} isLoading={isLoading || marketData.stocks.length === 0} />
         </div>
 
         <Card className="rounded-3xl border border-slate-100 shadow-sm">

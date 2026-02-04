@@ -87,6 +87,8 @@ def populate_scrips_endpoint():
             stats["total_upserted"] += exchange_upserted
             stats["exchanges"][exchange] = {"processed": len(scrips_list), "upserted": exchange_upserted}
             logger.info(f"Completed {exchange}: {len(scrips_list)} processed, {exchange_upserted} upserted.")
+
+            # Search cache removed; no invalidation needed.
         
         logger.info(f"Scrip population finished. Final stats: {stats}")
         return jsonify({"status": "success", "message": "Scrip population complete.", "data": stats})
@@ -153,16 +155,17 @@ def populate_scrips_from_scratch():
                     new_scrips_to_insert.append(AQScrip(**model_data))
             
             if new_scrips_to_insert:
-                try:
-                    # Perform the bulk insert operation
-                    AQScrip.objects.insert(new_scrips_to_insert, load_bulk=False)
-                    print(f"Successfully inserted {len(new_scrips_to_insert)} scrips for {exchange}.")
-                    total_inserted += len(new_scrips_to_insert)
-                except NotUniqueError:
-                    print(f"WARNING: Duplicate scrips found for {exchange}. This should not happen on a clean import.")
-                except Exception as e:
-                    print(f"ERROR: Bulk insert failed for {exchange}: {e}")
-        
+                    try:
+                        # Perform the bulk insert operation
+                        AQScrip.objects.insert(new_scrips_to_insert, load_bulk=False)
+                        print(f"Successfully inserted {len(new_scrips_to_insert)} scrips for {exchange}.")
+                        total_inserted += len(new_scrips_to_insert)
+
+                        # Search cache removed; no invalidation needed.
+                    except NotUniqueError:
+                        print(f"WARNING: Duplicate scrips found for {exchange}. This should not happen on a clean import.")
+                    except Exception as e:
+                        print(f"ERROR: Bulk insert failed for {exchange}: {e}")
         print("\n--- Scrip Population Complete ---")
         print(f"Total scrips inserted across all exchanges: {total_inserted}")
         return True

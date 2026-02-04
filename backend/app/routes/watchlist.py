@@ -1,13 +1,13 @@
 import logging
 from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
+
 from mongoengine.errors import NotUniqueError
 
-from app.models import User, Stock, Watchlist, Holding, ShortPosition, AQScrip
+from app.models import User, Stock, Watchlist, Holding, ShortPosition
 from app.socket_manager import MO_WebSocket_Manager
-from app.utils.cache import cached_route, cache as app_cache
-# Import the centralized, cached function for resolving stock data
-from .stock import get_stock_data_from_api, format_symbol
+# Import the centralized function for symbol formatting
+from .stock import format_symbol
 
 # --- Configuration ---
 logger = logging.getLogger(__name__)
@@ -16,6 +16,8 @@ watchlist_bp = Blueprint('watchlist', __name__)
 # --- Constants ---
 MAX_WATCHLISTS_PER_USER = 10
 MAX_STOCKS_PER_WATCHLIST = 50
+# Allowed exchange codes (whitelist used for validation)
+ALLOWED_EXCHANGES = {"NSE","BSE","NSEFO","BSEFO","MCX","NSECD"}
 
 # --- Helper Functions ---
 
@@ -43,11 +45,6 @@ def _serialize_watchlist(watchlist: Watchlist) -> dict:
             if stock_payload
         ],
     }
-
-
-def _invalidate_watchlist_cache(user_id: str) -> None:
-    """Bust the cached response for the user's watchlists."""
-    app_cache.invalidate_pattern(f"route:get_watchlists:user:{user_id}")
 
 
 def _get_watchlist_or_404(user: User, watchlist_name: str) -> Watchlist | None:
@@ -84,7 +81,6 @@ def _is_stock_tracked_elsewhere(stock: Stock) -> bool:
 
 @watchlist_bp.route('/watchlists', methods=['GET'])
 @login_required
-@cached_route(ttl=30)  # Cache for 30 seconds
 def get_watchlists():
     """Fetches all watchlists and the symbols of the stocks they contain."""
     try:
@@ -108,35 +104,31 @@ def create_watchlist():
         return jsonify({"success": False, "message": "Watchlist name is required."}), 400
 
     user = User.objects.get(id=current_user.id)
+
     if len(user.watchlists) >= MAX_WATCHLISTS_PER_USER:
         return jsonify({"success": False, "message": f"You have reached the maximum of {MAX_WATCHLISTS_PER_USER} watchlists."}), 409
+
     if any(wl.name.lower() == name.lower() for wl in user.watchlists):
-        return jsonify({"success": False, "message": "A watchlist with this name already exists."}), 409
+        return jsonify({"success": False, "message": "A watchlist with this name already exists.", "error_code": "DUPLICATE_WATCHLIST"}), 409
 
     try:
-        new_watchlist = Watchlist(name=name, is_deletable=True)
-        user.watchlists.append(new_watchlist)
+        user.watchlists.append(Watchlist(name=name, is_deletable=True, stocks=[]))
         user.save()
-        
-        _invalidate_watchlist_cache(current_user.id)
-        
-        logger.info(f"User {user.client_id} created new watchlist: '{name}'")
+        created_watchlist = _get_watchlist_or_404(user, name)
+        logger.info("User %s created new watchlist: '%s'", user.client_id, name)
         return jsonify({
             "success": True,
             "message": "Watchlist created successfully.",
-            "watchlist": _serialize_watchlist(new_watchlist)
+            "watchlist": _serialize_watchlist(created_watchlist)
         }), 201
     except Exception as e:
-        logger.error(f"Error creating watchlist for user {user.client_id}: {e}", exc_info=True)
+        logger.error("Error creating watchlist for user %s: %s", user.client_id, e, exc_info=True)
         return jsonify({"success": False, "message": "An internal server error occurred."}), 500
 
 @watchlist_bp.route('/watchlists/<string:watchlist_name>/stocks', methods=['POST'])
 @login_required
 def add_stock_to_watchlist(watchlist_name):
-    """
-    Adds a stock to a specific watchlist and triggers a real-time data subscription
-    by leveraging the centralized stock data function.
-    """
+    """Adds a stock to a specific watchlist and triggers a real-time data subscription."""
     data = request.get_json() or {}
     symbol_input = data.get('symbol')
 
@@ -152,66 +144,31 @@ def add_stock_to_watchlist(watchlist_name):
         return jsonify({"success": False, "message": f"Watchlist limit of {MAX_STOCKS_PER_WATCHLIST} stocks reached."}), 409
 
     try:
-        # Prefer the search/master-table payload so watchlist add doesn't depend on MO availability.
         exchange = (data.get("exchange") or "").strip().upper()
         scripcode = data.get("scripcode")
 
-        clean_symbol = format_symbol(symbol_input)
-        if "." in str(symbol_input or ""):
-            # Trust suffix for exchange if provided in symbol (e.g., TCS.NSE)
-            try:
-                clean_symbol = format_symbol(str(symbol_input).split(".")[0])
-                exchange = exchange or str(symbol_input).split(".")[-1].strip().upper()
-            except Exception:
-                pass
+        if not exchange or scripcode in (None, ""):
+            return jsonify({"success": False, "message": "Exchange and scripcode are required.", "error_code": "MISSING_INSTRUMENT_FIELDS"}), 400
 
+        try:
+            scripcode = int(scripcode)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "message": "Invalid scripcode.", "error_code": "INVALID_SCRIPCODE"}), 400
+
+        if scripcode <= 0 or scripcode > 99999999:
+            return jsonify({"success": False, "message": "Invalid scripcode range.", "error_code": "INVALID_SCRIPCODE"}), 400
+
+        if exchange not in ALLOWED_EXCHANGES:
+            return jsonify({"success": False, "message": "Invalid exchange.", "error_code": "INVALID_EXCHANGE"}), 400
+
+        clean_symbol = format_symbol(symbol_input)
         resolved_name = (data.get("name") or "").strip() or clean_symbol
 
-        resolved_from_master = False
-        if exchange and scripcode not in (None, ""):
-            try:
-                scripcode = int(scripcode)
-            except (TypeError, ValueError):
-                return jsonify({"success": False, "message": "Invalid scripcode."}), 400
-
-            master_doc = AQScrip.objects(exchangename=exchange, scripcode=scripcode).only(
-                "scripshortname", "scripname", "scripfullname", "issuspended", "isbanscrip"
-            ).first()
-            if not master_doc:
-                return jsonify({"success": False, "message": "Instrument not found."}), 404
-            if getattr(master_doc, "issuspended", "N") == "Y" or getattr(master_doc, "isbanscrip", "N") == "Y":
-                return jsonify({"success": False, "message": "Instrument is not tradable."}), 409
-
-            if master_doc.scripshortname:
-                clean_symbol = format_symbol(master_doc.scripshortname)
-            resolved_name = resolved_name or (master_doc.scripname or clean_symbol)
-            resolved_from_master = True
-
-        # Minimal fallback: if we couldn't resolve from payload, use existing centralized resolver.
-        if not resolved_from_master:
-            api_data = get_stock_data_from_api(symbol_input)
-            if not api_data:
-                return jsonify({"success": False, "message": f"Could not find a valid instrument for symbol '{format_symbol(symbol_input)}'."}), 404
-
-            scripcode = int(api_data["scripcode"])
-            exchange = str(api_data["exchange"]).strip().upper()
-            clean_symbol = format_symbol(api_data["symbol"])
-            resolved_name = resolved_name or clean_symbol
-
-        full_symbol = f"{clean_symbol}.{exchange}"
-
-        if any(
-            s and s.scripcode == scripcode and s.exchange == exchange
-            for s in target_watchlist.stocks
-        ):
-            return jsonify({"success": False, "message": "Stock is already in this watchlist."}), 409
-
-        # Use the resolved data to create or update the Stock document
-        # Since symbol is the primary key, we need to handle get_or_create differently
+        # Persist or update the Stock document first, then atomically add to the user's watchlist
         stock = Stock.objects(scripcode=int(scripcode), exchange=exchange).first()
         if not stock:
             stock = Stock(
-                symbol=full_symbol,
+                symbol=f"{clean_symbol}.{exchange}",
                 name=resolved_name,
                 exchange=exchange,
                 scripcode=int(scripcode)
@@ -223,7 +180,6 @@ def add_stock_to_watchlist(watchlist_name):
                 if not stock:
                     raise
         else:
-            # Refresh key metadata on the existing document when supplied
             updates_required = False
             preferred_name = resolved_name
             if preferred_name and stock.name != preferred_name:
@@ -234,32 +190,48 @@ def add_stock_to_watchlist(watchlist_name):
                 updates_required = True
             if updates_required:
                 stock.save()
-        
+
+        if any(s and s.id == stock.id for s in target_watchlist.stocks):
+            return jsonify({"success": False, "message": "Stock is already in this watchlist.", "error_code": "DUPLICATE_STOCK"}), 409
+
+        if len(target_watchlist.stocks) >= MAX_STOCKS_PER_WATCHLIST:
+            return jsonify({"success": False, "message": f"Watchlist limit of {MAX_STOCKS_PER_WATCHLIST} stocks reached."}), 409
+
         target_watchlist.stocks.append(stock)
         user.save()
 
-        _invalidate_watchlist_cache(current_user.id)
-
         # --- Trigger Real-Time Subscription ---
         socket_manager = MO_WebSocket_Manager()
-        socket_manager.register_scrip(
+        subscription_result = socket_manager.register_scrip(
             symbol=stock.symbol, 
             exchange=stock.exchange, 
             scripcode=stock.scripcode
         )
-        
+        # Defensive: ensure we always have a dict-like response
+        if not isinstance(subscription_result, dict):
+            logger.warning(f"register_scrip returned non-dict result for {stock.symbol}: {subscription_result}")
+            subscription_result = {"success": False, "message": "Subscription manager returned no status."}
+
         logger.info(f"User {user.client_id} added {stock.symbol} to watchlist '{watchlist_name}'")
         updated_watchlist = _serialize_watchlist(target_watchlist)
-        return jsonify({
+
+        response = {
             "success": True,
             "message": "Stock added successfully.",
             "stock": _serialize_stock(stock),
-            "watchlist": updated_watchlist
-        }), 201
+            "watchlist": updated_watchlist,
+            "subscription": subscription_result
+        }
+
+        # If subscription failed, inform the client in the message to surface in UI
+        if not subscription_result.get('success'):
+            response['message'] = f"Stock added successfully, but live updates may be unavailable: {subscription_result.get('message')}"
+
+        return jsonify(response), 201
 
     except Exception as e:
         logger.error(f"Error adding stock to watchlist '{watchlist_name}': {e}", exc_info=True)
-        return jsonify({"success": False, "message": "An internal server error occurred."}), 500
+        return jsonify({"success": False, "message": "An internal server error occurred.", "error_code": "INTERNAL_ERROR"}), 500
 
 @watchlist_bp.route('/watchlists/<string:watchlist_name>/stocks/<string:symbol>', methods=['DELETE'])
 @login_required
@@ -278,8 +250,6 @@ def remove_stock_from_watchlist(watchlist_name, symbol):
     try:
         target_watchlist.stocks.remove(stock_to_remove)
         user.save()
-        _invalidate_watchlist_cache(current_user.id)
-    
         # --- Unsubscribe from the real-time feed ---
         socket_manager = MO_WebSocket_Manager()
         if not _is_stock_tracked_elsewhere(stock_to_remove):
@@ -329,8 +299,6 @@ def delete_watchlist(watchlist_name):
 
         user.watchlists.remove(target_watchlist)
         user.save()
-        _invalidate_watchlist_cache(current_user.id)
-        
         logger.info(f"User {user.client_id} deleted watchlist: '{watchlist_name}'")
         return jsonify({"success": True, "message": "Watchlist deleted successfully."}), 200
     except Exception as e:
@@ -364,11 +332,9 @@ def rename_watchlist(watchlist_name: str):
         return jsonify({"success": False, "message": "Another watchlist already uses this name."}), 409
 
     try:
-        old_name = target_watchlist.name
         target_watchlist.name = new_name
         user.save()
-        _invalidate_watchlist_cache(current_user.id)
-        logger.info("User %s renamed watchlist '%s' to '%s'", user.client_id, old_name, new_name)
+        logger.info("User %s renamed watchlist '%s' to '%s'", user.client_id, watchlist_name, new_name)
         return jsonify({
             "success": True,
             "message": "Watchlist renamed successfully.",
@@ -376,90 +342,4 @@ def rename_watchlist(watchlist_name: str):
         }), 200
     except Exception as e:
         logger.error("Error renaming watchlist '%s' for user %s: %s", watchlist_name, user.client_id, e, exc_info=True)
-        return jsonify({"success": False, "message": "An internal server error occurred."}), 500
-
-
-@watchlist_bp.route('/watchlists/<string:watchlist_name>/stocks/reorder', methods=['POST'])
-@login_required
-def reorder_watchlist_stocks(watchlist_name: str):
-    """Reorders the stocks inside a specific watchlist based on provided symbols."""
-    data = request.get_json() or {}
-    requested_order = data.get('symbols')
-
-    if not isinstance(requested_order, list) or not requested_order:
-        return jsonify({"success": False, "message": "An ordered list of stock symbols is required."}), 400
-
-    user = User.objects.get(id=current_user.id)
-    target_watchlist = _get_watchlist_or_404(user, watchlist_name)
-
-    if not target_watchlist:
-        return jsonify({"success": False, "message": "Watchlist not found."}), 404
-
-    existing_symbols = [stock.symbol for stock in target_watchlist.stocks if stock]
-    if len(requested_order) != len(existing_symbols):
-        return jsonify({"success": False, "message": "Order list must include every stock."}), 400
-
-    if len(set(requested_order)) != len(requested_order):
-        return jsonify({"success": False, "message": "Duplicate symbols detected in order list."}), 400
-
-    symbol_lookup = {stock.symbol: stock for stock in target_watchlist.stocks if stock}
-
-    try:
-        new_order = [symbol_lookup[symbol] for symbol in requested_order]
-    except KeyError:
-        return jsonify({"success": False, "message": "Order list references unknown symbols."}), 404
-
-    target_watchlist.stocks = new_order
-    try:
-        user.save()
-        _invalidate_watchlist_cache(current_user.id)
-        logger.info("User %s reordered stocks within watchlist '%s'", user.client_id, watchlist_name)
-        return jsonify({
-            "success": True,
-            "message": "Watchlist stocks reordered successfully.",
-            "watchlist": _serialize_watchlist(target_watchlist)
-        }), 200
-    except Exception as e:
-        logger.error("Error reordering stocks for watchlist '%s' (user %s): %s", watchlist_name, user.client_id, e, exc_info=True)
-        return jsonify({"success": False, "message": "An internal server error occurred."}), 500
-
-
-@watchlist_bp.route('/watchlists/reorder', methods=['POST'])
-@login_required
-def reorder_watchlists():
-    """Reorders a user's watchlists based on a provided sequence of names."""
-    data = request.get_json() or {}
-    requested_order = data.get('order')
-
-    if not isinstance(requested_order, list) or not requested_order:
-        return jsonify({"success": False, "message": "An ordered list of watchlist names is required."}), 400
-
-    user = User.objects.get(id=current_user.id)
-    current_watchlists = list(user.watchlists)
-
-    if len(requested_order) != len(current_watchlists):
-        return jsonify({"success": False, "message": "Order list must include every watchlist."}), 400
-
-    lookup = {wl.name: wl for wl in current_watchlists}
-
-    try:
-        new_order = [lookup[name] for name in requested_order]
-    except KeyError:
-        return jsonify({"success": False, "message": "Order list references an unknown watchlist."}), 404
-
-    if len(set(requested_order)) != len(requested_order):
-        return jsonify({"success": False, "message": "Order list contains duplicate names."}), 400
-
-    try:
-        user.watchlists = new_order
-        user.save()
-        _invalidate_watchlist_cache(current_user.id)
-        logger.info("User %s reordered their watchlists", user.client_id)
-        return jsonify({
-            "success": True,
-            "message": "Watchlists reordered successfully.",
-            "watchlists": [_serialize_watchlist(wl) for wl in user.watchlists]
-        }), 200
-    except Exception as e:
-        logger.error("Error reordering watchlists for user %s: %s", user.client_id, e, exc_info=True)
         return jsonify({"success": False, "message": "An internal server error occurred."}), 500

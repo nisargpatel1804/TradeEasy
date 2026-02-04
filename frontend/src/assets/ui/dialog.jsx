@@ -47,6 +47,8 @@ const DialogContent = React.forwardRef(({ className, children, size, ...props },
     <DialogOverlay />
     <DialogPrimitive.Content
       ref={ref}
+      role="dialog"
+      aria-modal="true"
       className={cn(dialogContentVariants({ size }), className)}
       {...props}
     >

@@ -79,10 +79,17 @@ const findIndexMatch = (priceMap = {}, config) => {
     }
   }
 
+  const labelLower = (config.label || '').toLowerCase();
   const fallbackKey = Object.keys(priceMap).find((symbol) => {
     const item = priceMap[symbol];
-    const normalizedName = item?.name?.toLowerCase() || '';
-    return normalizedName.includes((config.label || '').toLowerCase());
+    const normalizedName = (item?.name || '').toLowerCase();
+    const normalizedSymbol = String(symbol || '').toLowerCase();
+    const itemSymbol = (item?.symbol || '').toLowerCase();
+
+    if (normalizedName && normalizedName.includes(labelLower)) return true;
+    if (normalizedSymbol && normalizedSymbol.includes(labelLower)) return true;
+    if (itemSymbol && itemSymbol.includes(labelLower)) return true;
+    return false;
   });
 
   return fallbackKey ? priceMap[fallbackKey] : null;
@@ -96,12 +103,14 @@ const WALLET_LIMIT_OPTIONS = [
   { label: '₹1 Crore', value: 10_000_000, warning: RESET_NOTE },
 ];
 
-const Navbar = ({ onToggleSidebar }) => {
+const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
   const { isAuthenticated, logout, user } = useAuth();
   const { profileData, indicesData, refreshProfile } = useDataContext();
   const { isConnected, connectionStatus } = useSocket();
   const navigate = useNavigate();
   const { toast } = useToast();
+
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
 
   const headlineCacheKey = useMemo(() => {
     const username = (user?.username || profileData?.username || 'anon').toLowerCase();
@@ -228,6 +237,8 @@ const Navbar = ({ onToggleSidebar }) => {
   }, [normaliseIndexPayload]);
 
   const handleLogout = async () => {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
     try {
       await logout();
       toast({ title: 'Logged Out', description: 'You have been successfully logged out.' });
@@ -237,6 +248,8 @@ const Navbar = ({ onToggleSidebar }) => {
         description: 'Could not log out. Please try again or clear your cookies.',
         variant: 'destructive'
       });
+    } finally {
+      setIsLoggingOut(false);
     }
   };
 
@@ -300,6 +313,14 @@ const Navbar = ({ onToggleSidebar }) => {
     if (!selectedWalletLimit) {
       return;
     }
+
+    // Client-side guard: only allow known preset values
+    const allowed = WALLET_LIMIT_OPTIONS.map((o) => o.value);
+    if (!allowed.includes(selectedWalletLimit)) {
+      toast({ title: 'Invalid amount', description: 'Please select a valid wallet amount.', variant: 'destructive' });
+      return;
+    }
+
     setIsUpdatingWallet(true);
     try {
       const response = await api.updateWalletLimit(selectedWalletLimit);
@@ -397,12 +418,17 @@ const Navbar = ({ onToggleSidebar }) => {
             <span className={`h-2 w-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-amber-400'}`} />
             {connectionStatus === 'reconnecting' ? 'Reconnecting' : isConnected ? 'Live' : 'Offline'}
           </div>
-          <Button variant="ghost" size="icon" aria-label="Notifications">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Notifications"
+            onClick={() => toast({ title: 'Notifications', description: 'No new notifications.' })}
+          >
             <Bell className="h-5 w-5 text-slate-600" />
           </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="relative h-9 w-9 rounded-full border border-slate-200">
+              <Button variant="ghost" className="relative h-9 w-9 rounded-full border border-slate-200" aria-label="Open account menu" aria-haspopup="menu">
                 <Avatar className="h-9 w-9">
                   <AvatarFallback>{profileInitial}</AvatarFallback>
                 </Avatar>
@@ -421,9 +447,10 @@ const Navbar = ({ onToggleSidebar }) => {
                 <span>Profile</span>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={handleLogout} className="text-red-600 focus:text-red-600">
+              <DropdownMenuItem onClick={handleLogout} disabled={isLoggingOut} className="text-red-600 focus:text-red-600">
                 <LogOut className="mr-2 h-4 w-4" />
                 <span>Log out</span>
+                {isLoggingOut && <Loader2 className="ml-2 h-4 w-4 animate-spin" />}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -444,21 +471,25 @@ const Navbar = ({ onToggleSidebar }) => {
       </div>
 
       <Dialog open={isWalletDialogOpen} onOpenChange={setIsWalletDialogOpen}>
-        <DialogContent className="max-w-lg rounded-3xl">
+        <DialogContent className="max-w-lg rounded-3xl" role="dialog" aria-modal="true" aria-labelledby="reset-wallet-title" aria-describedby="reset-wallet-desc">
           <DialogHeader>
-            <DialogTitle>Reset Wallet Limit</DialogTitle>
-            <DialogDescription>
+            <DialogTitle id="reset-wallet-title">Reset Wallet Limit</DialogTitle>
+            <DialogDescription id="reset-wallet-desc">
               Pick a preset amount to refresh your simulated balance. Every reset clears holdings, positions,
               orders, and performance data for the selected account.
             </DialogDescription>
           </DialogHeader>
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="Wallet reset options">
             {WALLET_LIMIT_OPTIONS.map((option) => {
               const isActive = selectedWalletLimit === option.value;
               return (
                 <button
                   key={option.value}
                   type="button"
+                  role="radio"
+                  aria-checked={isActive}
+                  tabIndex={isActive ? 0 : -1}
+                  aria-label={`${option.label}${option.warning ? ' - ' + option.warning : ''}`}
                   onClick={() => setSelectedWalletLimit(option.value)}
                   className={`rounded-2xl border px-4 py-3 text-left text-sm font-semibold transition ${
                     isActive ? 'border-amber-500 bg-amber-50 text-amber-900' : 'border-slate-200 bg-white text-slate-700'
@@ -485,7 +516,8 @@ const Navbar = ({ onToggleSidebar }) => {
       </Dialog>
     </header>
   );
-};
+});
+Navbar.displayName = 'Navbar';
 
 const TickerChip = ({ label, price, change, percent, compact = false }) => {
   const formatNumber = (value) => {

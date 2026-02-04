@@ -310,8 +310,8 @@ class MotilalOswalAPI:
             current_time = time_module.time() + time_offset
             current_code = totp.at(int(current_time))
             
-            # Log for debugging
-            logger.debug(f"Generated TOTP: {current_code} at timestamp: {int(current_time)} (offset: {time_offset}s)")
+            # Log timestamp and offset only (do NOT log TOTP codes)
+            logger.debug("Generated TOTP at timestamp: %s (offset: %ss)", int(current_time), time_offset)
             
             return current_code
         except Exception as exc:
@@ -394,9 +394,8 @@ class MotilalOswalAPI:
                     "Troubleshooting steps:\n"
                     "  1. Verify system time is synchronized (run: w32tm /resync)\n"
                     "  2. Confirm TOTP_SECRET in .env matches your MO profile\n"
-                    "  3. Try regenerating TOTP_SECRET from MO profile\n"
-                    "  4. Last TOTP tried: %s",
-                    error_msg, error_code, totp_code
+                    "  3. Try regenerating TOTP_SECRET from MO profile",
+                    error_msg, error_code
                 )
             else:
                 logger.error(

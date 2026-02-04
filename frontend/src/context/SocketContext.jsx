@@ -187,11 +187,27 @@ export const SocketProvider = ({ children }) => {
     newSocket.io.on('reconnect_error', handleConnectError);
     newSocket.io.on('reconnect_failed', handleReconnectFailed);
 
+    // Listen for server-side subscription events and surface subscription failures to the user
+    const handleSubscriptionUpdate = (payload) => {
+      if (!payload) return;
+      const { action, symbol, subscription_ok, message } = payload;
+      if (action === 'register') {
+        // Avoid noisy success toasts on reconnect/startup; rely on direct API responses
+        // to notify users of successful subscription when they add a stock.
+        if (!subscription_ok) {
+          toast.error(`Live updates unavailable for ${symbol}: ${message || 'Subscription failed.'}`);
+        }
+      }
+    };
+
+    newSocket.on('subscription_update', handleSubscriptionUpdate);
+
     return () => {
       isShuttingDown = true;
       newSocket.off('connect', handleConnect);
       newSocket.off('disconnect', handleDisconnect);
       newSocket.off('connect_error', handleConnectError);
+      newSocket.off('subscription_update', handleSubscriptionUpdate);
       newSocket.io.off('reconnect_attempt', handleReconnectAttempt);
       newSocket.io.off('reconnect_error', handleConnectError);
       newSocket.io.off('reconnect_failed', handleReconnectFailed);

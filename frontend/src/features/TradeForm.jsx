@@ -208,6 +208,13 @@ const TradeForm = ({
         percent_change: priceData.percent_change,
       });
 
+      // Notify user if provider is down or data is stale
+      if (priceData && priceData.provider_available === false) {
+        toast.error('Price provider is currently unavailable. Showing cached or EOD prices. Live updates may be delayed.');
+      } else if (priceData && priceData.is_stale) {
+        toast('Showing fallback price (EOD or previous close). Live prices may be unavailable.', { icon: 'ℹ️' });
+      }
+
       // Ensure symbol input aligns with canonical symbol casing
       if (!symbol) {
         setSymbol((priceData.symbol || "").toUpperCase());

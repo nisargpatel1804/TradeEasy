@@ -1,12 +1,9 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import debounce from "lodash.debounce";
-import { Search, Plus, Loader2, ChevronDown, Trash2, PlusCircle, ArrowUpDown, Expand, Edit2, Check, TrendingUp, TrendingDown } from "lucide-react";
+import { Loader2, ChevronDown, Trash2, PlusCircle, ArrowUpDown, Expand, Edit2, Check, TrendingUp, TrendingDown } from "lucide-react";
 import { useDataContext } from "../context/DataContext.jsx";
-import priceUpdateService from "../services/priceUpdateService.js";
-import * as api from "../services/api.js";
-import { Input } from "../assets/ui/input.jsx";
 import { Button } from "../assets/ui/button.jsx";
+import { Input } from "../assets/ui/input.jsx";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,6 +16,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "../assets/ui/use-toast.js";
 import TradeForm from "./TradeForm.jsx";
 import { Skeleton } from "../assets/ui/skeleton.jsx";
+import StockSearch from "./StockSearch.jsx";
 
 const SORT_OPTIONS = [
   { value: "custom", label: "Latest Added" },
@@ -28,19 +26,23 @@ const SORT_OPTIONS = [
 ];
 
 const WatchlistSidebar = ({ onClose, isMobile = false }) => {
-  const { watchlistsData, getWatchlists } = useDataContext();
+  const {
+    watchlistsData,
+    isLoadingWatchlists,
+    livePrices,
+    createWatchlist,
+    renameWatchlist,
+    deleteWatchlist,
+    addStockToWatchlist,
+    removeStockFromWatchlist,
+  } = useDataContext();
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
 
   const [activeWatchlistName, setActiveWatchlistName] = useState("");
-  const [livePrices, setLivePrices] = useState({});
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState([]);
-  const [isSearching, setIsSearching] = useState(false);
   const [isTradeSubmitting, setIsTradeSubmitting] = useState(false);
   const [tradeCloseRequested, setTradeCloseRequested] = useState(false);
-  const [showSearchDropdown, setShowSearchDropdown] = useState(false);
   const [isMutatingWatchlist, setIsMutatingWatchlist] = useState(false);
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [newWatchlistName, setNewWatchlistName] = useState("");
@@ -51,17 +53,7 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
   const [renameTarget, setRenameTarget] = useState(null);
 
   const watchlists = watchlistsData?.watchlists ?? [];
-  const isLoadingWatchlists = !watchlistsData || (Array.isArray(watchlists) && watchlists.length === 0 && isMutatingWatchlist);
   const isWatchlistView = location.pathname.startsWith("/watchlist");
-
-  // Initial fetch to ensure DataContext is hydrated
-  useEffect(() => {
-    if (!watchlistsData) {
-      getWatchlists().catch((error) => {
-        toast({ title: "Could not load watchlists", variant: "destructive" });
-      });
-    }
-  }, [watchlistsData, getWatchlists, toast]);
 
   // Ensure there is always a valid active watchlist
   useEffect(() => {
@@ -90,6 +82,8 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
     }
   }, [isRenameDialogOpen]);
 
+  
+
   const activeWatchlist = useMemo(
     () => watchlists.find((wl) => wl.name === activeWatchlistName) || null,
     [watchlists, activeWatchlistName]
@@ -97,86 +91,6 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
 
   const stocks = activeWatchlist?.stocks ?? [];
 
-  const refreshWatchlists = useCallback(async (preferredName) => {
-    try {
-      setIsMutatingWatchlist(true);
-      const data = await getWatchlists(true);
-      const list = data?.watchlists ?? [];
-      if (preferredName && list.some((wl) => wl.name === preferredName)) {
-        setActiveWatchlistName(preferredName);
-      }
-    } catch (error) {
-      // Non-critical: keep existing watchlists if refresh fails.
-    } finally {
-      setIsMutatingWatchlist(false);
-    }
-  }, [getWatchlists]);
-
-  // Subscribe to live prices
-  useEffect(() => {
-    const unsubscribe = priceUpdateService.subscribe((payload = {}) => {
-      setLivePrices((prev) => {
-        if (payload.type === "snapshot" || payload.type === "reset") {
-          return payload.allPrices || {};
-        }
-        if (payload.changedPrices && Object.keys(payload.changedPrices).length > 0) {
-          return { ...prev, ...payload.changedPrices };
-        }
-        return prev;
-      });
-    });
-    return () => unsubscribe?.();
-  }, []);
-
-  // Seed missing price snapshots for newly rendered stocks
-  useEffect(() => {
-    if (!Array.isArray(stocks) || stocks.length === 0) {
-      return;
-    }
-    const symbolsWithoutSnapshot = Array.from(
-      new Set(
-        stocks
-          .map((stock) => stock?.symbol)
-          .filter(Boolean)
-          .filter((symbol) => !priceUpdateService.getLatestPrice(symbol))
-      )
-    );
-    if (symbolsWithoutSnapshot.length === 0) {
-      return;
-    }
-    let cancelled = false;
-    const seedPrices = async () => {
-      try {
-        const response = await api.batchGetStockData(symbolsWithoutSnapshot);
-        const batch = response?.data || {};
-        const map = {};
-        symbolsWithoutSnapshot.forEach((fullSymbol) => {
-          const baseSymbol = fullSymbol.includes(".") ? fullSymbol.split(".")[0] : fullSymbol;
-          const payload = batch[baseSymbol];
-          if (!payload || payload.error) {
-            return;
-          }
-          map[fullSymbol] = {
-            symbol: fullSymbol,
-            ltp: payload.ltp,
-            change: payload.change,
-            percent_change: payload.percent_change,
-            volume: payload.volume,
-            entityType: "stock",
-          };
-        });
-        if (!cancelled && Object.keys(map).length > 0) {
-          priceUpdateService.seedPrices(map);
-        }
-      } catch (error) {
-        // Non-critical: websocket updates will fill prices; this just seeds initial snapshot.
-      }
-    };
-    seedPrices();
-    return () => {
-      cancelled = true;
-    };
-  }, [stocks]);
 
   const enrichStock = useCallback((stock) => {
     if (!stock || !stock.symbol) {
@@ -263,27 +177,32 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
   const handleAddStock = async (stock) => {
     if (!activeWatchlist?.name) {
       toast({ title: "Select a watchlist first", variant: "destructive" });
-      return;
+      return false;
     }
     const exists = (activeWatchlist.stocks || []).some((item) => item?.symbol === stock.symbol);
     if (exists) {
       toast({ title: `${stock.symbol} already exists`, description: `${stock.symbol} is already part of ${activeWatchlist.name}.` });
-      return;
+      return false;
     }
     setIsMutatingWatchlist(true);
     try {
-      await api.addStockToWatchlist(activeWatchlist.name, {
+      const exchange = (stock.exchange || (stock.symbol?.includes(".") ? stock.symbol.split(".").pop() : "") || "").toUpperCase();
+      await addStockToWatchlist(activeWatchlist.name, {
         symbol: stock.symbol,
         name: stock.name,
         scripcode: stock.scripcode,
+        exchange,
       });
       toast({ title: `${stock.symbol} added`, description: `Added to ${activeWatchlist.name}.` });
-      await refreshWatchlists(activeWatchlist.name);
-      setSearchQuery("");
-      setSearchResults([]);
-      setShowSearchDropdown(false);
+      setActiveWatchlistName(activeWatchlist.name);
+      return true;
     } catch (error) {
-      toast({ title: "Unable to add stock", description: error.message || "Please try again.", variant: "destructive" });
+      if (error?.status === 409) {
+        toast({ title: `${stock.symbol} is already in ${activeWatchlist.name}` });
+      } else {
+        toast({ title: "Unable to add stock", description: error.message || "Please try again.", variant: "destructive" });
+      }
+      return false;
     } finally {
       setIsMutatingWatchlist(false);
     }
@@ -295,9 +214,8 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
     }
     setIsMutatingWatchlist(true);
     try {
-      await api.removeStockFromWatchlist(activeWatchlist.name, symbol);
+      await removeStockFromWatchlist(activeWatchlist.name, symbol);
       toast({ title: `${symbol} removed`, description: `Removed from ${activeWatchlist.name}.` });
-      await refreshWatchlists(activeWatchlist.name);
     } catch (error) {
       toast({ title: "Unable to remove", description: error.message || "Try again later.", variant: "destructive" });
     } finally {
@@ -314,11 +232,11 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
     }
     setIsMutatingWatchlist(true);
     try {
-      await api.createWatchlist(trimmed);
+      await createWatchlist(trimmed);
       toast({ title: `${trimmed} created` });
       setIsCreateDialogOpen(false);
       setNewWatchlistName("");
-      await refreshWatchlists(trimmed);
+      setActiveWatchlistName(trimmed);
     } catch (error) {
       toast({ title: "Unable to create", description: error.message || "Please try again.", variant: "destructive" });
     } finally {
@@ -341,12 +259,12 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
     }
     setIsMutatingWatchlist(true);
     try {
-      await api.renameWatchlist(renameTarget.name, trimmed);
+      await renameWatchlist(renameTarget.name, trimmed);
       toast({ title: "Watchlist renamed", description: `${renameTarget.name} is now ${trimmed}.` });
       setIsRenameDialogOpen(false);
       setRenameTarget(null);
       setRenameValue("");
-      await refreshWatchlists(trimmed);
+      setActiveWatchlistName(trimmed);
     } catch (error) {
       toast({ title: "Unable to rename", description: error.message || "Please try again.", variant: "destructive" });
     } finally {
@@ -361,9 +279,8 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
     }
     setIsMutatingWatchlist(true);
     try {
-      await api.deleteWatchlist(name);
+      await deleteWatchlist(name);
       toast({ title: `${name} deleted` });
-      await refreshWatchlists();
     } catch (error) {
       toast({ title: "Unable to delete", description: error.message || "Try again later.", variant: "destructive" });
     } finally {
@@ -381,36 +298,6 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
     setSortMode(mode);
   };
 
-  const debouncedSearch = useMemo(
-    () =>
-      debounce(async (query) => {
-        if (!query || query.trim().length < 2) {
-          setSearchResults([]);
-          setIsSearching(false);
-          return;
-        }
-        try {
-          const results = await api.searchStocks(query.trim());
-          setSearchResults(results || []);
-        } catch (error) {
-          setSearchResults([]);
-        } finally {
-          setIsSearching(false);
-        }
-      }, 300),
-    []
-  );
-
-  useEffect(() => {
-    if (!searchQuery) {
-      setSearchResults([]);
-      setIsSearching(false);
-      return;
-    }
-    setIsSearching(true);
-    debouncedSearch(searchQuery);
-    return () => debouncedSearch.cancel();
-  }, [searchQuery, debouncedSearch]);
   const openTradeModal = (stock, action) => {
     if (!stock) {
       return;
@@ -433,56 +320,19 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
     onClose?.();
   };
 
-  const renderSearchDropdown = () => {
-    if (!showSearchDropdown || !searchQuery) {
-      return null;
-    }
-    return (
-      <div className="absolute z-20 mt-2 max-h-72 w-full overflow-y-auto rounded-2xl border bg-white shadow-xl">
-        {isSearching ? (
-          <div className="flex items-center justify-center gap-2 py-6 text-sm text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin" /> Searching...
-          </div>
-        ) : searchResults.length === 0 ? (
-          <div className="py-6 text-center text-sm text-slate-500">No matches</div>
-        ) : (
-          searchResults.map((result) => (
-            <button
-              key={result.symbol}
-              type="button"
-              className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-slate-50"
-              onMouseDown={(event) => {
-                event.preventDefault();
-                handleAddStock(result);
-              }}
-            >
-              <div className="min-w-0">
-                <p className="text-sm font-semibold text-slate-900">{result.symbol}</p>
-                <p className="text-xs text-slate-500 truncate">{result.name}</p>
-              </div>
-              <Plus className="h-4 w-4 text-slate-400" />
-            </button>
-          ))
-        )}
-      </div>
-    );
-  };
-
   return (
     <div className="flex h-full flex-col gap-3 p-3">
       <div className="space-y-3">
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-          <Input
-            placeholder="Search to Trade or Add to Watchlist"
-            value={searchQuery}
-            onFocus={() => setShowSearchDropdown(true)}
-            onBlur={() => setTimeout(() => setShowSearchDropdown(false), 150)}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            className="h-9 rounded-2xl border-slate-200 bg-slate-50 pl-10 text-sm"
-          />
-          {renderSearchDropdown()}
-        </div>
+        <StockSearch
+          activeWatchlist={activeWatchlist}
+          onAddStock={handleAddStock}
+          onResultClick={handleAddStock}
+          placeholder="Search to Trade or Add to Watchlist"
+          containerClassName="relative w-full"
+          inputClassName="h-9 rounded-2xl border-slate-200 bg-slate-50 pl-10 text-sm"
+          dropdownClassName="absolute z-20 mt-2 max-h-72 w-full overflow-y-auto rounded-2xl border bg-white shadow-xl"
+          showAddButton={false}
+        />
 
         <div className="flex items-center gap-2">
           <DropdownMenu>
@@ -709,6 +559,7 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
           </form>
         </DialogContent>
       </Dialog>
+
 
       <Dialog
         open={!!tradeContext}

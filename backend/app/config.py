@@ -60,6 +60,9 @@ class Config:
     TWO_FA = os.getenv("TWO_FA")
     TOTP_SECRET = os.getenv("TOTP_SECRET")
 
+    # Optional per-app key to HMAC reset tokens. Falls back to SECRET_KEY if not set.
+    RESET_TOKEN_HMAC_KEY = os.getenv('RESET_TOKEN_HMAC_KEY')
+
     if not all([API_KEY, USER_ID, PASSWORD, TWO_FA, TOTP_SECRET]):
         print("WARNING: Motilal Oswal API credentials are not fully set in the .env file. API functionality will be limited.")
     elif TOTP_SECRET:
@@ -104,9 +107,35 @@ class ProductionConfig(Config):
 # The application will use DevelopmentConfig if FLASK_DEBUG is true, otherwise ProductionConfig.
 IS_DEBUG_MODE = get_bool_from_env('FLASK_DEBUG', default=False)
 
+# Select config class
 if IS_DEBUG_MODE:
     AppConfig = DevelopmentConfig
     print("INFO: Running in Development mode.")
 else:
     AppConfig = ProductionConfig
     print("INFO: Running in Production mode.")
+
+# --- Market Holidays Configuration (override via env) ---
+# Accept either:
+#  - MARKET_HOLIDAYS as a comma-separated list of YYYY-MM-DD dates, or
+#  - MARKET_HOLIDAYS_FILE pointing to a file with one YYYY-MM-DD per line.
+# If neither is provided, defaults to an empty list (so market_time can decide).
+import os
+_market_holidays_env = os.getenv('MARKET_HOLIDAYS', '').strip()
+_market_holidays_file = os.getenv('MARKET_HOLIDAYS_FILE', '').strip()
+
+_markets = []
+if _market_holidays_env:
+    _markets = [d.strip() for d in _market_holidays_env.split(',') if d.strip()]
+
+if _market_holidays_file and os.path.exists(_market_holidays_file):
+    try:
+        with open(_market_holidays_file, 'r', encoding='utf-8') as fh:
+            file_dates = [line.strip() for line in fh if line.strip()]
+            # file entries override/extend env values
+            _markets = list(dict.fromkeys(_markets + file_dates))
+    except Exception as e:
+        print(f"WARNING: Failed to load MARKET_HOLIDAYS_FILE '{_market_holidays_file}': {e}")
+
+# Expose as attribute on AppConfig for other modules to consume.
+setattr(AppConfig, 'MARKET_HOLIDAYS', _markets)

@@ -4,9 +4,11 @@ import atexit
 from flask import Flask, jsonify, request
 from flask_mongoengine import MongoEngine
 from flask_cors import CORS
-from flask_login import LoginManager
+from flask_login import LoginManager, current_user
 from flask_bcrypt import Bcrypt
 from flask_socketio import SocketIO, emit
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
 from bson import ObjectId
 
@@ -60,6 +62,27 @@ logger = logging.getLogger(__name__)
 db = MongoEngine()
 login_manager = LoginManager()
 bcrypt = Bcrypt()
+def _rate_limit_key():
+    try:
+        if current_user and current_user.is_authenticated:
+            return f"user:{current_user.get_id()}"
+    except Exception:
+        pass
+    return get_remote_address()
+
+# Configure rate limiter storage backend from environment. Prefer a Redis URI in production.
+_rate_limit_storage = os.getenv('RATELIMIT_STORAGE_URI') or os.getenv('REDIS_URL')
+if _rate_limit_storage:
+    limiter = Limiter(key_func=_rate_limit_key, default_limits=None, storage_uri=_rate_limit_storage)
+    logger.info(f"Rate limiter storage configured from environment: {_rate_limit_storage}")
+else:
+    # Explicitly use memory backend to avoid flask_limiter warning; however, memory is not suitable for
+    # production as it is not shared between processes. Set RATELIMIT_STORAGE_URI to a Redis URI like
+    # 'redis://localhost:6379/0' in production.
+    limiter = Limiter(key_func=_rate_limit_key, default_limits=None, storage_uri='memory://')
+    logger.warning("RATELIMIT_STORAGE_URI not set; using in-memory rate limit storage. "
+                   "Configure RATELIMIT_STORAGE_URI (e.g., 'redis://...') for production use.")
+
 SOCKETIO_PING_INTERVAL = _env_int('SOCKETIO_PING_INTERVAL', 25)
 SOCKETIO_PING_TIMEOUT = _env_int('SOCKETIO_PING_TIMEOUT', 90)
 SOCKETIO_MAX_HTTP_BUFFER = _env_int('SOCKETIO_MAX_HTTP_BUFFER', 2 * 1024 * 1024)
@@ -91,6 +114,8 @@ def create_app():
     db.init_app(app)
     login_manager.init_app(app)
     bcrypt.init_app(app)
+    # Initialize rate limiter with application so individual routes can use @limiter.limit
+    limiter.init_app(app)
 
     # --- CORS Configuration ---
     # Configure CORS for both standard HTTP requests and WebSocket connections
@@ -161,10 +186,47 @@ def create_app():
     app.register_blueprint(watchlist.watchlist_bp, url_prefix='/api')
     app.register_blueprint(data_management_bp, url_prefix='/api/data')
 
+    # Ensure important indexes exist for optimized search queries
+    try:
+        from app.models import AQScrip
+        try:
+            AQScrip.ensure_indexes()
+            logger.info("Ensured AQScrip indexes for optimized search performance.")
+        except Exception as e:
+            # Handle index options conflicts (e.g., existing text index with different weights)
+            msg = str(e)
+            conflict_code = getattr(e, 'code', None)
+            if 'IndexOptionsConflict' in msg or conflict_code == 85:
+                try:
+                    coll = AQScrip._get_collection()
+                    idx_info = coll.index_information()
+                    # Find any text indexes and report their names and weights
+                    text_indexes = {}
+                    for name, info in idx_info.items():
+                        # pymongo stores the index spec in 'key' and 'weights' for text indexes
+                        if info.get('weights') or any(k[1] == 'text' for k in info.get('key', [])):
+                            text_indexes[name] = info.get('weights') or info
+                    if text_indexes:
+                        logger.info(
+                            "Found existing text index(es) on AQScrip which differ from desired configuration: %s. "
+                            "Skipping creation of conflicting text index. To migrate to the new text index, drop the existing text index(s) and restart the app.",
+                            text_indexes
+                        )
+                    else:
+                        logger.warning(f"Failed to ensure AQScrip indexes on startup: {e}")
+                except Exception as inner:
+                    logger.warning(f"Failed to inspect existing AQScrip indexes after IndexOptionsConflict: {inner}; original error: {e}")
+            else:
+                logger.warning(f"Failed to ensure AQScrip indexes on startup: {e}")
+    except Exception as e:
+        logger.warning(f"Failed to load AQScrip model to ensure indexes: {e}")
+
     # --- Health Check Endpoint ---
     @app.route('/')
     def health_check():
         return jsonify({"status": "healthy", "message": "TradeEasy API is running"}), 200
+
+
 
     # --- Configure Flask-Login Handlers ---
     login_manager.login_view = 'auth.login' # Points to the login function in the auth blueprint
@@ -205,25 +267,34 @@ def create_app():
             
             # Check if previous activity was too long ago
             if last_activity:
-                from datetime import datetime as dt
+                # Handle multiple possible types: isoformat string, datetime object, or float timestamp
+                last_activity_dt = None
+                
                 if isinstance(last_activity, str):
                     try:
-                        last_activity = dt.fromisoformat(last_activity)
-                    except ValueError:
-                        # Invalid timestamp format - reset and continue
+                        last_activity_dt = datetime.fromisoformat(last_activity)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Invalid last_activity string format for user {current_user.client_id}")
+                elif isinstance(last_activity, datetime):
+                    last_activity_dt = last_activity
+                elif isinstance(last_activity, (int, float)):
+                    try:
+                        last_activity_dt = datetime.utcfromtimestamp(last_activity)
+                    except (ValueError, OSError):
                         logger.warning(f"Invalid last_activity timestamp for user {current_user.client_id}")
-                        return
                 
-                idle_duration = now - last_activity
-                if idle_duration > app.config['SESSION_IDLE_TIMEOUT']:
-                    logger.info(f"Session expired due to inactivity for user {current_user.client_id} (idle: {idle_duration})")
-                    from flask_login import logout_user
-                    logout_user()
-                    session.clear()
-                    return jsonify({
-                        "success": False,
-                        "message": "Session expired due to inactivity. Please log in again."
-                    }), 401
+                # Only check timeout if we successfully parsed the timestamp
+                if last_activity_dt:
+                    idle_duration = now - last_activity_dt
+                    if idle_duration > app.config['SESSION_IDLE_TIMEOUT']:
+                        logger.info(f"Session expired due to inactivity for user {current_user.client_id} (idle: {idle_duration})")
+                        from flask_login import logout_user
+                        logout_user()
+                        session.clear()
+                        return jsonify({
+                            "success": False,
+                            "message": "Session expired due to inactivity. Please log in again."
+                        }), 401
 
     # --- Configure SocketIO Event Handlers ---
     @socketio.on('connect')

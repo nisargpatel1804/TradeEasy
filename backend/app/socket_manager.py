@@ -5,8 +5,8 @@ from datetime import time as dt_time
 
 from app.moapi.mo_api import MotilalOswalAPI
 from app.moapi.packet_parser import MOPacketParser
-from app.utils.market_indices import MAJOR_INDEX_TARGETS
-from app.utils.market_hours import get_current_ist_time
+from app.services.market_data import MAJOR_INDEX_TARGETS
+from app.services.market_time import get_current_ist_time
 
 # --- Configuration ---
 # Use a more detailed logging format for better debugging
@@ -195,8 +195,8 @@ class MO_WebSocket_Manager:
         
         if composite_key not in self.registered_scrips:
             self.registered_scrips.add(composite_key)
-            logger.info(f"Queued subscription for {symbol} ({composite_key})")
-            
+            logger.info(f"Queued subscription for {symbol} ({composite_key}); total_subscriptions={len(self.registered_scrips)}")
+
             # Fetch initial price data and cache prev_close for accurate % change calculation
             try:
                 from app.models import Stock
@@ -209,18 +209,88 @@ class MO_WebSocket_Manager:
                         logger.info(f"Cached initial data for {symbol}: LTP={payload.get('ltp')}, prev_close stored")
             except Exception as e:
                 logger.warning(f"Could not fetch initial data for {symbol} during registration: {e}")
-            
+
+            subscription_status = {
+                "success": True,
+                "message": "Subscribed successfully"
+            }
+
             if self.is_connected and self.ws_authed:
-                self.mo_api.register_scrip(exchange, int(scripcode), exchange_type)
+                # Try up to 3 attempts with short exponential backoff
+                attempts = 0
+                max_attempts = 3
+                last_exc = None
+                while attempts < max_attempts:
+                    try:
+                        self.mo_api.register_scrip(exchange, int(scripcode), exchange_type)
+                        logger.info(f"MO API register_scrip called for {symbol} ({composite_key})")
+                        subscription_status = {"success": True, "message": "Subscribed successfully"}
+                        break
+                    except Exception as e:
+                        attempts += 1
+                        last_exc = e
+                        wait_time = 0.5 * (2 ** (attempts - 1))
+                        logger.warning(f"MO API register_scrip attempt {attempts} failed for {symbol}: {e}; retrying in {wait_time}s")
+                        time.sleep(wait_time)
+                else:
+                    subscription_status = {"success": False, "message": f"Failed to subscribe after {max_attempts} attempts: {last_exc}"}
+                    logger.warning(f"MO API register_scrip ultimately failed for {symbol}: {last_exc}")
+
+            # Emit an optional socketio telemetry event to help debugging dashboard
+            if self.socketio:
+                try:
+                    self.socketio.emit('subscription_update', {
+                        'action': 'register',
+                        'symbol': symbol,
+                        'composite_key': composite_key,
+                        'total_subscriptions': len(self.registered_scrips),
+                        'subscription_ok': subscription_status.get('success', False),
+                        'message': subscription_status.get('message')
+                    })
+                except Exception:
+                    logger.debug("Failed to emit subscription_update socket event")
+
+            return subscription_status
+        else:
+            # Already registered — return a successful-but-idempotent result
+            logger.debug(f"Subscription request for {symbol} ({composite_key}) received but already registered")
+            return {"success": True, "message": "Already subscribed"}
+
+            # Emit an optional socketio telemetry event to help debugging dashboard
+            if self.socketio:
+                try:
+                    self.socketio.emit('subscription_update', {
+                        'action': 'register',
+                        'symbol': symbol,
+                        'composite_key': composite_key,
+                        'total_subscriptions': len(self.registered_scrips)
+                    })
+                except Exception:
+                    logger.debug("Failed to emit subscription_update socket event")
 
     def unregister_scrip(self, exchange, scripcode, exchange_type="CASH"):
         """Removes a scrip from the subscription list and unsubscribes if connected."""
         composite_key = f"{exchange.upper()}:{exchange_type.upper()}:{int(scripcode)}"
         if composite_key in self.registered_scrips:
             self.registered_scrips.remove(composite_key)
-            logger.info(f"Queued unsubscription for {composite_key}")
-            if self.is_connected and self.ws_authed:
-                self.mo_api.unregister_scrip(exchange, int(scripcode), exchange_type)
+            logger.info(f"Queued unsubscription for {composite_key}; total_subscriptions={len(self.registered_scrips)}")
+            try:
+                if self.is_connected and self.ws_authed:
+                    self.mo_api.unregister_scrip(exchange, int(scripcode), exchange_type)
+                    logger.info(f"MO API unregister_scrip called for {composite_key}")
+            except Exception as e:
+                logger.warning(f"MO API unregister_scrip failed for {composite_key}: {e}")
+
+            # Emit telemetry event for debugging
+            if self.socketio:
+                try:
+                    self.socketio.emit('subscription_update', {
+                        'action': 'unregister',
+                        'composite_key': composite_key,
+                        'total_subscriptions': len(self.registered_scrips)
+                    })
+                except Exception:
+                    logger.debug("Failed to emit subscription_update socket event")
         self.scrip_to_symbol_map.pop(f"{exchange.upper()}:{int(scripcode)}", None)
 
     def _run(self):
@@ -534,6 +604,15 @@ class MO_WebSocket_Manager:
                 if payload:
                     snapshot[symbol] = payload.copy()
             return snapshot
+
+    def get_subscription_summary(self):
+        """Returns a small summary useful for observability and debugging."""
+        with self.subscription_lock, self.data_lock:
+            return {
+                'total_registered_scrips': len(self.registered_scrips),
+                'total_users_with_subscriptions': len(self.user_subscriptions),
+                'per_user_counts_sample': {uid: len(skeys) for uid, skeys in self.user_subscriptions.items()}
+            }
 
     def _preload_watchlist_scrips(self):
         """Registers watchlist stocks and seeds cached prices on startup."""
@@ -971,7 +1050,8 @@ class MO_WebSocket_Manager:
             # CRITICAL FIX #4: Store user subscriptions for reconnection
             with self.subscription_lock:
                 self.user_subscriptions[user_id_str] = user_scrips
-            
+                logger.debug(f"Stored {len(user_scrips)} user_subscriptions for user {user_id_str}")
+
             if stocks_registered > 0:
                 logger.info(f"Registered {stocks_registered} new watchlist stock(s) for user {user_id_str}")
             return stocks_registered

@@ -2,8 +2,10 @@ import logging
 import re
 import time
 import secrets
+import hmac
+import hashlib
 from datetime import datetime, timedelta
-from flask import Blueprint, request, jsonify, session
+from flask import Blueprint, request, jsonify, session, current_app
 from flask_login import login_user, logout_user, login_required, current_user
 from mongoengine.errors import NotUniqueError
 from app.models import User, Watchlist
@@ -20,6 +22,18 @@ PASSWORD_MIN_LENGTH = 8
 LOGIN_ATTEMPT_WINDOW_SECONDS = 300  # 5 minutes
 LOGIN_ATTEMPT_THRESHOLD = 5
 LOGIN_RETRY_AFTER_SECONDS = 300
+
+
+def _hash_reset_token(token: str) -> str:
+    """Return an HMAC-SHA256 hash of the reset token using the app's secret key.
+
+    Uses `RESET_TOKEN_HMAC_KEY` from config if present, otherwise falls back to
+    Flask `SECRET_KEY`. The returned value is hex-encoded for storage.
+    """
+    key = current_app.config.get('RESET_TOKEN_HMAC_KEY', current_app.config.get('SECRET_KEY', ''))
+    if isinstance(key, str):
+        key = key.encode('utf-8')
+    return hmac.new(key, token.encode('utf-8'), hashlib.sha256).hexdigest()
 
 # --- Routes ---
 
@@ -103,9 +117,16 @@ def login():
         if user and user.is_active and bcrypt.check_password_hash(user.password, password):
             # Respect the remember_me flag from the client; default to False for security
             remember = bool(data.get('remember_me', False))
+            # Prevent session fixation: clear previous session data before login
+            session.clear()
             login_user(user, remember=remember)
             session.pop('login_attempts', None) # Clear attempts on successful login
-            logger.info(f"User {user.client_id} logged in successfully (remember={remember}).")
+            # Update last activity timestamp for session idle timeout
+            session['last_activity'] = time.time()
+            session.modified = True
+            logger.info(f"User {user.client_id} logged in successfully (remember={remember}, ip={request.remote_addr}).")
+            # Audit log (no secrets): successful login
+            logger.info(f'AUDIT: login_success client_id={user.client_id} ip={request.remote_addr} user_agent={request.headers.get("User-Agent")}')
             return jsonify({
                 "success": True,
                 "message": "Login successful.",
@@ -114,7 +135,9 @@ def login():
         else:
             attempts.append(now)
             session['login_attempts'] = attempts
-            logger.warning(f"Failed login attempt for Client ID: {client_id}")
+            logger.warning(f"Failed login attempt for Client ID: {client_id} from IP: {request.remote_addr}")
+            # Audit log (no secrets): failed login
+            logger.info(f'AUDIT: login_failed client_id={client_id} ip={request.remote_addr} user_agent={request.headers.get("User-Agent")}')
             return jsonify({"success": False, "message": "Invalid Client ID or password."}), 401
 
     except Exception as e:
@@ -190,20 +213,21 @@ def forgot_password():
                 "message": "If this email exists, a reset link has been sent."
             }), 200
         
-        # Generate secure reset token
+        # Generate secure reset token and store only its hash
         reset_token = secrets.token_urlsafe(32)
-        user.reset_token = reset_token
+        token_hash = _hash_reset_token(reset_token)
+        user.reset_token = token_hash
         user.reset_token_expiry = datetime.utcnow() + timedelta(hours=1)
         user.save()
         
-        logger.info(f"Password reset requested for user: {user.client_id}")
+        # Audit: password reset requested (do not include token in logs)
+        logger.info(f"Password reset requested for user: {user.client_id} from IP: {request.remote_addr}")
         
-        # TODO: Send email with reset link in production
-        # For development, return the token (remove this in production)
+        # TODO: Send email with reset link in production (link should embed the plaintext token)
+        # Note: We intentionally do NOT return the reset token in API responses.
         return jsonify({
             "success": True,
-            "message": "If this email exists, a reset link has been sent.",
-            "reset_token": reset_token  # Remove this in production!
+            "message": "If this email exists, a reset link has been sent."
         }), 200
         
     except Exception as e:
@@ -230,13 +254,16 @@ def reset_password():
                 "message": f"Password must be at least {PASSWORD_MIN_LENGTH} characters."
             }), 400
         
-        # Find user with valid token
+        # Find user with valid hashed token
+        token_hash = _hash_reset_token(token)
         user = User.objects(
-            reset_token=token,
+            reset_token=token_hash,
             reset_token_expiry__gte=datetime.utcnow()
         ).first()
         
         if not user:
+            logger.warning(f"Failed password reset attempt with invalid/expired token from IP: {request.remote_addr}")
+            logger.info(f'AUDIT: password_reset_failed ip={request.remote_addr}')
             return jsonify({
                 "success": False,
                 "message": "Invalid or expired reset token."
@@ -249,6 +276,7 @@ def reset_password():
         user.save()
         
         logger.info(f"Password reset successful for user: {user.client_id}")
+        logger.info(f'AUDIT: password_reset_success client_id={user.client_id} ip={request.remote_addr}')
         return jsonify({
             "success": True,
             "message": "Password reset successful. Please log in with your new password."

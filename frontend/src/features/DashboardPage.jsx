@@ -495,7 +495,7 @@ const MarketMoversSection = ({ movers, isLoading, error, onRefresh, onTrade }) =
     const pageStocks = stocks.slice(pageStart, pageStart + MOVERS_PAGE_SIZE);
     const fillerCount = Math.max(0, MOVERS_PAGE_SIZE - pageStocks.length);
 
-    const showSkeleton = isLoading && stocks.length === 0;
+    const showSkeleton = isLoading;
     const showErrorState = error && stocks.length === 0;
 
     return (

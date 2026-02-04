@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { Outlet } from "react-router-dom";
 import Navbar from "./Navbar.jsx";
 import WatchlistSidebar from "./WatchlistSidebar.jsx";
@@ -12,6 +12,7 @@ const SIDEBAR_WIDTH = 340; // px – matches the visual reference width
 const DashboardLayout = () => {
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [navbarHeight, setNavbarHeight] = useState(NAVBAR_HEIGHT_DESKTOP);
+  const headerRef = useRef(null);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -21,7 +22,7 @@ const DashboardLayout = () => {
     const fallback = () => (window.innerWidth >= 1024 ? NAVBAR_HEIGHT_DESKTOP : NAVBAR_HEIGHT_MOBILE);
 
     const updateFromDom = () => {
-      const header = document.querySelector("header");
+      const header = headerRef.current;
       if (header) {
         const measured = Math.round(header.getBoundingClientRect().height);
         if (Number.isFinite(measured) && measured > 0) {
@@ -35,7 +36,7 @@ const DashboardLayout = () => {
     updateFromDom();
 
     const observer = window.ResizeObserver ? new ResizeObserver(updateFromDom) : null;
-    const header = document.querySelector("header");
+    const header = headerRef.current;
     if (observer && header) {
       observer.observe(header);
     }
@@ -59,7 +60,7 @@ const DashboardLayout = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      <Navbar onToggleSidebar={() => setIsMobileSidebarOpen(true)} />
+      <Navbar ref={headerRef} onToggleSidebar={() => setIsMobileSidebarOpen(true)} />
 
       {/* Desktop layout */}
       <div className="flex relative" style={layoutPaddingStyle}>

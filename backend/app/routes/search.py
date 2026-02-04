@@ -1,83 +1,99 @@
 import logging
 from flask import Blueprint, request, jsonify
+from flask_login import login_required
 from app.models import AQScrip
 from mongoengine.queryset.visitor import Q
+from app import limiter
 
-# --- Configuration ---
 logger = logging.getLogger(__name__)
 search_bp = Blueprint("search", __name__)
 
-# --- Constants ---
 SEARCH_RESULT_LIMIT = 15
+MAX_QUERY_LENGTH = 64
 
-# --- API Route ---
+def _normalize_query(value: str) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+def _format_scrip_result(scrip):
+    company_name = scrip.scripfullname.split('-')[0].strip() if scrip.scripfullname and '-' in scrip.scripfullname else (scrip.scripname or scrip.scripshortname)
+    short = (scrip.scripshortname or "").strip().upper()
+    exch = (scrip.exchangename or "").strip().upper()
+    return {
+        "symbol": f"{short}.{exch}",
+        "name": company_name,
+        "exchange": exch,
+        "scripcode": scrip.scripcode,
+    }
+
+
+def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT) -> list:
+    q = _normalize_query(query)
+    if len(q) < 2:
+        return []
+
+    if len(q) > MAX_QUERY_LENGTH:
+        q = q[:MAX_QUERY_LENGTH]
+
+    filters = (
+        Q(optiontype="EQ") &
+        Q(issuspended="N") &
+        Q(isbanscrip="N")
+    )
+
+    results = []
+    seen = set()
+
+    def _append_from_qs(qs):
+        nonlocal results, seen
+        for scrip in qs:
+            short = (scrip.scripshortname or "").strip()
+            if not short:
+                continue
+            exch = (scrip.exchangename or "").strip()
+            key = (short.upper(), exch.upper(), int(scrip.scripcode) if scrip.scripcode is not None else None)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(_format_scrip_result(scrip))
+            if len(results) >= max_results:
+                break
+
+    prefix_query = (
+        Q(scripshortname__istartswith=q) |
+        Q(scripname__istartswith=q) |
+        Q(scripfullname__istartswith=q)
+    )
+
+    qs = AQScrip.objects(filters & prefix_query & Q(exchangename="NSE")).limit(max_results - len(results))
+    _append_from_qs(qs)
+
+    return results
+
 
 @search_bp.route("/search", methods=["GET"])
+@limiter.limit("30 per minute")
+@login_required
 def search_stocks():
-    """
-    Searches for tradable equity stocks across multiple exchanges (NSE and BSE)
-    based on a user's query. It prioritizes symbols and short names for relevance.
-    """
-    query = request.args.get("q", "").strip()
-    if len(query) < 2:
-        # Avoid broad, slow queries; return an empty list for short inputs.
-        return jsonify([])
+    query = _normalize_query(request.args.get("q", ""))
+    if len(query) > MAX_QUERY_LENGTH:
+        query = query[:MAX_QUERY_LENGTH]
+
+    if not query or len(query) < 2:
+        return jsonify({"success": False, "message": "Query parameter 'q' is required and must be at least 2 characters."}), 400
 
     try:
-        # Convert query to uppercase for matching with stock symbols
-        query_upper = query.upper()
-        
-        # --- Build a Multi-Field Search Query ---
-        # This query looks for the search term in the most relevant fields.
-        # It's case-insensitive ('i' prefix) and checks for substrings ('contains').
-        search_query = (
-            Q(scripshortname__icontains=query) |
-            Q(scripname__icontains=query) |
-            Q(scripfullname__icontains=query)
+        if 'page' in request.args or 'limit' in request.args:
+            return jsonify({"success": False, "message": "Pagination parameters are not supported."}), 400
+        results = _perform_search(query, max_results=SEARCH_RESULT_LIMIT)
+
+        logger.info(
+            "Search query '%s' results=%s",
+            query,
+            len(results)
         )
+        return jsonify(results), 200
+    except Exception:
+        logger.exception("Error during stock search for query '%s'", query)
+        return jsonify({"success": False, "message": "An internal server error occurred. Please try again later."}), 500
 
-        # --- Filter for Relevant, Tradable Stocks ---
-        # This ensures we only return active, regular equity stocks.
-        # Using optiontype='EQ' to filter for equity stocks (instrumentname is whitespace-padded)
-        filters = (
-            Q(optiontype="EQ") &
-            Q(issuspended="N") &
-            Q(isbanscrip="N")
-        )
 
-        # --- Execute the Query and Format Results ---
-        # Prioritize NSE results, but also include results from BSE.
-        # The limit prevents the response from becoming too large and slow.
-        results = AQScrip.objects(filters & search_query).limit(SEARCH_RESULT_LIMIT)
-        
-        logger.info(f"Search query '{query}' returned {results.count()} results")
-
-        formatted_results = []
-        seen_symbols = set()  # Avoid duplicates across exchanges
-        
-        for scrip in results:
-            # Create the symbol in the format expected by the frontend
-            symbol = f"{scrip.scripshortname}.{scrip.exchangename}"
-            
-            # Skip duplicates (prioritize NSE over BSE)
-            if scrip.scripshortname in seen_symbols and scrip.exchangename != "NSE":
-                continue
-            seen_symbols.add(scrip.scripshortname)
-            
-            # Clean up the company name for better display on the frontend.
-            company_name = scrip.scripfullname.split('-')[0].strip() if scrip.scripfullname and '-' in scrip.scripfullname else (scrip.scripname or scrip.scripshortname)
-            
-            formatted_results.append({
-                "symbol": symbol,
-                "name": company_name,
-                "exchange": scrip.exchangename,
-                # The scripcode is critical for subscribing to real-time data.
-                "scripcode": scrip.scripcode
-            })
-        
-        # The frontend expects a simple array of search results.
-        return jsonify(formatted_results)
-
-    except Exception as e:
-        logger.error(f"Error during stock search for query '{query}': {e}", exc_info=True)
-        return jsonify({"success": False, "message": "An internal server error occurred during search."}), 500

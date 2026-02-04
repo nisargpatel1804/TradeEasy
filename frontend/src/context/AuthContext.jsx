@@ -34,6 +34,27 @@ export const AuthProvider = ({ children }) => {
     navigate('/');
   }, [navigate]);
 
+  // Clears local UI caches (search results, in-memory caches, etc.) when auth changes.
+  const clearLocalSearchCaches = useCallback(() => {
+    try {
+      // Emit an event so components using hooks (e.g. search) can clear their local state.
+      window.dispatchEvent(new CustomEvent('clear-local-search-caches'));
+      // As a fallback, attempt to clear anything in localStorage namespaced for search.
+      try {
+        Object.keys(localStorage).forEach(k => {
+          if (k && k.toLowerCase().includes('search')) {
+            localStorage.removeItem(k);
+          }
+        });
+      } catch (err) {
+        // localStorage may be unavailable in some environments - ignore.
+      }
+    } catch (err) {
+      // Silently ignore to avoid breaking auth flow.
+      console.debug('clearLocalSearchCaches failed', err);
+    }
+  }, []);
+
   /**
    * Memoized logout function. It calls the logout service, updates state,
    * and navigates the user to the login page only on successful logout.
@@ -72,19 +93,22 @@ export const AuthProvider = ({ children }) => {
         if (data.isAuthenticated) {
           setUser(data.user);
           setIsAuthenticated(true);
+        } else {
+          clearLocalSearchCaches();
         }
       } catch (error) {
         // This is expected if the user is not logged in.
         // The api.js interceptor will handle the 401.
         setUser(null);
         setIsAuthenticated(false);
+        clearLocalSearchCaches();
       } finally {
         setIsLoading(false);
       }
     };
     
     verifyUserSession();
-  }, []);
+  }, [clearLocalSearchCaches]);
 
   // Effect to listen for the global 'unauthorized' event dispatched by api.js
   useEffect(() => {

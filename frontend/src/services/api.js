@@ -61,7 +61,6 @@ const handleApiError = (error) => {
 
   // Handle Session Expiry (401)
   if (error.response?.status === 401 && !isAuthEndpoint) {
-    // Dispatch event for the AuthContext to handle logout/redirect.
     // Throttle to avoid storms when many requests fail at once.
     const now = Date.now();
     if (now - lastUnauthorizedDispatchAt > 1000) {
@@ -98,6 +97,30 @@ apiClient.interceptors.response.use(
 const fetchData = async (endpoint, options = {}) => {
   const response = await apiClient.get(endpoint, options);
   return response.data;
+};
+
+// Simple retry wrapper for transient errors (network failures, 5xx errors). Uses exponential backoff.
+const withRetry = async (fn, attempts = 2) => {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      // Do not retry if the request was intentionally cancelled/aborted
+      if (err?.code === 'ERR_CANCELED' || err?.name === 'AbortError' || err?.name === 'CanceledError') {
+        throw err;
+      }
+      // Retry on network errors (no response) or server 5xx
+      if (!err.response || (err.response && err.response.status >= 500) || err.code === 'ECONNABORTED') {
+        const delay = 100 * Math.pow(2, i);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 };
 
 // =========================================================================
@@ -150,11 +173,16 @@ export const fetchStockData = getStockDetails; // Alias
 export const batchGetStockData = (symbols) => fetchData('/stocks/batch', { params: { symbols: symbols.join(',') } });
 
 // --- Search ---
-export const searchStocks = (query) => {
-    if (!query || query.trim().length < 2) {
-        return Promise.resolve([]);
+export const searchStocks = async (query, options = {}) => {
+    const q = (query || '').trim().replace(/\s+/g, ' ');
+    if (!q || q.length < 2) {
+    return [];
     }
-    return fetchData('/search', { params: { q: query } });
+    const params = { q };
+
+  const response = await withRetry(() => apiClient.get('/search', { params, signal: options?.signal }));
+    const data = response.data;
+    return Array.isArray(data) ? data : (data?.results || []);
 };
 
 // --- Trading ---
@@ -182,7 +210,7 @@ export const getWatchlists = () => fetchData('/watchlists');
 export const fetchWatchlists = getWatchlists; // Alias
 export const createWatchlist = (name) => apiClient.post('/watchlists', { name }).then(res => res.data);
 export const deleteWatchlist = (watchlistName) => apiClient.delete(`/watchlists/${watchlistName}`).then(res => res.data);
-export const addStockToWatchlist = (watchlistName, stockData) => apiClient.post(`/watchlists/${watchlistName}/stocks`, stockData).then(res => res.data);
+export const addStockToWatchlist = (watchlistName, stockData) => withRetry(() => apiClient.post(`/watchlists/${watchlistName}/stocks`, stockData)).then(res => res.data);
 export const removeStockFromWatchlist = (watchlistName, symbol) => apiClient.delete(`/watchlists/${watchlistName}/stocks/${symbol}`).then(res => res.data);
 export const renameWatchlist = (watchlistName, newName) => apiClient.patch(`/watchlists/${watchlistName}`, { new_name: newName }).then(res => res.data);
 

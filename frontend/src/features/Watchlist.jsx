@@ -1,11 +1,7 @@
-import { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "react-hot-toast";
-import debounce from "lodash.debounce";
-import { motion, AnimatePresence } from "framer-motion";
 
-import * as api from "../services/api.js";
-import priceUpdateService from "../services/priceUpdateService.js";
 import { useDataContext } from "../context/DataContext.jsx";
 import { useSocket } from "../context/SocketContext.jsx";
 
@@ -15,23 +11,26 @@ import { Skeleton } from "../assets/ui/skeleton.jsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../assets/ui/table.jsx";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../assets/ui/dialog.jsx";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "../assets/ui/dropdown-menu.jsx";
-import { Search, Plus, PlusCircle, Trash2, Loader2, AlertTriangle, ArrowUpDown, ChevronUp, ChevronDown, ArrowLeft } from "lucide-react";
+import { PlusCircle, Trash2, Loader2, AlertTriangle, ArrowUpDown, ChevronUp, ChevronDown, ArrowLeft } from "lucide-react";
 
 import TradeForm from "./TradeForm.jsx";
 import { Card, CardContent } from "../assets/ui/card.jsx";
+import StockSearch from "./StockSearch.jsx";
 
 const Watchlist = () => {
     const navigate = useNavigate();
-    const { watchlistsData, getWatchlists } = useDataContext();
+    const {
+        watchlistsData,
+        isLoadingWatchlists,
+        livePrices,
+        createWatchlist,
+        addStockToWatchlist,
+        removeStockFromWatchlist,
+    } = useDataContext();
     const { connectionStatus } = useSocket();
 
-    const [watchlists, setWatchlists] = useState([]);
     const [activeWatchlistName, setActiveWatchlistName] = useState("");
-    const activeWatchlistNameRef = useRef("");
-    const [stocks, setStocks] = useState([]);
-    const [livePrices, setLivePrices] = useState({});
     const [sortConfig, setSortConfig] = useState({ column: null, direction: 'asc' });
-    const [isLoading, setIsLoading] = useState(true);
     const [showTradeModal, setShowTradeModal] = useState(false);
     const [isTradeSubmitting, setIsTradeSubmitting] = useState(false);
     const [tradeCloseRequested, setTradeCloseRequested] = useState(false);
@@ -40,6 +39,8 @@ const Watchlist = () => {
     const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
     const [newWatchlistName, setNewWatchlistName] = useState("");
     const [isSavingWatchlist, setIsSavingWatchlist] = useState(false);
+
+    const watchlists = watchlistsData?.watchlists ?? [];
 
     const handleSort = useCallback((column) => {
         setSortConfig(prev => {
@@ -88,85 +89,20 @@ const Watchlist = () => {
         [pickActiveWatchlist, watchlists, activeWatchlistName]
     );
 
-    useEffect(() => {
-        activeWatchlistNameRef.current = activeWatchlistName;
-    }, [activeWatchlistName]);
+    const stocks = activeWatchlist?.stocks || [];
 
     useEffect(() => {
-        setStocks(activeWatchlist?.stocks || []);
-    }, [activeWatchlist]);
-
-    // --- Data Fetching and Initialization ---
-    useEffect(() => {
-        const initialize = async () => {
-            setIsLoading(true);
-            try {
-                const data = watchlistsData || await getWatchlists(true);
-                const resolvedWatchlists = Array.isArray(data?.watchlists) ? data.watchlists : [];
-                setWatchlists(resolvedWatchlists);
-
-                const nextActive = pickActiveWatchlist(resolvedWatchlists, activeWatchlistNameRef.current);
-                setActiveWatchlistName(nextActive?.name || "");
-            } catch (error) {
-                toast.error("Failed to load watchlists.");
-            } finally {
-                setIsLoading(false);
-            }
-        };
-        initialize();
-    }, [getWatchlists, pickActiveWatchlist, watchlistsData]);
-
-    const applyWatchlistUpdate = useCallback((updatedWatchlist) => {
-        if (!updatedWatchlist?.name) {
+        if (!Array.isArray(watchlists) || watchlists.length === 0) {
+            setActiveWatchlistName("");
             return;
         }
 
-        setWatchlists(prev => {
-            const exists = prev.some(w => w.name === updatedWatchlist.name);
-            const next = exists
-                ? prev.map(w => (w.name === updatedWatchlist.name ? updatedWatchlist : w))
-                : [...prev, updatedWatchlist];
-            return next;
-        });
-
-        if (updatedWatchlist.name === activeWatchlistNameRef.current) {
-            setStocks(updatedWatchlist.stocks || []);
+        const activeExists = watchlists.some(w => w.name === activeWatchlistName);
+        if (!activeExists) {
+            const nextActive = pickActiveWatchlist(watchlists, activeWatchlistName);
+            setActiveWatchlistName(nextActive?.name || "");
         }
-    }, []);
-
-    const syncWatchlists = useCallback(async (preferredName) => {
-        const data = await getWatchlists(true);
-        const resolvedWatchlists = Array.isArray(data?.watchlists) ? data.watchlists : [];
-        setWatchlists(resolvedWatchlists);
-
-        const nextActive = pickActiveWatchlist(
-            resolvedWatchlists,
-            preferredName || activeWatchlistNameRef.current
-        );
-        setActiveWatchlistName(nextActive?.name || "");
-        return nextActive;
-    }, [getWatchlists, pickActiveWatchlist]);
-
-    // --- Real-time Price Updates ---
-    useEffect(() => {
-        const unsubscribe = priceUpdateService.subscribe(update => {
-            setLivePrices(prev => {
-                if (update?.type === 'snapshot' || update?.type === 'reset') {
-                    return update?.allPrices || {};
-                }
-
-                if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
-                    return {
-                        ...prev,
-                        ...update.changedPrices,
-                    };
-                }
-
-                return prev;
-            });
-        });
-        return () => unsubscribe();
-    }, []);
+    }, [activeWatchlistName, pickActiveWatchlist, watchlists]);
 
     // --- Memoized Stock List with Live Data ---
     const stocksWithLiveData = useMemo(() => {
@@ -242,64 +178,7 @@ const Watchlist = () => {
         return sorted;
     }, [stocks, livePrices, sortConfig]);
 
-    // --- Initial Snapshot Fallback ---
-    useEffect(() => {
-        if (!Array.isArray(stocks) || stocks.length === 0) {
-            return;
-        }
-
-        const symbolsNeedingSnapshot = Array.from(new Set(
-            stocks
-                .map(stock => stock?.symbol)
-                .filter(Boolean)
-                .filter(symbol => !priceUpdateService.getLatestPrice(symbol))
-        ));
-
-        if (symbolsNeedingSnapshot.length === 0) {
-            return;
-        }
-
-        let isActive = true;
-
-        const fetchInitialSnapshot = async () => {
-            try {
-                const response = await api.batchGetStockData(symbolsNeedingSnapshot);
-                const batchData = response?.data || {};
-                const priceMap = {};
-
-                symbolsNeedingSnapshot.forEach(fullSymbol => {
-                    const baseSymbol = fullSymbol.includes('.') ? fullSymbol.split('.')[0] : fullSymbol;
-                    const apiPayload = batchData?.[baseSymbol];
-                    if (!apiPayload || apiPayload.error) {
-                        return;
-                    }
-
-                    priceMap[fullSymbol] = {
-                        symbol: fullSymbol,
-                        ltp: apiPayload.ltp,
-                        change: apiPayload.change,
-                        percent_change: apiPayload.percent_change,
-                        volume: apiPayload.volume,
-                        price_source: apiPayload.price_source || 'ltp',
-                        last_updated: apiPayload.last_updated,
-                        entityType: 'stock',
-                    };
-                });
-
-                if (isActive && Object.keys(priceMap).length > 0) {
-                    priceUpdateService.seedPrices(priceMap);
-                }
-            } catch (error) {
-                // Non-critical: websocket updates will fill prices; this just seeds initial snapshot.
-            }
-        };
-
-        fetchInitialSnapshot();
-
-        return () => {
-            isActive = false;
-        };
-    }, [stocks]);
+    const isLoading = isLoadingWatchlists && !watchlistsData;
 
     // --- Handlers ---
     const handleTradeClick = (stock, action) => {
@@ -310,34 +189,17 @@ const Watchlist = () => {
     
     const handleRemoveStock = async (watchlistName, symbol) => {
         const toastId = toast.loading(`Removing ${symbol}...`);
-        let watchlistNameForSync = watchlistName;
         try {
-            const response = await api.removeStockFromWatchlist(watchlistName, symbol);
-            const updatedWatchlist = response?.watchlist;
-            if (updatedWatchlist) {
-                applyWatchlistUpdate(updatedWatchlist);
-                watchlistNameForSync = updatedWatchlist.name;
-            }
-
+            await removeStockFromWatchlist(watchlistName, symbol);
             toast.success(`${symbol} removed.`, { id: toastId });
         } catch (error) {
             toast.error(error.message || "Failed to remove stock.", { id: toastId });
             return;
         }
-
-        try {
-            await syncWatchlists(watchlistNameForSync);
-        } catch (refreshError) {
-            // Non-critical: local state already updated.
-        }
     };
     
     const handleSelectWatchlist = (name) => {
         setActiveWatchlistName(name);
-        const newActiveWl = watchlists.find(w => w.name === name);
-        if (newActiveWl) {
-            setStocks(newActiveWl.stocks || []);
-        }
     };
 
     const handleAddStock = async (stock) => {
@@ -359,20 +221,14 @@ const Watchlist = () => {
         }
 
         const toastId = toast.loading(`Adding ${stock.symbol}...`);
-        let watchlistNameForSync = targetWatchlist.name;
         try {
-            const payload = await api.addStockToWatchlist(targetWatchlist.name, {
+            const exchange = (stock.exchange || (stock.symbol?.includes('.') ? stock.symbol.split('.').pop() : '') || '').toUpperCase();
+            await addStockToWatchlist(targetWatchlist.name, {
                 symbol: stock.symbol,
                 name: stock.name,
-                scripcode: stock.scripcode
+                scripcode: stock.scripcode,
+                exchange,
             });
-
-            const updatedWatchlist = payload?.watchlist;
-            if (updatedWatchlist) {
-                applyWatchlistUpdate(updatedWatchlist);
-                watchlistNameForSync = updatedWatchlist.name;
-            }
-
             toast.success(`${stock.symbol} added to ${targetWatchlist.name}`, { id: toastId });
         } catch (error) {
             const friendlyMessage = error?.status === 409
@@ -380,12 +236,6 @@ const Watchlist = () => {
                 : (error?.message || `Failed to add ${stock.symbol}`);
             toast.error(friendlyMessage, { id: toastId });
             return false;
-        }
-
-        try {
-            await syncWatchlists(watchlistNameForSync);
-        } catch (refreshError) {
-            // Non-critical: local state already updated.
         }
         return true;
     };
@@ -412,16 +262,12 @@ const Watchlist = () => {
         const toastId = toast.loading(`Creating '${trimmedName}'...`);
         setIsSavingWatchlist(true);
         try {
-            const response = await api.createWatchlist(trimmedName);
+            const response = await createWatchlist(trimmedName);
             const createdWatchlist = response?.watchlist;
-            if (createdWatchlist) {
-                applyWatchlistUpdate(createdWatchlist);
-            }
-
             toast.success(`'${trimmedName}' created.`, { id: toastId });
             setNewWatchlistName("");
             setIsCreateDialogOpen(false);
-            await syncWatchlists(createdWatchlist?.name || trimmedName);
+            setActiveWatchlistName(createdWatchlist?.name || trimmedName);
         } catch (error) {
             toast.error(error.message || "Failed to create watchlist.", { id: toastId });
         } finally {
@@ -452,6 +298,8 @@ const Watchlist = () => {
                     <StockSearch
                         activeWatchlist={activeWatchlist}
                         onAddStock={handleAddStock}
+                        onResultClick={handleAddStock}
+                        placeholder="Search to add stocks..."
                     />
                     <WatchlistSelector
                         watchlists={watchlists}
@@ -690,7 +538,7 @@ const StockRow = ({ stock, onTrade, onRemove }) => {
 
     return (
         <TableRow 
-            className="cursor-pointer hover:bg-slate-50" 
+            className="cursor-pointer hover:bg-slate-50"
             onClick={() => navigate(`/stock/${cleanSymbol || stock.symbol}`)}
         >
             <TableCell>
@@ -843,143 +691,6 @@ const CompactStockCardSkeleton = () => (
         </div>
     </div>
 );
-
-const StockSearch = ({ activeWatchlist, onAddStock }) => {
-    const [query, setQuery] = useState("");
-    const [results, setResults] = useState([]);
-    const [isLoading, setIsLoading] = useState(false);
-    const [isFocused, setIsFocused] = useState(false);
-    const searchRef = useRef(null);
-
-    useEffect(() => {
-        const handleClickOutside = (event) => {
-            if (searchRef.current && !searchRef.current.contains(event.target)) {
-                setIsFocused(false);
-            }
-        };
-        document.addEventListener("mousedown", handleClickOutside);
-        return () => document.removeEventListener("mousedown", handleClickOutside);
-    }, []);
-
-    const debouncedSearch = useCallback(debounce(async (searchQuery) => {
-        if (searchQuery.length < 2) {
-            setResults([]);
-            setIsLoading(false);
-            return;
-        }
-        setIsLoading(true);
-        try {
-            const data = await api.searchStocks(searchQuery);
-            setResults(data || []);
-        } catch (error) {
-            setResults([]);
-        } finally {
-            setIsLoading(false);
-        }
-    }, 300), []);
-
-    useEffect(() => {
-        debouncedSearch(query);
-    }, [query, debouncedSearch]);
-
-    const isStockInWatchlist = (stock) => {
-        if (!activeWatchlist?.stocks) return false;
-        return activeWatchlist.stocks.some(s => 
-            s.symbol === stock.symbol || s.scripcode === stock.scripcode
-        );
-    };
-
-    const handleAddStock = async (e, stock) => {
-        e.preventDefault();
-        e.stopPropagation();
-        
-        if (!activeWatchlist) {
-            toast.error("Select a watchlist before adding stocks.");
-            return;
-        }
-
-        // Check if stock is already in the watchlist
-        if (isStockInWatchlist(stock)) {
-            toast.error(`${stock.symbol} is already in ${activeWatchlist.name}`, {
-                duration: 2000,
-                icon: "ℹ️"
-            });
-            return;
-        }
-
-        const wasAdded = await onAddStock?.(stock);
-        if (wasAdded) {
-            setQuery("");
-            setResults([]);
-            setIsFocused(false);
-        }
-    };
-
-    const showDropdown = isFocused && query.length > 0;
-
-    return (
-         <div className="relative w-full max-w-xs" ref={searchRef}>
-            <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-                <Input
-                    placeholder="Search to add stocks..."
-                    className="pl-10"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    onFocus={() => setIsFocused(true)}
-                />
-                {isLoading && <Loader2 className="h-4 w-4 animate-spin absolute right-3 top-1/2 -translate-y-1/2 text-gray-400" />}
-            </div>
-            <AnimatePresence>
-                {showDropdown && (
-                <motion.div
-                    className="absolute z-20 left-0 right-0 mt-2 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-lg max-h-80 overflow-y-auto"
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -10 }}
-                >
-                    {isLoading && results.length === 0 ? (
-                        <div className="p-4 text-center text-sm text-gray-500">Searching...</div>
-                    ) : results.length > 0 ? (
-                    results.map((stock) => {
-                        const alreadyAdded = isStockInWatchlist(stock);
-                        return (
-                            <div 
-                                key={stock.symbol} 
-                                className="flex items-center justify-between border-b border-slate-100 px-4 py-3 last:border-b-0 hover:bg-slate-50"
-                            >
-                                <div className="flex-1 min-w-0">
-                                    <div className="font-medium">{stock.symbol}</div>
-                                    <div className="truncate text-sm text-slate-600">{stock.name}</div>
-                                </div>
-                                {alreadyAdded ? (
-                                    <div className="px-2 text-xs font-medium text-emerald-600">
-                                        Added ✓
-                                    </div>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        onClick={(e) => handleAddStock(e, stock)}
-                                        className="ml-2 shrink-0 rounded-xl p-2 transition-colors hover:bg-slate-200"
-                                        aria-label={`Add ${stock.symbol} to watchlist`}
-                                    >
-                                        <Plus className="h-4 w-4" />
-                                    </button>
-                                )}
-                            </div>
-                        );
-                    })
-                    ) : (
-                    <div className="p-4 text-center text-sm text-gray-500">
-                        {query.length > 1 ? "No results found." : "Type to search..."}
-                    </div>
-                    )}
-                </motion.div>
-                )}
-            </AnimatePresence>
-        </div>
-    );
-}
 
 const WatchlistSelector = ({ watchlists, active, onSelect, onCreate }) => {
     return (
