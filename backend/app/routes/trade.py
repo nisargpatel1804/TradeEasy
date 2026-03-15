@@ -1,11 +1,9 @@
 import logging
 import secrets
 from decimal import Decimal
-from datetime import datetime
 from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
-from mongoengine import Q
-from app.models import Transaction, Holding, User
+from app.models import Holding, User
 from app.services.trade_executor import TradeExecutor
 from app.services.market_time import validate_order_timing, is_market_open, get_market_status_message, get_market_session, is_market_holiday
 # Import the centralized, cached function for all stock data lookups
@@ -18,6 +16,29 @@ trade_bp = Blueprint('trade', __name__)
 # Maximum order constraints
 MAX_ORDER_QUANTITY = 100000  # Maximum shares per order
 MAX_ORDER_VALUE = 10000000  # Maximum order value in rupees (1 crore)
+
+
+def _is_user_resetting(user_id) -> bool:
+    user_doc = User.objects(id=user_id).only('reset_in_progress').first()
+    return bool(getattr(user_doc, 'reset_in_progress', False))
+
+
+def _reset_in_progress_response():
+    return jsonify({
+        "success": False,
+        "message": "Portfolio reset in progress. Trading actions are temporarily blocked."
+    }), 423
+
+
+def _response_status_from_executor_error(message: str) -> int:
+    text = (message or '').lower()
+    if 'portfolio reset in progress' in text:
+        return 423
+    if 'insufficient' in text:
+        return 402
+    if 'already processed' in text:
+        return 409
+    return 500
 
 # --- Helper Functions ---
 
@@ -87,18 +108,7 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
     if order_type not in valid_order_types:
         return {"success": False, "message": f"Invalid order type. Must be one of: {', '.join(valid_order_types)}."}, 400
     
-    # 2. Circuit Breaker Check
-    if order_type in ['LIMIT', 'STOP_LIMIT'] and data.get('price'):
-        limit_price = float(data.get('price'))
-        api_data_preview = get_stock_data_from_api(symbol_input)
-        if api_data_preview and api_data_preview.get('ltp', 0) > 0:
-            current_price = float(api_data_preview['ltp'])
-            price_deviation = abs((limit_price - current_price) / current_price) * 100
-            if price_deviation > 20:
-                return {
-                    "success": False,
-                    "message": f"Order price deviates {price_deviation:.1f}% from current price. Max 20% allowed."
-                }, 400
+    # 2. Circuit Breaker check and further price-dependent validations will happen after fetching live data.
 
     # 3. Advanced Params
     is_valid, error_msg = _validate_advanced_order_params(order_type, data)
@@ -112,7 +122,7 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
 
     quantity = int(quantity_input)
 
-    # 5. Live Data
+    # 4.5. Live Data (fetch once for reuse)
     api_data = get_stock_data_from_api(symbol_input)
     if not api_data:
         return {"success": False, "message": f"Instrument '{format_symbol(symbol_input)}' is not available."}, 404
@@ -120,6 +130,18 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
     current_ltp = Decimal(str(api_data.get('ltp', 0)))
     if current_ltp <= 0:
         return {"success": False, "message": "Could not fetch valid market price."}, 502
+
+    # 2 (circuit breaker) now that we have price data
+    if order_type in ['LIMIT', 'STOP_LIMIT'] and data.get('price'):
+        limit_price = float(data.get('price'))
+        # only apply if we have a valid current price
+        if current_ltp > 0:
+            price_deviation = abs((limit_price - float(current_ltp)) / float(current_ltp)) * 100
+            if price_deviation > 20:
+                return {
+                    "success": False,
+                    "message": f"Order price deviates {price_deviation:.1f}% from current price. Max 20% allowed."
+                }, 400
 
     estimated_value = current_ltp * Decimal(quantity)
     if estimated_value > Decimal(str(MAX_ORDER_VALUE)):
@@ -196,6 +218,9 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
 @login_required
 def buy():
     """Handles a buy order using TradeExecutor."""
+    if _is_user_resetting(current_user.id):
+        return _reset_in_progress_response()
+
     data = request.get_json() or {}
     result, status_code = _validate_and_process_trade_request('BUY', data)
     
@@ -208,8 +233,9 @@ def buy():
     # Pre-check funds for immediate feedback (Executor does atomic check, but this saves a DB hit)
     user = current_user
     if trade_data['status'] == 'EXECUTED':
-        # Check against available balance
-        if user.balance < trade_data['total_amount']:
+        # Check against available balance (balance - reserved balance)
+        available = Decimal(str(user.balance)) - Decimal(str(user.reserved_balance))
+        if available < trade_data['total_amount']:
             return jsonify({"success": False, "message": "Insufficient funds."}), 402
             
         # DELEGATE TO EXECUTOR
@@ -242,17 +268,22 @@ def buy():
             idempotency_key=idempotency_key,
             bracket_order_type='ENTRY' if trade_data['order_type'] == 'BRACKET' else None
         )
+        if response.get('success'):
+            response.setdefault('status', 'PENDING')
 
     if response.get('success'):
         return jsonify(response), 200
     else:
-        return jsonify(response), 400 if "Insufficient" in response.get('message', '') else 500
+        return jsonify(response), _response_status_from_executor_error(response.get('message'))
 
 
 @trade_bp.route('/sell', methods=['POST'])
 @login_required
 def sell():
     """Handles a sell order using TradeExecutor."""
+    if _is_user_resetting(current_user.id):
+        return _reset_in_progress_response()
+
     data = request.get_json() or {}
     result, status_code = _validate_and_process_trade_request('SELL', data)
     
@@ -298,23 +329,89 @@ def sell():
             idempotency_key=idempotency_key,
             bracket_order_type='ENTRY' if trade_data['order_type'] == 'BRACKET' else None
         )
+        if response.get('success'):
+            response.setdefault('status', 'PENDING')
 
     if response.get('success'):
         return jsonify(response), 200
     else:
-        return jsonify(response), 400 if "Insufficient" in response.get('message', '') else 500
+        return jsonify(response), _response_status_from_executor_error(response.get('message'))
 
 
 @trade_bp.route('/cancel-order/<order_id>', methods=['DELETE'])
 @login_required
 def cancel_order(order_id):
     """Cancel a pending order via TradeExecutor."""
+    if _is_user_resetting(current_user.id):
+        return _reset_in_progress_response()
+
     response = TradeExecutor.cancel_order(current_user.id, order_id)
     
     status = 200 if response.get('success') else 400
     if not response.get('success') and "not found" in response.get('message', '').lower():
         status = 404
         
+    return jsonify(response), status
+
+
+@trade_bp.route('/modify-order/<order_id>', methods=['PATCH'])
+@login_required
+def modify_order(order_id):
+    """Modify pending order quantity and/or price without cancel/re-create."""
+    if _is_user_resetting(current_user.id):
+        return _reset_in_progress_response()
+
+    data = request.get_json() or {}
+
+    quantity = data.get('quantity')
+    price = data.get('price')
+
+    if quantity is None and price is None:
+        return jsonify({"success": False, "message": "Provide at least one field to modify (quantity or price)."}), 400
+
+    try:
+        parsed_quantity = None
+        parsed_price = None
+
+        if quantity is not None:
+            parsed_quantity = int(quantity)
+            if parsed_quantity <= 0:
+                return jsonify({"success": False, "message": "Quantity must be greater than 0."}), 400
+            if parsed_quantity > MAX_ORDER_QUANTITY:
+                return jsonify({"success": False, "message": f"Order quantity exceeds maximum limit of {MAX_ORDER_QUANTITY:,} shares."}), 400
+
+        if price is not None:
+            parsed_price = float(price)
+            if parsed_price <= 0:
+                return jsonify({"success": False, "message": "Price must be greater than 0."}), 400
+            if parsed_quantity:
+                if Decimal(str(parsed_price)) * Decimal(parsed_quantity) > Decimal(str(MAX_ORDER_VALUE)):
+                    return jsonify({"success": False, "message": f"Order value exceeds limit of ₹{MAX_ORDER_VALUE:,}."}), 400
+
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Quantity/price must be valid numbers."}), 400
+
+    response = TradeExecutor.modify_pending_order(
+        user_id=current_user.id,
+        order_id=order_id,
+        new_quantity=parsed_quantity,
+        new_price=parsed_price,
+    )
+
+    if response.get('success'):
+        return jsonify(response), 200
+
+    message = response.get('message', '')
+    status = 400
+    if 'not found' in message.lower():
+        status = 404
+    elif 'already processed' in message.lower() or 'in progress' in message.lower():
+        status = 409
+    elif 'insufficient' in message.lower():
+        status = 402
+    elif 'portfolio reset in progress' in message.lower():
+        status = 423
+
     return jsonify(response), status
 
 
@@ -325,6 +422,9 @@ def update_exit_plan():
     Create or update stoploss/target exit plan for an active holding.
     Delegates to TradeExecutor.modify_exit_plan for atomic OCO creation.
     """
+    if _is_user_resetting(current_user.id):
+        return _reset_in_progress_response()
+
     data = request.get_json() or {}
 
     symbol = data.get('symbol')

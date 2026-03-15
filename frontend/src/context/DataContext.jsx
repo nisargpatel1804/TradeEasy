@@ -40,9 +40,25 @@ export const DataProvider = ({ children }) => {
     setProfileData(data);
   }, []);
 
+  // A reference used to dedupe parallel profile fetches. When a request is
+  // in flight we store its promise here and return it to any additional
+  // callers.  Once the request settles the ref is cleared.
+  const inflightProfileRequest = useRef(null);
+
   const updateWatchlistsData = useCallback((data) => {
     watchlistsRef.current = data;
     setWatchlistsData(data);
+  }, []);
+
+  // Applies an in-place patch function to the current watchlists state without
+  // triggering a full network refetch.  Updates the ref synchronously so that
+  // any in-flight getWatchlists(force=false) call sees the latest data.
+  const patchWatchlistsData = useCallback((patchFn) => {
+    const current = watchlistsRef.current;
+    if (!current) return;
+    const next = { ...current, watchlists: patchFn(current.watchlists ?? []) };
+    watchlistsRef.current = next;
+    setWatchlistsData(next);
   }, []);
 
   const updateIndicesData = useCallback((data) => {
@@ -103,21 +119,33 @@ export const DataProvider = ({ children }) => {
         return profileRef.current;
       }
 
+      // If there is already an in-flight request and we're not forcing a
+      // fresh fetch, return the existing promise so callers are de-duped.
+      if (!force && inflightProfileRequest.current) {
+        return inflightProfileRequest.current;
+      }
+
       setIsLoadingProfile(true);
       setError(null);
 
-      try {
-  const response = await api.getProfile();
-  const profile = response?.profile ?? response ?? null;
-  updateProfileData(profile);
-        return profile;
-      } catch (err) {
-        console.error('Failed to load profile:', err);
-        setError(err.message || 'Could not load profile.');
-        throw err;
-      } finally {
-        setIsLoadingProfile(false);
-      }
+      const promise = (async () => {
+        try {
+          const response = await api.getProfile();
+          const profile = response?.profile ?? response ?? null;
+          updateProfileData(profile);
+          return profile;
+        } catch (err) {
+          console.error('Failed to load profile:', err);
+          setError(err.message || 'Could not load profile.');
+          throw err;
+        } finally {
+          setIsLoadingProfile(false);
+          inflightProfileRequest.current = null;
+        }
+      })();
+
+      inflightProfileRequest.current = promise;
+      return promise;
     },
     [isAuthenticated, updateProfileData]
   );
@@ -138,8 +166,8 @@ export const DataProvider = ({ children }) => {
       setIsLoadingWatchlists(true);
 
       try {
-  const response = await api.getWatchlists();
-  updateWatchlistsData(response);
+        const response = await api.getWatchlists();
+        updateWatchlistsData(response);
         return response;
       } catch (err) {
         console.error('Failed to load watchlists:', err);
@@ -157,46 +185,68 @@ export const DataProvider = ({ children }) => {
   const createWatchlist = useCallback(
     async (name) => {
       const response = await api.createWatchlist(name);
-      await getWatchlists(true);
+      if (response?.watchlist) {
+        patchWatchlistsData((prev) => [...prev, response.watchlist]);
+      } else {
+        await getWatchlists(true);
+      }
       return response;
     },
-    [getWatchlists]
+    [patchWatchlistsData, getWatchlists]
   );
 
   const renameWatchlist = useCallback(
     async (watchlistName, newName) => {
       const response = await api.renameWatchlist(watchlistName, newName);
-      await getWatchlists(true);
+      if (response?.watchlist) {
+        patchWatchlistsData((prev) =>
+          prev.map((w) => (w.name === watchlistName ? response.watchlist : w))
+        );
+      } else {
+        await getWatchlists(true);
+      }
       return response;
     },
-    [getWatchlists]
+    [patchWatchlistsData, getWatchlists]
   );
 
   const deleteWatchlist = useCallback(
     async (watchlistName) => {
       const response = await api.deleteWatchlist(watchlistName);
-      await getWatchlists(true);
+      patchWatchlistsData((prev) => prev.filter((w) => w.name !== watchlistName));
       return response;
     },
-    [getWatchlists]
+    [patchWatchlistsData]
   );
 
   const addStockToWatchlist = useCallback(
     async (watchlistName, stockData) => {
       const response = await api.addStockToWatchlist(watchlistName, stockData);
-      await getWatchlists(true);
+      if (response?.watchlist) {
+        patchWatchlistsData((prev) =>
+          prev.map((w) => (w.name === watchlistName ? response.watchlist : w))
+        );
+      } else {
+        await getWatchlists(true);
+      }
       return response;
     },
-    [getWatchlists]
+    [patchWatchlistsData, getWatchlists]
   );
 
   const removeStockFromWatchlist = useCallback(
     async (watchlistName, symbol) => {
       const response = await api.removeStockFromWatchlist(watchlistName, symbol);
-      await getWatchlists(true);
+      if (response?.watchlist) {
+        patchWatchlistsData((prev) =>
+          prev.map((w) => (w.name === watchlistName ? response.watchlist : w))
+        );
+      } else {
+        await getWatchlists(true);
+      }
       return response;
     },
-    [getWatchlists]
+    [patchWatchlistsData, getWatchlists]
   );
 
   const getInitialIndices = useCallback(
@@ -252,20 +302,31 @@ export const DataProvider = ({ children }) => {
     setError(null);
 
     try {
+      const profilePromise = (async () => {
+        if (window.__initialProfile) {
+          // consume the cached blob and avoid a network request
+          updateProfileData(window.__initialProfile);
+          try { window.__initialProfile = null; } catch {}
+          return updateProfileData;
+        }
+        return await getProfile(true);
+      })();
+
       await Promise.allSettled([
-        getProfile(true),
+        profilePromise,
         getWatchlists(true),
-        getInitialIndices(true),
       ]);
     } finally {
       setIsLoading(false);
     }
-  }, [getInitialIndices, getProfile, getWatchlists, isAuthenticated, resetState]);
+  }, [getProfile, getWatchlists, isAuthenticated, resetState]);
 
   // Effect to trigger the initial data fetch when the user's authentication state changes.
   useEffect(() => {
     fetchInitialData();
   }, [fetchInitialData]);
+
+  const setProfile = useCallback((p) => updateProfileData(p), [updateProfileData]);
 
   const contextValue = {
     profileData,
@@ -280,6 +341,7 @@ export const DataProvider = ({ children }) => {
     indicesError,
     getProfile,
     refreshProfile,
+    setProfile,
     getWatchlists,
     refreshWatchlists,
     createWatchlist,

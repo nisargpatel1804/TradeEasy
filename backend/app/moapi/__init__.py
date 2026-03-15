@@ -1,14 +1,20 @@
-"""
-Initialization file for the 'moapi' package.
+"""Shared exports and singleton helpers for Motilal Oswal integration."""
 
-This file makes the 'moapi' directory a Python package. This allows other
-parts of the application to cleanly import the modules contained within it,
-such as the MotilalOswalAPI client and the MOPacketParser.
-
-By exposing the main classes here, other modules can import them more
-concisely (e.g., from app.moapi import MotilalOswalAPI).
-"""
+from threading import Lock
 
 from .mo_api import MotilalOswalAPI
 from .packet_parser import MOPacketParser
+
+_client_instance = None
+_client_lock = Lock()
+
+
+def get_mo_api_client() -> MotilalOswalAPI:
+	"""Returns a process-wide MotilalOswalAPI client instance (lazy singleton)."""
+	global _client_instance
+	if _client_instance is None:
+		with _client_lock:
+			if _client_instance is None:
+				_client_instance = MotilalOswalAPI()
+	return _client_instance
 

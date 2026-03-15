@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "react-hot-toast";
-import * as api from "../services/api.js";
 import { useDataContext } from "../context/DataContext.jsx";
 import { useStockSearch } from "../hooks/useStockSearch.js";
 import { Input } from "../assets/ui/input.jsx";
@@ -17,10 +16,10 @@ const StockSearch = ({
   placeholder = "Search for stocks (e.g., RELIANCE)",
   containerClassName = "relative w-full max-w-md",
   inputClassName = "pl-10",
-  dropdownClassName = "absolute z-20 left-0 right-0 mt-2 bg-white dark:bg-gray-800 border rounded-xl shadow-lg overflow-hidden max-h-80 overflow-y-auto",
+  dropdownClassName = "absolute z-20 left-0 right-0 mt-2 max-h-80 overflow-y-auto overflow-hidden rounded-xl border border-slate-200 bg-white shadow-lg",
   showAddButton = true,
 }) => {
-  const { getWatchlists, watchlistsData } = useDataContext();
+  const { addStockToWatchlist, watchlistsData } = useDataContext();
   const [isFocused, setIsFocused] = useState(false);
   const searchRef = useRef(null);
   const lastSearchToastAtRef = useRef(0);
@@ -61,18 +60,47 @@ const StockSearch = ({
     setQuery,
     results,
     isLoading,
+    isLoadingMore,
+    hasMore,
+    loadMore,
     clearResults,
   } = useStockSearch({ onError: handleSearchError });
 
-  const isStockInWatchlist = (stock) => {
-    if (activeWatchlist?.stocks) {
-      return activeWatchlist.stocks.some((s) => s.symbol === stock.symbol || s.scripcode === stock.scripcode);
+  const handleDropdownScroll = useCallback((event) => {
+    const el = event?.currentTarget;
+    if (!el) return;
+    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (remaining < 80) {
+      loadMore();
     }
-    if (!watchlistsData?.watchlists) return false;
-    return watchlistsData.watchlists.some((watchlist) =>
-      watchlist.stocks.some((s) => s.symbol === stock.symbol || s.scripcode === stock.scripcode)
-    );
-  };
+  }, [loadMore]);
+
+  // Pre-built O(1) lookup set so isStockInWatchlist does not scan all lists on every render
+  const watchlistStockSet = useMemo(() => {
+    const symbolSet = new Set();
+    const scripcodeSet = new Set();
+    if (activeWatchlist?.stocks) {
+      activeWatchlist.stocks.forEach((s) => {
+        if (s.symbol) symbolSet.add(s.symbol);
+        if (s.scripcode != null) scripcodeSet.add(String(s.scripcode));
+      });
+    } else if (watchlistsData?.watchlists) {
+      watchlistsData.watchlists.forEach((wl) =>
+        wl.stocks.forEach((s) => {
+          if (s.symbol) symbolSet.add(s.symbol);
+          if (s.scripcode != null) scripcodeSet.add(String(s.scripcode));
+        })
+      );
+    }
+    return { symbolSet, scripcodeSet };
+  }, [activeWatchlist, watchlistsData]);
+
+  const isStockInWatchlist = useCallback(
+    (stock) =>
+      watchlistStockSet.symbolSet.has(stock.symbol) ||
+      watchlistStockSet.scripcodeSet.has(String(stock.scripcode)),
+    [watchlistStockSet]
+  );
 
   const handleAddStock = async (e, stock) => {
     e.stopPropagation();
@@ -111,9 +139,10 @@ const StockSearch = ({
 
     const toastId = toast.loading(`Adding ${stock.symbol}...`);
     try {
-      const res = await api.addStockToWatchlist(watchlistName, {
+      const res = await addStockToWatchlist(watchlistName, {
         symbol: stock.symbol,
         name: stock.name,
+        exchange: stock.exchange,
         scripcode: stock.scripcode,
       });
 
@@ -124,7 +153,6 @@ const StockSearch = ({
         toast.success(`${stock.symbol} added to ${watchlistName}`, { id: toastId });
       }
 
-      getWatchlists(true);
       setQuery("");
       clearResults();
       setIsFocused(false);
@@ -202,7 +230,7 @@ const StockSearch = ({
               </div>
             ) : results.length > 0 ? (
               <>
-                <div id="stock-search-list" role="listbox">
+                <div id="stock-search-list" role="listbox" onScroll={handleDropdownScroll} className="">
                   {results.map((stock, idx) => {
                     const alreadyAdded = isStockInWatchlist(stock);
                     return (
@@ -210,15 +238,15 @@ const StockSearch = ({
                         id={`stock-search-item-${idx}`}
                         key={stock.symbol}
                         role="option"
-                        className="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 border-b dark:border-gray-700 last:border-b-0 flex items-center justify-between cursor-pointer"
+                        className="flex cursor-pointer items-center justify-between border-b border-slate-100 px-4 py-3 last:border-b-0 hover:bg-slate-50"
                         onClick={() => handleSelectStock(stock)}
                       >
                         <div className="flex-1">
-                          <div className="font-medium">{stock.symbol}</div>
-                          <div className="text-sm text-gray-600 dark:text-gray-400 truncate">{stock.name}</div>
+                          <div className="font-medium text-slate-900">{stock.symbol}</div>
+                          <div className="truncate text-sm text-slate-500">{stock.name}</div>
                         </div>
                         {alreadyAdded ? (
-                          <div className="text-xs text-green-600 dark:text-green-400 font-medium px-2">
+                          <div className="px-2 text-xs font-medium text-emerald-600">
                             Added ✓
                           </div>
                         ) : (
@@ -226,7 +254,9 @@ const StockSearch = ({
                             <Button
                               variant="ghost"
                               size="icon"
+                              className="h-8 w-8 rounded-full border border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-100"
                               onClick={(e) => handleAddStock(e, stock)}
+                              aria-label={`Add ${stock.symbol} to watchlist`}
                             >
                               <Plus className="h-4 w-4" />
                             </Button>
@@ -237,9 +267,21 @@ const StockSearch = ({
                   })}
                 </div>
 
+                {isLoadingMore && (
+                  <div className="flex items-center justify-center gap-2 border-t border-slate-100 p-2 text-xs text-slate-500">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Loading more...
+                  </div>
+                )}
+                {!isLoadingMore && hasMore && (
+                  <div className="border-t border-slate-100 p-2 text-center text-xs text-slate-500">
+                    Scroll for more results
+                  </div>
+                )}
+
               </>
             ) : (
-              <div className="p-4 text-center text-sm text-gray-500">
+              <div className="p-4 text-center text-sm text-slate-500">
                 {query.length > 1 ? "No results found." : "Type to search..."}
               </div>
             )}

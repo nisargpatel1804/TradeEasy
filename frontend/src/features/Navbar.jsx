@@ -19,83 +19,79 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { LogOut, User, Menu, Bell, Plus, ArrowRight, Loader2 } from 'lucide-react';
 import { useToast } from '../assets/ui/use-toast.js';
 
-const readCachedHeadlineIndices = (cacheKey) => {
-  if (typeof window === 'undefined') {
-    return null;
-  }
-  try {
-    const raw = window.localStorage.getItem(cacheKey);
-    if (!raw) {
-      return null;
-    }
-    const parsed = JSON.parse(raw);
-    const data = parsed?.data;
-    if (!data || typeof data !== 'object') {
-      return null;
-    }
-    return data;
-  } catch {
-    return null;
-  }
-};
-
-const writeCachedHeadlineIndices = (cacheKey, data) => {
-  if (typeof window === 'undefined') {
-    return;
-  }
-  try {
-    window.localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data }));
-  } catch {
-    // Ignore storage errors (quota, disabled, etc.)
-  }
-};
-
 const TICKER_CONFIG = [
   {
     key: 'nifty50',
     label: 'Nifty 50',
-    hints: ['NSE:26000', 'NIFTY 50', 'NIFTY50'],
+    symbol: 'NSE:26000',
   },
   {
     key: 'sensex',
     label: 'Sensex',
-    hints: ['SENSEX', 'BSE:SENSEX', 'S&P BSE SENSEX', 'BSE SENSEX'],
+    symbol: 'BSE:999901',
   },
   {
     key: 'india_vix',
     label: 'India VIX',
-    hints: ['INDIA VIX', 'NSE:INDIAVIX', 'INDIAVIX'],
+    symbol: 'NSE:26051',
   },
 ];
 
+// helpers that don't depend on React state can live at module scope
 const findIndexMatch = (priceMap = {}, config) => {
   if (!priceMap || !config) {
     return null;
   }
 
-  for (const hint of config.hints || []) {
-    if (priceMap[hint]) {
-      return priceMap[hint];
-    }
-  }
-
-  const labelLower = (config.label || '').toLowerCase();
-  const fallbackKey = Object.keys(priceMap).find((symbol) => {
-    const item = priceMap[symbol];
-    const normalizedName = (item?.name || '').toLowerCase();
-    const normalizedSymbol = String(symbol || '').toLowerCase();
-    const itemSymbol = (item?.symbol || '').toLowerCase();
-
-    if (normalizedName && normalizedName.includes(labelLower)) return true;
-    if (normalizedSymbol && normalizedSymbol.includes(labelLower)) return true;
-    if (itemSymbol && itemSymbol.includes(labelLower)) return true;
-    return false;
-  });
-
-  return fallbackKey ? priceMap[fallbackKey] : null;
+  return config.symbol ? (priceMap[config.symbol] || null) : null;
 };
 
-const RESET_NOTE = 'Clears holdings, positions, orders, and performance data.';
+// normalisation logic is independent of component state; hoist it to avoid
+// re-creating the callback on every render.
+const normaliseIndexPayload = (payload = {}, config) => {
+  if (!payload || !config) {
+    return null;
+  }
+
+  const coerceNumber = (value) => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    const parsed = parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+
+  const price = coerceNumber(payload.price ?? payload.ltp ?? payload.last_price ?? payload.lastTradedPrice ?? payload.value);
+
+  const changeKeys = ['change', 'net_change', 'netChange', 'change_amount'];
+  const percentKeys = ['percent_change', 'percentChange', 'change_percent', 'pChange'];
+
+  const hasExplicitChange = changeKeys.some((key) => payload?.[key] !== undefined && payload?.[key] !== null);
+  const hasExplicitPercent = percentKeys.some((key) => payload?.[key] !== undefined && payload?.[key] !== null);
+
+  const change = hasExplicitChange
+    ? coerceNumber(payload.change ?? payload.net_change ?? payload.netChange ?? payload.change_amount)
+    : null;
+
+  const percentChange = hasExplicitPercent
+    ? coerceNumber(payload.percent_change ?? payload.percentChange ?? payload.change_percent ?? payload.pChange)
+    : null;
+
+  if (price === null) {
+    return null;
+  }
+
+  return {
+    symbol: payload.symbol,
+    name: payload.name || config.label || payload.symbol,
+    label: config.label || payload.name || payload.symbol,
+    price,
+    change,
+    percentChange,
+  };
+};
+
+const RESET_NOTE = 'Clears holdings, positions, orders, performance data, and watchlist symbols.';
 const WALLET_LIMIT_OPTIONS = [
   { label: '₹10 Lakh', value: 1_000_000, warning: RESET_NOTE },
   { label: '₹25 Lakh', value: 2_500_000, warning: RESET_NOTE },
@@ -105,99 +101,23 @@ const WALLET_LIMIT_OPTIONS = [
 
 const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
   const { isAuthenticated, logout, user } = useAuth();
-  const { profileData, indicesData, refreshProfile } = useDataContext();
+  const { profileData, indicesData, refreshWatchlists, setProfile } = useDataContext();
   const { isConnected, connectionStatus } = useSocket();
   const navigate = useNavigate();
   const { toast } = useToast();
 
   const [isLoggingOut, setIsLoggingOut] = useState(false);
 
-  const headlineCacheKey = useMemo(() => {
-    const username = (user?.username || profileData?.username || 'anon').toLowerCase();
-    return `te:headline_indices:${username}`;
-  }, [user?.username, profileData?.username]);
-
   const [headlineIndices, setHeadlineIndices] = useState(() => {
-    const empty = TICKER_CONFIG.reduce((acc, item) => {
+    return TICKER_CONFIG.reduce((acc, item) => {
       acc[item.key] = null;
       return acc;
     }, {});
-
-    const cached = readCachedHeadlineIndices(`te:headline_indices:${(user?.username || 'anon').toLowerCase()}`);
-    if (!cached) {
-      return empty;
-    }
-
-    return {
-      ...empty,
-      ...cached,
-    };
   });
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      return;
-    }
-
-    const cached = readCachedHeadlineIndices(headlineCacheKey);
-    if (!cached) {
-      return;
-    }
-
-    setHeadlineIndices((prev) => {
-      const hasAny = Object.values(prev || {}).some((value) => typeof value?.price === 'number');
-      if (hasAny) {
-        return prev;
-      }
-      return { ...prev, ...cached };
-    });
-  }, [headlineCacheKey, isAuthenticated]);
   const [isWalletDialogOpen, setIsWalletDialogOpen] = useState(false);
   const [selectedWalletLimit, setSelectedWalletLimit] = useState(null);
   const [isUpdatingWallet, setIsUpdatingWallet] = useState(false);
 
-  const normaliseIndexPayload = useCallback((payload = {}, config) => {
-    if (!payload || !config) {
-      return null;
-    }
-
-    const coerceNumber = (value) => {
-      if (typeof value === 'number' && Number.isFinite(value)) {
-        return value;
-      }
-      const parsed = parseFloat(value);
-      return Number.isFinite(parsed) ? parsed : null;
-    };
-
-    const price = coerceNumber(payload.price ?? payload.ltp ?? payload.last_price ?? payload.lastTradedPrice ?? payload.value);
-
-    const changeKeys = ['change', 'net_change', 'netChange', 'change_amount'];
-    const percentKeys = ['percent_change', 'percentChange', 'change_percent', 'pChange'];
-
-    const hasExplicitChange = changeKeys.some((key) => payload?.[key] !== undefined && payload?.[key] !== null);
-    const hasExplicitPercent = percentKeys.some((key) => payload?.[key] !== undefined && payload?.[key] !== null);
-
-    const change = hasExplicitChange
-      ? coerceNumber(payload.change ?? payload.net_change ?? payload.netChange ?? payload.change_amount)
-      : null;
-
-    const percentChange = hasExplicitPercent
-      ? coerceNumber(payload.percent_change ?? payload.percentChange ?? payload.change_percent ?? payload.pChange)
-      : null;
-
-    if (price === null) {
-      return null;
-    }
-
-    return {
-      symbol: payload.symbol,
-      name: payload.name || config.label || payload.symbol,
-      label: config.label || payload.name || payload.symbol,
-      price,
-      change,
-      percentChange,
-    };
-  }, []);
 
   const updateHeadlineFromMap = useCallback((priceMap = {}) => {
     if (!priceMap || typeof priceMap !== 'object') {
@@ -234,7 +154,7 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
 
       return mutated ? next : prev;
     });
-  }, [normaliseIndexPayload]);
+  }, []);
 
   const handleLogout = async () => {
     if (isLoggingOut) return;
@@ -278,7 +198,13 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
     }
 
     const unsubscribe = priceUpdateService.subscribe((payload = {}) => {
-      updateHeadlineFromMap(payload.allPrices || {});
+      // changedPrices is {} (empty object) for snapshot/seed events — truthy but
+      // meaningless. Prefer allPrices when changedPrices carries no entries.
+      const changed = payload.changedPrices;
+      const map = (changed && Object.keys(changed).length > 0)
+        ? changed
+        : (payload.allPrices || {});
+      updateHeadlineFromMap(map);
     });
 
     return () => {
@@ -287,14 +213,6 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
       }
     };
   }, [updateHeadlineFromMap, isAuthenticated]);
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      return;
-    }
-    writeCachedHeadlineIndices(headlineCacheKey, headlineIndices);
-  }, [headlineCacheKey, headlineIndices, isAuthenticated]);
-
   const profileInitial = profileData?.username?.charAt(0).toUpperCase() || user?.username?.charAt(0).toUpperCase() || 'U';
   const walletBalance = useMemo(() => {
     const amount = profileData?.available_balance ?? profileData?.balance ?? 0;
@@ -322,13 +240,38 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
     }
 
     setIsUpdatingWallet(true);
+    const controller = new AbortController();
     try {
-      const response = await api.updateWalletLimit(selectedWalletLimit);
+      const response = await api.updateWalletLimit(selectedWalletLimit, { signal: controller.signal });
       const message = response?.message || 'Wallet limit updated.';
       toast({ title: 'Wallet updated', description: message });
-      await refreshProfile();
+
+      // if the API returned the updated profile payload we can avoid an
+      // extra GET request by patching the context directly.  refreshWatchlists
+      // is still needed since watchlists may have been cleared.
+      if (response?.profile) {
+        setProfile(response.profile);
+      }
+      await Promise.allSettled([
+        refreshWatchlists(),
+      ]);
+
+      priceUpdateService.clearPrices();
+      window.dispatchEvent(new CustomEvent('clear-local-search-caches'));
+      window.dispatchEvent(new CustomEvent('te:portfolio-reset', {
+        detail: {
+          resetPerformed: !!response?.reset_performed,
+          walletLimit: selectedWalletLimit,
+          at: Date.now(),
+        },
+      }));
+
       setIsWalletDialogOpen(false);
     } catch (error) {
+      if (error.name === 'CanceledError' || error.name === 'AbortError') {
+        // quietly ignore if caller aborted
+        return;
+      }
       toast({
         title: 'Unable to reset wallet',
         description: error.message || 'Please try again later.',
@@ -337,7 +280,7 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
     } finally {
       setIsUpdatingWallet(false);
     }
-  }, [selectedWalletLimit, toast, refreshProfile]);
+  }, [selectedWalletLimit, toast, refreshWatchlists]);
 
   useEffect(() => {
     if (!isWalletDialogOpen) {
@@ -476,7 +419,7 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
             <DialogTitle id="reset-wallet-title">Reset Wallet Limit</DialogTitle>
             <DialogDescription id="reset-wallet-desc">
               Pick a preset amount to refresh your simulated balance. Every reset clears holdings, positions,
-              orders, and performance data for the selected account.
+              orders, performance data, and watchlist symbols for the selected account.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="Wallet reset options">
@@ -520,30 +463,46 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
 Navbar.displayName = 'Navbar';
 
 const TickerChip = ({ label, price, change, percent, compact = false }) => {
+  const hasPrice = typeof price === 'number' && !Number.isNaN(price);
+  const hasChange = typeof change === 'number' && !Number.isNaN(change);
+  const hasPercent = typeof percent === 'number' && !Number.isNaN(percent);
+
   const formatNumber = (value) => {
     if (typeof value !== 'number' || Number.isNaN(value)) {
-      return '--';
+      return null;
     }
     return value.toLocaleString('en-IN', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   };
 
-  const isPositive = typeof change === 'number' && change >= 0;
+  const isPositive = hasChange && change >= 0;
   const changeColor = isPositive ? 'text-emerald-600' : 'text-red-500';
+
+  if (!hasPrice) {
+    return (
+      <div className="min-w-[180px] rounded-2xl border border-slate-100 bg-white px-4 py-2 shadow-sm">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
+        <div className="mt-2 h-4 w-20 animate-pulse rounded bg-slate-100" />
+      </div>
+    );
+  }
+
+  const formattedChange = hasChange ? `${isPositive ? '+' : ''}${formatNumber(change)}` : null;
+  const formattedPercent = hasPercent ? `${percent.toFixed(2)}%` : null;
 
   return (
     <div className="min-w-[180px] rounded-2xl border border-slate-100 bg-white px-4 py-2 shadow-sm">
       <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</p>
       <div className="mt-1 flex items-baseline justify-between">
         <span className="text-sm font-bold text-slate-900">{formatNumber(price)}</span>
-        {!compact && (
+        {!compact && formattedChange && formattedPercent && (
           <span className={`text-xs font-semibold ${changeColor}`}>
-            {isPositive ? '+' : ''}{formatNumber(change)} ({typeof percent === 'number' ? `${percent.toFixed(2)}%` : '--'})
+            {formattedChange} ({formattedPercent})
           </span>
         )}
       </div>
-      {compact && (
+      {compact && formattedChange && formattedPercent && (
         <p className={`text-xs font-semibold ${changeColor}`}>
-          {isPositive ? '+' : ''}{formatNumber(change)} ({typeof percent === 'number' ? `${percent.toFixed(2)}%` : '--'})
+          {formattedChange} ({formattedPercent})
         </p>
       )}
     </div>

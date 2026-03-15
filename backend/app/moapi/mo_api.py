@@ -4,6 +4,7 @@ import uuid
 import socket
 import platform
 import hashlib
+import json
 import logging
 import threading
 import time
@@ -16,6 +17,7 @@ import pyotp
 import requests
 import websocket
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
 from zoneinfo import ZoneInfo
 
 # --- Logging configuration -------------------------------------------------
@@ -146,18 +148,28 @@ class MotilalOswalAPI:
         self.base_url = self._normalise_base_url(os.getenv("MO_BASE_URL", self.REST_BASE_URL))
 
         self.session = session or requests.Session()
-        # Requests timeout supports (connect, read). Keep backward compatibility:
-        # - MO_API_TIMEOUT (legacy): used as default read timeout
-        # - MO_API_CONNECT_TIMEOUT / MO_API_READ_TIMEOUT (preferred): split timeouts
-        legacy_timeout = os.getenv("MO_API_TIMEOUT", "30")
+        self._configure_http_pool()
+        # Requests timeout supports (connect, read). prefer new env var but fall back to old name
         connect_timeout = float(os.getenv("MO_API_CONNECT_TIMEOUT", "10"))
-        read_timeout = float(os.getenv("MO_API_READ_TIMEOUT", str(legacy_timeout)))
+        read_timeout = float(os.getenv("MO_API_READ_TIMEOUT", os.getenv("MO_API_TIMEOUT", "30")))
         self.request_timeout = (connect_timeout, read_timeout)
 
         self.device_info = self._build_device_info()
 
         self.auth_token: Optional[str] = None
         self.last_login_at: Optional[datetime] = None
+        self.auth_ttl_seconds = int(os.getenv("MO_AUTH_TTL_SECONDS", "3300"))
+        self._auth_lock = threading.Lock()
+
+        self._cache_lock = threading.Lock()
+        self._response_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+        self._endpoint_cache_ttl = {
+            self.REST_ENDPOINTS["ltp"]: int(os.getenv("MO_CACHE_LTP_TTL", "2")),
+            self.REST_ENDPOINTS["eod"]: int(os.getenv("MO_CACHE_EOD_TTL", "60")),
+            self.REST_ENDPOINTS["index_master"]: int(os.getenv("MO_CACHE_INDEX_MASTER_TTL", "60")),
+            self.REST_ENDPOINTS["index_ltp"]: int(os.getenv("MO_CACHE_INDEX_LTP_TTL", "5")),
+            self.REST_ENDPOINTS["scrips"]: int(os.getenv("MO_CACHE_SCRIPS_TTL", "300")),
+        }
 
         self.ws: Optional[websocket.WebSocketApp] = None
         self.ws_thread: Optional[threading.Thread] = None
@@ -167,6 +179,20 @@ class MotilalOswalAPI:
         self.market_hours = MarketHoursManager()
 
         self._update_headers()
+
+    def _configure_http_pool(self) -> None:
+        # Use a larger default pool for bursty market workloads and block when exhausted
+        # so callers queue briefly instead of discarding sockets.
+        pool_connections = int(os.getenv("MO_HTTP_POOL_CONNECTIONS", "60"))
+        pool_maxsize = int(os.getenv("MO_HTTP_POOL_MAXSIZE", "60"))
+        pool_block = os.getenv("MO_HTTP_POOL_BLOCK", "true").strip().lower() in {"1", "true", "yes", "on"}
+        adapter = HTTPAdapter(
+            pool_connections=pool_connections,
+            pool_maxsize=pool_maxsize,
+            pool_block=pool_block,
+        )
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     # ------------------------------------------------------------------
     # Environment helpers
@@ -186,9 +212,10 @@ class MotilalOswalAPI:
         return url
 
     def _build_device_info(self) -> ClientDeviceInfo:
-        local_ip = os.getenv("MO_CLIENT_LOCAL_IP") or self._get_local_ip()
+        # prefer explicit env vars; fall back to simple runtime resolution
+        local_ip = os.getenv("MO_CLIENT_LOCAL_IP") or socket.gethostbyname(socket.gethostname())
         public_ip = os.getenv("MO_CLIENT_PUBLIC_IP") or "1.2.3.4"
-        mac_address = os.getenv("MO_CLIENT_MAC") or self._get_mac_address()
+        mac_address = os.getenv("MO_CLIENT_MAC") or ":".join(re.findall("..", f"{uuid.getnode():012x}"))
 
         os_name = os.getenv("MO_OS_NAME") or platform.system()
         os_version = os.getenv("MO_OS_VERSION") or platform.version()
@@ -223,20 +250,6 @@ class MotilalOswalAPI:
             longitude=longitude,
         )
 
-    @staticmethod
-    def _get_local_ip() -> str:
-        try:
-            return socket.gethostbyname(socket.gethostname())
-        except Exception:
-            return "1.2.3.4"
-
-    @staticmethod
-    def _get_mac_address() -> str:
-        try:
-            mac = uuid.getnode()
-            return ":".join(re.findall("..", f"{mac:012x}"))
-        except Exception:
-            return "00:00:00:00:00:00"
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -282,15 +295,62 @@ class MotilalOswalAPI:
                     data.get("errorcode"),
                 )
             return data
+        except requests.exceptions.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else 0
+            if status_code == 404:
+                # 404 is expected for LTP/index endpoints outside market hours — not an error
+                logger.debug("HTTP 404 for %s (endpoint unavailable, likely outside market hours)", url)
+            elif status_code >= 500:
+                logger.error("HTTP %s server error while calling %s: %s", status_code, url, exc)
+            else:
+                logger.warning("HTTP %s error while calling %s: %s", status_code, url, exc)
+            return None
         except requests.exceptions.RequestException as exc:
-            logger.error("HTTP error while calling %s: %s", url, exc)
+            logger.warning("Request error while calling %s: %s", url, exc)
             return None
 
     def _ensure_authenticated(self) -> bool:
-        if self.auth_token:
+        if self._is_auth_valid():
             return True
         response = self.login()
         return bool(response and response.get("status") == "SUCCESS")
+
+    def _is_auth_valid(self) -> bool:
+        if not self.auth_token or not self.last_login_at:
+            return False
+        age_seconds = (datetime.now() - self.last_login_at).total_seconds()
+        return age_seconds < self.auth_ttl_seconds
+
+    def _build_cache_key(self, endpoint: str, payload: Optional[Dict[str, Any]]) -> str:
+        serialized_payload = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str)
+        return f"{endpoint}:{serialized_payload}"
+
+    def _cached_request(
+        self,
+        method: str,
+        endpoint: str,
+        payload: Optional[Dict[str, Any]] = None,
+        require_auth: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        ttl = self._endpoint_cache_ttl.get(endpoint, 0)
+        if ttl <= 0:
+            return self._request(method, endpoint, payload, require_auth=require_auth)
+
+        now = time.time()
+        cache_key = self._build_cache_key(endpoint, payload)
+
+        with self._cache_lock:
+            cached = self._response_cache.get(cache_key)
+            if cached:
+                cached_at, cached_data = cached
+                if now - cached_at < ttl:
+                    return cached_data
+
+        data = self._request(method, endpoint, payload, require_auth=require_auth)
+        if data and isinstance(data, dict) and data.get("status") == "SUCCESS":
+            with self._cache_lock:
+                self._response_cache[cache_key] = (now, data)
+        return data
 
     def _generate_totp_code(self, time_offset: int = 0) -> Optional[str]:
         """Generate TOTP code with time window tolerance for clock drift.
@@ -300,41 +360,29 @@ class MotilalOswalAPI:
         """
         if not self.totp_secret:
             return None
-        try:
-            import time as time_module
-            
-            # Create TOTP instance with standard settings (30-second interval)
-            totp = pyotp.TOTP(self.totp_secret)
-            
-            # Generate code with optional time offset
-            current_time = time_module.time() + time_offset
-            current_code = totp.at(int(current_time))
-            
-            # Log timestamp and offset only (do NOT log TOTP codes)
-            logger.debug("Generated TOTP at timestamp: %s (offset: %ss)", int(current_time), time_offset)
-            
-            return current_code
-        except Exception as exc:
-            logger.error("Failed to generate TOTP code: %s", exc, exc_info=True)
-            return None
+        # Create TOTP instance with standard settings (30-second interval)
+        totp = pyotp.TOTP(self.totp_secret)
+        # Generate code with optional time offset
+        current_time = time.time() + time_offset
+        current_code = totp.at(int(current_time))
+        # Log timestamp and offset only (do NOT log TOTP codes)
+        logger.debug("Generated TOTP at timestamp: %s (offset: %ss)", int(current_time), time_offset)
+        return current_code
     
-    def _verify_totp_locally(self, code: str) -> bool:
-        """Verify TOTP code locally for debugging purposes."""
-        if not self.totp_secret:
-            return False
-        try:
-            totp = pyotp.TOTP(self.totp_secret)
-            # Check with 1-window tolerance (±30 seconds) for clock drift
-            return totp.verify(code, valid_window=1)
-        except Exception as exc:
-            logger.error("TOTP verification error: %s", exc)
-            return False
 
     # ------------------------------------------------------------------
     # Authentication & session APIs
     # ------------------------------------------------------------------
     def login(self, totp_code: Optional[str] = None, two_fa: Optional[str] = None, retry_count: int = 0) -> Optional[Dict[str, Any]]:
         """Login to MO API with enhanced TOTP handling and automatic retry with time offsets."""
+        with self._auth_lock:
+            if self._is_auth_valid() and not totp_code and not two_fa and retry_count == 0:
+                return {
+                    "status": "SUCCESS",
+                    "message": "Using existing authenticated session",
+                    "AuthToken": self.auth_token,
+                }
+
         # Hash password according to API spec: SHA-256(password + apikey)
         hashed_password = hashlib.sha256((self.password + self.api_key).encode("utf-8")).hexdigest()
         
@@ -347,14 +395,15 @@ class MotilalOswalAPI:
         # Generate or use provided TOTP code
         # Try different time offsets to handle clock drift: current, -30s, +30s
         time_offsets = [0, -30, 30] if retry_count == 0 else [0]
-        
+        response = None
+
         for offset in time_offsets:
             if totp_code is None or retry_count > 0:
                 totp_code = self._generate_totp_code(time_offset=offset)
-            
+
             if totp_code:
                 payload["totp"] = str(totp_code)
-                
+
                 if offset != 0:
                     logger.info(f"Trying TOTP with {offset:+d}s time offset...")
             else:
@@ -362,7 +411,7 @@ class MotilalOswalAPI:
 
             # Attempt login
             response = self._request("POST", self.REST_ENDPOINTS["login"], payload, require_auth=False)
-            
+
             if response and response.get("status") == "SUCCESS":
                 self.auth_token = response.get("AuthToken")
                 self.last_login_at = datetime.now()
@@ -411,6 +460,9 @@ class MotilalOswalAPI:
         response = self._request("POST", self.REST_ENDPOINTS["logout"], {"userid": self.user_id})
         if response and response.get("status") == "SUCCESS":
             self.auth_token = None
+            self.last_login_at = None
+            with self._cache_lock:
+                self._response_cache.clear()
             self._update_headers()
         return response
 
@@ -425,7 +477,7 @@ class MotilalOswalAPI:
         payload = {"exchangename": exchangename.upper()}
         if clientcode:
             payload["clientcode"] = clientcode
-        return self._request("POST", self.REST_ENDPOINTS["scrips"], payload)
+        return self._cached_request("POST", self.REST_ENDPOINTS["scrips"], payload)
 
     def get_ltp_data(self, exchange: str, scripcode: int, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
         payload: Dict[str, Any] = {
@@ -434,19 +486,19 @@ class MotilalOswalAPI:
         }
         if clientcode:
             payload["clientcode"] = clientcode
-        return self._request("POST", self.REST_ENDPOINTS["ltp"], payload)
+        return self._cached_request("POST", self.REST_ENDPOINTS["ltp"], payload)
 
     def get_eod_data(self, exchangename: str, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
         payload = {"exchangename": exchangename.upper()}
         if clientcode:
             payload["clientcode"] = clientcode
-        return self._request("POST", self.REST_ENDPOINTS["eod"], payload)
+        return self._cached_request("POST", self.REST_ENDPOINTS["eod"], payload)
 
     def get_index_data(self, exchangename: str, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
         payload = {"exchangename": exchangename.upper()}
         if clientcode:
             payload["clientcode"] = clientcode
-        return self._request("POST", self.REST_ENDPOINTS["index_master"], payload)
+        return self._cached_request("POST", self.REST_ENDPOINTS["index_master"], payload)
 
     def get_index_ltp(self, exchange: str, scripcode: int, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
         payload: Dict[str, Any] = {
@@ -455,7 +507,7 @@ class MotilalOswalAPI:
         }
         if clientcode:
             payload["clientcode"] = clientcode
-        return self._request("POST", self.REST_ENDPOINTS["index_ltp"], payload)
+        return self._cached_request("POST", self.REST_ENDPOINTS["index_ltp"], payload)
 
     # ------------------------------------------------------------------
     # WebSocket helpers
@@ -467,7 +519,7 @@ class MotilalOswalAPI:
         on_close: Callable[[websocket.WebSocketApp, int, str], None],
         on_error: Callable[[websocket.WebSocketApp, Exception], None],
     ) -> None:
-        if not self.auth_token:
+        if not self._ensure_authenticated():
             logger.error("Authenticate before opening the Motilal Oswal WebSocket feed.")
             return
 

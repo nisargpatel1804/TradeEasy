@@ -1,11 +1,11 @@
 import logging
-import sys
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
 from datetime import datetime
 from mongoengine.errors import NotUniqueError
+from pymongo import UpdateOne
 
-from app.moapi.mo_api import MotilalOswalAPI
+from app.moapi import get_mo_api_client
 from app.models import AQScrip
 
 # --- Configuration ---
@@ -53,7 +53,7 @@ def populate_scrips_endpoint():
         logger.info(f"Scrip population endpoint triggered by user: {current_user.client_id}")
         exchanges = data.get("exchanges", ["NSE", "BSE", "NSEFO", "NSECD", "MCX"])
         
-        mo_api = MotilalOswalAPI()
+        mo_api = get_mo_api_client()
         if not mo_api.login():
             return jsonify({"status": "error", "message": "Failed to authenticate with MO API"}), 500
         
@@ -68,20 +68,31 @@ def populate_scrips_endpoint():
                 continue
 
             scrips_list = scrips_response.get("data", [])
-            exchange_upserted = 0
-
+            operations = []
+            now_utc = datetime.utcnow()
             for scrip_api_data in scrips_list:
                 model_data = _map_api_to_model_data(scrip_api_data, exchange)
-                if not model_data: continue
+                if not model_data:
+                    continue
 
-                # Use update_one with upsert=True for high efficiency
-                result = AQScrip.objects(
-                    scripcode=model_data['scripcode'], 
-                    exchangename=model_data['exchangename']
-                ).update_one(set__=model_data, upsert=True)
-                
-                if result.upserted_id or result.modified_count > 0:
-                    exchange_upserted += 1
+                operations.append(
+                    UpdateOne(
+                        {
+                            "scripcode": model_data['scripcode'],
+                            "exchangename": model_data['exchangename'],
+                        },
+                        {
+                            "$set": model_data,
+                            "$setOnInsert": {"created_at": now_utc},
+                        },
+                        upsert=True,
+                    )
+                )
+
+            exchange_upserted = 0
+            if operations:
+                bulk_result = AQScrip._get_collection().bulk_write(operations, ordered=False)
+                exchange_upserted = int((getattr(bulk_result, "modified_count", 0) or 0) + len(getattr(bulk_result, "upserted_ids", {}) or {}))
             
             stats["total_processed"] += len(scrips_list)
             stats["total_upserted"] += exchange_upserted
@@ -119,18 +130,18 @@ def populate_scrips_from_scratch():
     Standalone function for a full, clean population of the scrips database.
     It clears all existing data and uses efficient bulk inserts for maximum speed.
     """
-    print("--- Starting Full Scrip Database Population ---")
+    logger.info("--- Starting Full Scrip Database Population ---")
     try:
-        print("Clearing existing AQ_scrips collection...")
+        logger.info("Clearing existing AQ_scrips collection...")
         count = AQScrip.objects.delete()
-        print(f"Deleted {count} existing scrips.")
+        logger.info(f"Deleted {count} existing scrips.")
         
-        mo_api = MotilalOswalAPI()
-        print("Logging into Motilal Oswal API...")
+        mo_api = get_mo_api_client()
+        logger.info("Logging into Motilal Oswal API...")
         if not mo_api.login():
-            print("ERROR: API login failed. Aborting.")
+            logger.error("API login failed; aborting population.")
             return False
-        print("API Login successful.")
+        logger.info("API Login successful.")
 
         exchanges = ["NSE", "BSE", "NSEFO", "NSECD", "MCX"]
         total_inserted = 0
@@ -155,45 +166,39 @@ def populate_scrips_from_scratch():
                     new_scrips_to_insert.append(AQScrip(**model_data))
             
             if new_scrips_to_insert:
-                    try:
-                        # Perform the bulk insert operation
-                        AQScrip.objects.insert(new_scrips_to_insert, load_bulk=False)
-                        print(f"Successfully inserted {len(new_scrips_to_insert)} scrips for {exchange}.")
-                        total_inserted += len(new_scrips_to_insert)
-
-                        # Search cache removed; no invalidation needed.
-                    except NotUniqueError:
-                        print(f"WARNING: Duplicate scrips found for {exchange}. This should not happen on a clean import.")
-                    except Exception as e:
-                        print(f"ERROR: Bulk insert failed for {exchange}: {e}")
-        print("\n--- Scrip Population Complete ---")
-        print(f"Total scrips inserted across all exchanges: {total_inserted}")
+                try:
+                    AQScrip.objects.insert(new_scrips_to_insert, load_bulk=False)
+                    print(f"Successfully inserted {len(new_scrips_to_insert)} scrips for {exchange}.")
+                    total_inserted += len(new_scrips_to_insert)
+                except NotUniqueError:
+                    print(f"WARNING: Duplicate scrips found for {exchange}. This should not happen on a clean import.")
+                except Exception as e:
+                    print(f"ERROR: Bulk insert failed for {exchange}: {e}")
+        logger.info("\n--- Scrip Population Complete ---")
+        logger.info(f"Total scrips inserted across all exchanges: {total_inserted}")
         return True
         
     except Exception as e:
-        print(f"\nFATAL ERROR during scrip population: {e}")
+        logger.error(f"FATAL ERROR during scrip population: {e}")
         import traceback
         traceback.print_exc()
         return False
 
-if __name__ == '__main__':
-    """
-    Main execution block to run the population script from the command line.
-    Requires the script to be run from the project's root `backend` directory.
-    """
-    if len(sys.argv) > 1 and sys.argv[1] == 'populate':
-        # This assumes the script is run from the 'backend' directory.
-        # It ensures the app context is available for database connections.
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "populate":
         try:
             from app import create_app
+
             app = create_app()
             with app.app_context():
                 if populate_scrips_from_scratch():
                     print("\n✅ Operation completed successfully!")
                     sys.exit(0)
-                else:
-                    print("\n❌ Operation failed.")
-                    sys.exit(1)
+                print("\n❌ Operation failed.")
+                sys.exit(1)
         except Exception as e:
             print(f"Error setting up Flask app context: {e}")
             sys.exit(1)

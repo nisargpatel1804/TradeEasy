@@ -1,6 +1,8 @@
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, jsonify, request
+from mongoengine.queryset.visitor import Q
 from app.models import AQScrip, Stock
 from app.socket_manager import MO_WebSocket_Manager
 
@@ -55,19 +57,49 @@ def _iter_instrument_candidates(symbol: str) -> list[dict]:
         seen.add(key)
         candidates.append({"exchange": key[0], "scripcode": key[1], "source": source})
 
-    aq_nse = AQScrip.objects(exchangename='NSE', scripshortname=symbol).first()
-    if aq_nse:
-        _add('NSE', aq_nse.scripcode, 'AQScrip:NSE')
-
-    aq_bse = AQScrip.objects(exchangename='BSE', scripshortname=symbol).first()
-    if aq_bse:
-        _add('BSE', aq_bse.scripcode, 'AQScrip:BSE')
+    aq_matches = list(
+        AQScrip.objects(
+            Q(scripshortname=symbol) & (Q(exchangename='NSE') | Q(exchangename='BSE'))
+        ).only('exchangename', 'scripcode')
+    )
+    for aq_doc in aq_matches:
+        exch = str(getattr(aq_doc, 'exchangename', '')).upper()
+        if exch in ('NSE', 'BSE') and getattr(aq_doc, 'scripcode', None):
+            _add(exch, aq_doc.scripcode, f'AQScrip:{exch}')
 
     for stock_doc in Stock.objects(symbol__istartswith=symbol)[:5]:
         if stock_doc.exchange and stock_doc.scripcode:
             _add(stock_doc.exchange, stock_doc.scripcode, f"Stock:{stock_doc.symbol}")
 
     return candidates
+
+
+def _fetch_ltp_candidates_parallel(mo_api, candidates: list[dict]) -> dict[tuple[str, int], dict | None]:
+    """Fetches candidate LTP payloads in parallel and returns them keyed by (exchange, scripcode)."""
+    if not candidates:
+        return {}
+
+    max_workers = min(4, len(candidates))
+    results: dict[tuple[str, int], dict | None] = {}
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(mo_api.get_ltp_data, candidate['exchange'], candidate['scripcode']): candidate
+            for candidate in candidates
+        }
+        for future in as_completed(future_map):
+            candidate = future_map[future]
+            key = (candidate['exchange'], candidate['scripcode'])
+            try:
+                response = future.result()
+                if response and response.get("status") == "SUCCESS" and response.get("data"):
+                    results[key] = response.get("data")
+                else:
+                    results[key] = None
+            except Exception:
+                results[key] = None
+
+    return results
 
 def extract_price_with_fallback(api_data: dict) -> tuple[float, str]:
     if not api_data or not isinstance(api_data, dict):
@@ -102,11 +134,9 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
     try:
         socket_manager = MO_WebSocket_Manager()
         mo_api = socket_manager.mo_api
-        provider_available = True
-        if not getattr(mo_api, "auth_token", None):
-            if not mo_api.login():
-                provider_available = False
-                logger.warning("MO API login failed; falling back where possible")
+        provider_available = bool(mo_api.login())
+        if not provider_available:
+            logger.warning("MO API login failed; falling back where possible")
 
         candidates = _iter_instrument_candidates(clean_symbol)
         if not candidates:
@@ -118,19 +148,19 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
         price_source = 'unavailable'
         ltp = 0.0
 
+        ltp_candidates = {}
+        if provider_available:
+            ltp_candidates = _fetch_ltp_candidates_parallel(mo_api, candidates)
+        else:
+            logger.debug("Skipping remote LTP fetch for %s because provider unavailable", clean_symbol)
+
         for candidate in candidates:
             exchange = candidate['exchange']
             scripcode = candidate['scripcode']
 
-            data = None
-            if provider_available:
-                response = mo_api.get_ltp_data(exchange, scripcode)
-                if response and response.get("status") == "SUCCESS" and response.get("data"):
-                    data = response.get("data")
-                else:
-                    logger.debug("No valid LTP data for %s (%s:%s)", clean_symbol, exchange, scripcode)
-            else:
-                logger.debug("Skipping remote LTP fetch for %s because provider unavailable", clean_symbol)
+            data = ltp_candidates.get((exchange, scripcode)) if provider_available else None
+            if provider_available and not data:
+                logger.debug("No valid LTP data for %s (%s:%s)", clean_symbol, exchange, scripcode)
 
             ltp, price_source = extract_price_with_fallback(data)
 

@@ -52,6 +52,10 @@ const DashboardLayout = () => {
     paddingTop: `${navbarHeight}px`,
   }), [navbarHeight]);
 
+  const mainStyle = useMemo(() => ({
+    minHeight: `calc(100vh - ${navbarHeight}px)`,
+  }), [navbarHeight]);
+
   const sidebarStyle = useMemo(() => ({
     top: `${navbarHeight}px`,
     height: `calc(100vh - ${navbarHeight}px)`,
@@ -73,7 +77,7 @@ const DashboardLayout = () => {
           </div>
         </aside>
 
-        <main className="flex-1 w-full min-h-screen px-2 pb-6 lg:ml-[340px] lg:px-3">
+        <main className="flex-1 w-full px-2 pb-2 lg:ml-[340px] lg:px-3" style={mainStyle}>
           <Outlet />
         </main>
       </div>

@@ -13,7 +13,7 @@ import { useNavigate } from "react-router-dom";
 import { cn } from "../utils/cn.js";
 
 const ProfilePage = () => {
-  const { profileData: initialProfile, refreshProfile } = useDataContext();
+  const { profileData: initialProfile, refreshProfile, setProfile: setContextProfile } = useDataContext();
   const navigate = useNavigate();
   const [profile, setProfile] = useState({ username: "", email: "", mobile: "" });
   const [initialData, setInitialData] = useState({ username: "", email: "", mobile: "" });
@@ -75,8 +75,17 @@ const ProfilePage = () => {
 
       if (response.success) {
         toast.success("Profile updated successfully!");
-        // Refresh the global context and local state
-        await refreshProfile();
+        // update context so other UI reflects the change immediately
+        const updatedProfile = {
+          ...initialProfile,
+          username: profile.username.trim(),
+          email: profile.email.trim().toLowerCase(),
+          mobile: `+91${profile.mobile}`,
+        };
+        setContextProfile(updatedProfile);
+        // also update the initialData snapshot so the form disables correctly
+        setInitialData({ username: profile.username, email: profile.email, mobile: profile.mobile });
+        // we no longer need to fetch from the server; context is now current
       } else {
         throw new Error(response.message || "Failed to update profile.");
       }

@@ -64,12 +64,22 @@ const PortfolioPage = ({ isEmbedded = false }) => {
   }, [loadPortfolio]);
 
   useEffect(() => {
+    const onPortfolioReset = () => {
+      setPortfolioData(null);
+      setLivePrices({});
+      loadPortfolio({ showLoader: true });
+    };
+
+    window.addEventListener('te:portfolio-reset', onPortfolioReset);
+    return () => window.removeEventListener('te:portfolio-reset', onPortfolioReset);
+  }, [loadPortfolio]);
+
+  useEffect(() => {
     const fetchStatus = async () => {
       try {
         const status = await api.getMarketStatus();
         setMarketStatus(status);
       } catch {
-        // non-critical
       }
     };
 
@@ -130,7 +140,20 @@ const PortfolioPage = ({ isEmbedded = false }) => {
       if (result.success) {
         toast.success(result.message || `Exit order placed for ${holding.symbol}.`, { id: toastId });
         const orderId = result.order_id || result.orderId || result.id;
-        window.dispatchEvent(new CustomEvent('te:trade-success', { detail: { orderId } }));
+        window.dispatchEvent(new CustomEvent('te:trade-success', {
+          detail: {
+            orderId,
+            optimisticOrder: {
+              id: orderId || `${holding.symbol}-${Date.now()}`,
+              symbol: holding.symbol,
+              transaction_type: 'SELL',
+              quantity: holding.quantity,
+              price: Number(holding.ltp) || 0,
+              status: 'EXECUTED',
+              date: new Date().toISOString(),
+            },
+          },
+        }));
         await loadPortfolio();
       } else {
         throw new Error(result.message || 'Failed to exit position.');

@@ -1,13 +1,14 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, memo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-hot-toast';
 import { Card, CardContent, CardHeader, CardTitle } from '../assets/ui/card.jsx';
 import { Button } from '../assets/ui/button.jsx';
 import { Input } from '../assets/ui/input.jsx';
 import { Skeleton } from '../assets/ui/skeleton.jsx';
-import { RefreshCw, Search, TrendingUp, TrendingDown, Activity, ArrowUpRight, ArrowDownRight, ArrowLeft } from 'lucide-react';
+import { RefreshCw, Search, TrendingUp, TrendingDown, Activity, ArrowUpRight, ArrowDownRight, ArrowLeft, Clock } from 'lucide-react';
 import * as api from '../services/api.js';
 import priceUpdateService from '../services/priceUpdateService.js';
+import MarketCache from '../utils/marketCache.js';
 
 const SUMMARY_CARDS = [
   { key: 'total_count', label: 'Constituents', icon: Activity, tone: 'neutral' },
@@ -16,6 +17,7 @@ const SUMMARY_CARDS = [
 ];
 
 const MAX_HIGHLIGHTS = 10;
+const MARKET_PAGE_BATCH = 20;
 
 const MarketPage = () => {
   const navigate = useNavigate();
@@ -33,22 +35,49 @@ const MarketPage = () => {
   const [error, setError] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(MARKET_PAGE_BATCH);
+  const hasLoadedStocksRef = useRef(false);
 
   // --- Data Fetching ---
 
   const fetchMarketData = useCallback(async (isBackground = false) => {
-    if (!isBackground) {
-      if (!marketData.stocks.length) setIsLoading(true);
+    const cacheHit = MarketCache.isValid();
+    if (cacheHit) {
+      const cached = MarketCache.get();
+      const normalizedStocks = (Array.isArray(cached.stocks) ? cached.stocks : []).map((stock) => ({
+        ...stock,
+        price: typeof stock.ltp === 'number' ? stock.ltp : (typeof stock.price === 'number' ? stock.price : 0),
+        change: Number(stock.change) || 0,
+        percent_change: Number(stock.percent_change) || 0,
+      }));
+      setMarketData({ ...cached, stocks: normalizedStocks });
+      hasLoadedStocksRef.current = normalizedStocks.length > 0;
+      const seedMap = normalizedStocks.reduce((acc, stock) => {
+        if (stock.symbol) {
+          acc[stock.symbol] = { symbol: stock.symbol, ltp: stock.price, change: stock.change, percent_change: stock.percent_change };
+        }
+        return acc;
+      }, {});
+      if (priceUpdateService && typeof priceUpdateService.seedPrices === 'function') {
+        priceUpdateService.seedPrices(seedMap);
+      }
+      setLivePrices(seedMap);
+      setIsLoading(false);
+      setIsRefreshing(false);
+      // Market is closed — data is static; skip background revalidation
+      if (cached.market_status !== 'OPEN') return;
+      // Market is open — silently revalidate in background; no full loading spinner
+    } else if (!isBackground) {
+      if (!hasLoadedStocksRef.current) setIsLoading(true);
       else setIsRefreshing(true);
     }
-    
+
     setError(null);
 
     try {
       const data = await api.fetchMarket();
-      
+
       if (data.success) {
-        // Normalize the static data immediately
         const normalizedStocks = (Array.isArray(data.stocks) ? data.stocks : []).map((stock) => ({
           ...stock,
           price: typeof stock.ltp === 'number' ? stock.ltp : (typeof stock.price === 'number' ? stock.price : 0),
@@ -60,6 +89,8 @@ const MarketPage = () => {
           ...data,
           stocks: normalizedStocks,
         });
+        hasLoadedStocksRef.current = normalizedStocks.length > 0;
+        MarketCache.set(data, data.market_status === 'OPEN');
 
         // CRITICAL: Seed the price service so the socket knows the initial state
         // This prevents "flicker" where data might be 0 until the next tick
@@ -74,13 +105,11 @@ const MarketPage = () => {
           }
           return acc;
         }, {});
-        
-        // Push initial state to the service logic
+
         if (priceUpdateService && typeof priceUpdateService.seedPrices === 'function') {
             priceUpdateService.seedPrices(seedMap);
         }
-        
-        // Also initialize local livePrices state
+
         setLivePrices(seedMap);
 
       } else {
@@ -88,15 +117,17 @@ const MarketPage = () => {
       }
     } catch (err) {
       console.error("Market fetch error:", err);
-      setError(err.message || "Failed to load market data.");
-      if (!isBackground) {
+      if (!cacheHit) {
+        setError(err.message || "Failed to load market data.");
+        if (!isBackground) {
           toast.error("Could not update market data.");
+        }
       }
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [marketData.stocks.length]);
+  }, []);
 
   // Initial load
   useEffect(() => {
@@ -195,8 +226,23 @@ const MarketPage = () => {
       );
     }
 
-    return result.sort((a, b) => (a.symbol || '').localeCompare(b.symbol || ''));
+    return result;
   }, [marketData.stocks, livePrices, searchQuery]);
+
+  useEffect(() => {
+    setVisibleCount(MARKET_PAGE_BATCH);
+  }, [searchQuery, marketData.stocks.length]);
+
+  const visibleStocks = useMemo(() => enrichedStocks.slice(0, visibleCount), [enrichedStocks, visibleCount]);
+  const hasMoreVisible = visibleCount < enrichedStocks.length;
+
+  const handleConstituentsScroll = useCallback((event) => {
+    const el = event.currentTarget;
+    const remaining = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (remaining < 120 && hasMoreVisible) {
+      setVisibleCount((prev) => Math.min(prev + MARKET_PAGE_BATCH, enrichedStocks.length));
+    }
+  }, [enrichedStocks.length, hasMoreVisible]);
 
   const movers = useMemo(() => {
     const gainers = enrichedStocks
@@ -240,7 +286,7 @@ const MarketPage = () => {
       return <div className="p-8 text-center text-slate-500">No constituents match your search.</div>;
     }
 
-    return enrichedStocks.map((stock) => (
+    return visibleStocks.map((stock) => (
       <StockRow key={stock.symbol} stock={stock} onSelect={handleStockClick} />
     ));
   };
@@ -260,9 +306,30 @@ const MarketPage = () => {
               <ArrowLeft className="h-4 w-4" />
             </Button>
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Live Movers</p>
+              <div className="flex items-center gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  {marketData.market_status === 'CLOSED' ? 'End-of-Day' : 'Live Movers'}
+                </p>
+                {!isLoading && marketData.market_status && (
+                  marketData.market_status === 'OPEN' ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 ring-1 ring-emerald-200">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      Open
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 ring-1 ring-amber-200">
+                      <Clock className="h-2.5 w-2.5" />
+                      Closed
+                    </span>
+                  )
+                )}
+              </div>
               <h1 className="text-lg font-semibold text-slate-900 sm:text-xl">Nifty 50 Heat Map</h1>
-              <p className="text-xs font-medium text-slate-500">Top gainers and laggards from the benchmark index.</p>
+              <p className="text-xs font-medium text-slate-500">
+                {marketData.market_status === 'CLOSED'
+                  ? 'Showing last closing prices · updates live when market reopens.'
+                  : 'Top gainers and laggards from the benchmark index.'}
+              </p>
             </div>
           </div>
           <Button 
@@ -310,8 +377,11 @@ const MarketPage = () => {
             </div>
           </CardHeader>
           <CardContent className="p-0">
-            <div className="max-h-[60vh] divide-y divide-slate-100 overflow-y-auto">
+            <div className="max-h-[60vh] divide-y divide-slate-100 overflow-y-auto" onScroll={handleConstituentsScroll}>
               {renderStockList()}
+              {!isLoading && hasMoreVisible && (
+                <div className="p-3 text-center text-xs text-slate-500">Scroll to load more constituents</div>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -340,7 +410,7 @@ const getChangeColor = (change) => {
   return 'text-slate-600';
 };
 
-const SummaryCard = ({ label, value, Icon, tone }) => {
+const SummaryCard = memo(({ label, value, Icon, tone }) => {
   const toneClasses = {
     positive: 'text-emerald-600',
     negative: 'text-red-600',
@@ -358,9 +428,9 @@ const SummaryCard = ({ label, value, Icon, tone }) => {
       </CardContent>
     </Card>
   );
-};
+});
 
-const MoversCard = ({ title, items = [], tone = 'positive', onSelect, isLoading }) => {
+const MoversCard = memo(({ title, items = [], tone = 'positive', onSelect, isLoading }) => {
   const isPositive = tone === 'positive';
   const toneClasses = isPositive ? 'text-emerald-600' : 'text-red-600';
   const bgClasses = isPositive ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700';
@@ -409,9 +479,9 @@ const MoversCard = ({ title, items = [], tone = 'positive', onSelect, isLoading 
       </CardContent>
     </Card>
   );
-};
+});
 
-const StockRow = ({ stock, onSelect }) => (
+const StockRow = memo(({ stock, onSelect }) => (
   <button
     type="button"
     className="flex w-full items-center justify-between px-4 py-3 text-left transition hover:bg-slate-50"
@@ -428,7 +498,7 @@ const StockRow = ({ stock, onSelect }) => (
       </p>
     </div>
   </button>
-);
+));
 
 const ListSkeleton = ({ rows = 8, compact = false }) => (
   <div className="divide-y divide-slate-100">

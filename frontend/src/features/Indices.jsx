@@ -14,7 +14,7 @@ import { useNavigate } from 'react-router-dom';
 const formatNumber = (value) => {
   const num = Number(value);
   if (!Number.isFinite(num)) {
-    return '0.00';
+    return null;
   }
   return num.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
@@ -22,7 +22,7 @@ const formatNumber = (value) => {
 const formatPercent = (value) => {
   const num = Number(value);
   if (!Number.isFinite(num)) {
-    return '0.00%';
+    return null;
   }
   const sign = num > 0 ? '+' : '';
   return `${sign}${num.toFixed(2)}%`;
@@ -92,7 +92,9 @@ const Indices = () => {
   };
 
   const filteredIndices = useMemo(() => {
-    let data = Array.isArray(indices) ? [...indices] : [];
+    let data = Array.isArray(indices)
+      ? indices.filter((index) => Number.isFinite(Number(index?.price)) && Number(index?.price) > 0)
+      : [];
 
     if (searchTerm.trim()) {
       const term = searchTerm.trim().toLowerCase();
@@ -220,10 +222,17 @@ const Indices = () => {
 };
 
 const IndexCard = ({ index }) => {
-  const changeValue = Number(index.change) || 0;
-  const percentValue = Number(index.percent_change) || 0;
-  const isPositive = changeValue >= 0;
-  const priceValue = Number(index.price) || 0;
+  const priceValue = Number(index.price);
+  const changeValue = Number(index.change);
+  const percentValue = Number(index.percent_change);
+
+  if (!Number.isFinite(priceValue) || priceValue <= 0) {
+    return null;
+  }
+
+  const hasChange = Number.isFinite(changeValue);
+  const hasPercent = Number.isFinite(percentValue);
+  const isPositive = hasChange ? changeValue >= 0 : true;
 
   return (
     <Card className="rounded-3xl border border-slate-100 bg-white p-4 shadow-sm">
@@ -234,9 +243,11 @@ const IndexCard = ({ index }) => {
         </div>
         <div className="text-right">
           <p className="text-2xl font-bold text-slate-900">{formatNumber(priceValue)}</p>
-          <p className={`text-sm font-semibold ${isPositive ? 'text-emerald-600' : 'text-red-600'}`}>
-            {formatPercent(percentValue)}
-          </p>
+          {hasPercent && (
+            <p className={`text-sm font-semibold ${isPositive ? 'text-emerald-600' : 'text-red-600'}`}>
+              {formatPercent(percentValue)}
+            </p>
+          )}
         </div>
       </div>
     </Card>

@@ -82,8 +82,6 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
     }
   }, [isRenameDialogOpen]);
 
-  
-
   const activeWatchlist = useMemo(
     () => watchlists.find((wl) => wl.name === activeWatchlistName) || null,
     [watchlists, activeWatchlistName]
@@ -91,74 +89,77 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
 
   const stocks = activeWatchlist?.stocks ?? [];
 
-
-  const enrichStock = useCallback((stock) => {
-    if (!stock || !stock.symbol) {
-      return null;
-    }
-    const live = livePrices[stock.symbol];
-    const merged = live ? { ...stock, ...live } : { ...stock };
-
-    if (!merged.ltp || merged.ltp === 0) {
-      merged.ltp = merged.previous_close || merged.price || 0;
-      merged.price_source = merged.price_source || "previous_close";
-    }
-    return merged;
-  }, [livePrices]);
-
-  const enrichedStocks = useMemo(() => {
-    if (!Array.isArray(stocks)) {
-      return [];
-    }
-    return stocks
-      .map((stock) => enrichStock(stock))
-      .filter(Boolean);
-  }, [stocks, enrichStock]);
-
-  const stockOrderMap = useMemo(() => {
-    if (!Array.isArray(stocks)) {
-      return {};
-    }
-    return stocks.reduce((acc, item, index) => {
-      if (item?.symbol) {
-        acc[item.symbol] = index;
+  // enrichedMap: symbol → merged stock+livePrice object.  Updates on every price tick
+  // but does NOT re-sort — the sort step is separated below.
+  const enrichedMap = useMemo(() => {
+    const map = {};
+    if (!Array.isArray(stocks)) return map;
+    stocks.forEach((stock) => {
+      if (!stock?.symbol) return;
+      const live = livePrices[stock.symbol];
+      const merged = live ? { ...stock, ...live } : { ...stock };
+      const previousClose = Number(merged.previous_close ?? merged.price);
+      if ((!merged.ltp || Number(merged.ltp) <= 0) && Number.isFinite(previousClose) && previousClose > 0) {
+        merged.ltp = previousClose;
+        merged.price_source = merged.price_source || 'previous_close';
       }
+      map[stock.symbol] = merged;
+    });
+    return map;
+  }, [stocks, livePrices]);
+
+  // stockOrderMap must be declared before structuralOrder because structuralOrder
+  // depends on it for the 'custom' sort.
+  const stockOrderMap = useMemo(() => {
+    if (!Array.isArray(stocks)) return {};
+    return stocks.reduce((acc, item, index) => {
+      if (item?.symbol) acc[item.symbol] = index;
       return acc;
     }, {});
   }, [stocks]);
 
+  // structuralOrder: sorted symbol list for custom/alphabetical modes.
+  // Does NOT depend on livePrices, so price ticks do NOT trigger a re-sort for
+  // these modes.  Returns null to signal that a price-sensitive sort is active.
+  const structuralOrder = useMemo(() => {
+    if (!Array.isArray(stocks) || stocks.length === 0) return null;
+    if (sortMode === 'custom') {
+      return [...stocks]
+        .sort((a, b) => (stockOrderMap[b.symbol] ?? -1) - (stockOrderMap[a.symbol] ?? -1))
+        .map((s) => s.symbol);
+    }
+    if (sortMode === 'alphabetical') {
+      return [...stocks]
+        .sort((a, b) => {
+          const nameA = (a.name || a.symbol || '').toUpperCase();
+          const nameB = (b.name || b.symbol || '').toUpperCase();
+          return nameA < nameB ? -1 : nameA > nameB ? 1 : 0;
+        })
+        .map((s) => s.symbol);
+    }
+    return null; // gain/loss sort needs live price data
+  }, [stocks, sortMode, stockOrderMap]);
+
+  // displayedStocks: O(n) map-lookup for structural sorts; O(n log n) sort only for
+  // gain/loss modes where price order changes on every tick.
   const displayedStocks = useMemo(() => {
-    if (!Array.isArray(enrichedStocks)) {
-      return [];
+    if (structuralOrder !== null) {
+      return structuralOrder.map((sym) => enrichedMap[sym]).filter(Boolean);
     }
-    if (sortMode === "custom") {
-      return [...enrichedStocks].sort((a, b) => {
-        const indexA = stockOrderMap[a.symbol] ?? -1;
-        const indexB = stockOrderMap[b.symbol] ?? -1;
-        return indexB - indexA;
-      });
+    // price-based sort
+    const all = stocks.map((s) => enrichedMap[s.symbol]).filter(Boolean);
+    if (sortMode === 'gain') {
+      return [...all].sort((a, b) => (Number(b.percent_change) || 0) - (Number(a.percent_change) || 0));
     }
-    if (sortMode === "alphabetical") {
-      return [...enrichedStocks].sort((a, b) => {
-        const nameA = (a.name || a.symbol || "").toUpperCase();
-        const nameB = (b.name || b.symbol || "").toUpperCase();
-        if (nameA < nameB) return -1;
-        if (nameA > nameB) return 1;
-        return 0;
-      });
+    if (sortMode === 'loss') {
+      return [...all].sort((a, b) => (Number(a.percent_change) || 0) - (Number(b.percent_change) || 0));
     }
-    if (sortMode === "gain") {
-      return [...enrichedStocks].sort((a, b) => (Number(b.percent_change) || 0) - (Number(a.percent_change) || 0));
-    }
-    if (sortMode === "loss") {
-      return [...enrichedStocks].sort((a, b) => (Number(a.percent_change) || 0) - (Number(b.percent_change) || 0));
-    }
-    return enrichedStocks;
-  }, [enrichedStocks, sortMode, stockOrderMap]);
+    return all;
+  }, [enrichedMap, structuralOrder, sortMode, stocks]);
 
   const formatPrice = (value) => {
     if (typeof value !== "number" || Number.isNaN(value)) {
-      return "0.00";
+      return "--";
     }
     return value.toLocaleString("en-IN", {
       minimumFractionDigits: 2,
@@ -168,7 +169,7 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
 
   const formatPercent = (value) => {
     if (typeof value !== "number" || Number.isNaN(value)) {
-      return "0.00";
+      return "--";
     }
     const sign = value > 0 ? "+" : value < 0 ? "-" : "";
     return `${sign}${Math.abs(value).toFixed(2)}`;
@@ -326,12 +327,12 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
         <StockSearch
           activeWatchlist={activeWatchlist}
           onAddStock={handleAddStock}
-          onResultClick={handleAddStock}
+          onResultClick={(stock) => handleRowClick(stock?.symbol)}
           placeholder="Search to Trade or Add to Watchlist"
           containerClassName="relative w-full"
           inputClassName="h-9 rounded-2xl border-slate-200 bg-slate-50 pl-10 text-sm"
           dropdownClassName="absolute z-20 mt-2 max-h-72 w-full overflow-y-auto rounded-2xl border bg-white shadow-xl"
-          showAddButton={false}
+          showAddButton
         />
 
         <div className="flex items-center gap-2">
@@ -439,14 +440,16 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
       <div className="watchlist-scroll flex-1 space-y-1.5 overflow-y-auto overflow-x-hidden">
         {isLoadingWatchlists ? (
           [...Array(4)].map((_, index) => <SidebarRowSkeleton key={index} />)
-        ) : enrichedStocks.length === 0 ? (
+        ) : displayedStocks.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center text-sm text-slate-500">
             No stocks in this watchlist yet. Use the search above to start adding.
           </div>
         ) : (
           displayedStocks.map((stock) => {
-            const change = Number(stock.change) || 0;
-            const percent = Number(stock.percent_change ?? stock.percentChange) || 0;
+            const ltp = Number(stock.ltp ?? stock.price);
+            const hasPrice = Number.isFinite(ltp) && ltp > 0;
+            const change = hasPrice ? Number(stock.change) : Number.NaN;
+            const percent = hasPrice ? Number(stock.percent_change ?? stock.percentChange) : Number.NaN;
             const isPositive = change >= 0;
 
             return (
@@ -461,11 +464,20 @@ const WatchlistSidebar = ({ onClose, isMobile = false }) => {
                     <p className="truncate text-[11px] text-slate-500">{stock.name || "--"}</p>
                   </div>
                   <div className="text-right whitespace-nowrap">
-                    <p className="text-sm font-semibold text-slate-900">₹{formatPrice(Number(stock.ltp) || 0)}</p>
-                    <p className={`text-[11px] font-semibold ${isPositive ? "text-emerald-600" : "text-red-500"}`}>
-                      {isPositive ? "+" : ""}{formatPrice(Math.abs(change))}
-                      <span className="ml-1">({formatPercent(percent)}%)</span>
-                    </p>
+                    {hasPrice ? (
+                      <>
+                        <p className="text-sm font-semibold text-slate-900">₹{formatPrice(ltp)}</p>
+                        <p className={`text-[11px] font-semibold ${isPositive ? "text-emerald-600" : "text-red-500"}`}>
+                          {isPositive ? "+" : ""}{formatPrice(Math.abs(change))}
+                          <span className="ml-1">({formatPercent(percent)}%)</span>
+                        </p>
+                      </>
+                    ) : (
+                      <p className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        Updating...
+                      </p>
+                    )}
                   </div>
                 </div>
 

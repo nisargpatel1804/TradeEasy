@@ -1,6 +1,7 @@
 import React, { createContext, useState, useEffect, useContext, useCallback, useRef } from 'react';
 import * as authService from '../services/auth.js'; // Using the dedicated auth service with .js extension
 import { useNavigate } from 'react-router-dom';
+import { useToast } from '../assets/ui/use-toast.js';
 
 const AuthContext = createContext(null);
 
@@ -41,8 +42,12 @@ export const AuthProvider = ({ children }) => {
       window.dispatchEvent(new CustomEvent('clear-local-search-caches'));
       // As a fallback, attempt to clear anything in localStorage namespaced for search.
       try {
+        const allowedPrefixes = ['te:search:', 'tradeeasy:search:', 'stock-search:'];
+        const allowedExactKeys = new Set(['te:search-cache', 'tradeeasy-search-cache']);
         Object.keys(localStorage).forEach(k => {
-          if (k && k.toLowerCase().includes('search')) {
+          const key = String(k || '').toLowerCase();
+          const isAllowedPrefix = allowedPrefixes.some((prefix) => key.startsWith(prefix));
+          if (isAllowedPrefix || allowedExactKeys.has(key)) {
             localStorage.removeItem(k);
           }
         });
@@ -93,6 +98,13 @@ export const AuthProvider = ({ children }) => {
         if (data.isAuthenticated) {
           setUser(data.user);
           setIsAuthenticated(true);
+          // keep a copy of the profile (if returned) so DataProvider can
+          // initialise without a second network request.
+          if (data.profile) {
+            try {
+              window.__initialProfile = data.profile;
+            } catch {}
+          }
         } else {
           clearLocalSearchCaches();
         }
@@ -110,14 +122,14 @@ export const AuthProvider = ({ children }) => {
     verifyUserSession();
   }, [clearLocalSearchCaches]);
 
-  // Effect to listen for the global 'unauthorized' event dispatched by api.js
+  // Also clear any cached profile when we deliberately log out via the
+  // unauthorized event listener.
   useEffect(() => {
     const onUnauthorized = () => {
-      // Important: do NOT call server logout here.
-      // When the session is already invalid, calling /logout can 401 and create loops.
       if (!isLoggingOutRef.current) {
         isLoggingOutRef.current = true;
         clearAuthState();
+        try { window.__initialProfile = null; } catch {};
         isLoggingOutRef.current = false;
       }
     };
@@ -129,16 +141,24 @@ export const AuthProvider = ({ children }) => {
     };
   }, [clearAuthState]);
 
+
   /**
    * Login function to be called from components.
    * It uses the authService, updates the state on success, and navigates.
    * @param {object} credentials - { client_id, password }
    */
+  const { toast } = useToast();
+
   const login = async (credentials) => {
     const data = await authService.login(credentials);
     if (data.success) {
       setUser(data.user);
       setIsAuthenticated(true);
+      // show feedback before navigating so the toast appears instantly
+      toast({
+        title: 'Login Successful!',
+        description: 'Welcome back to TradeEasy.',
+      });
       navigate('/dashboard'); // Navigate to a protected route on successful login
     }
     return data;

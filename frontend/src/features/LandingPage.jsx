@@ -52,7 +52,7 @@ const LandingPage = ({ initialMode = MODE.login }) => {
         password: loginForm.password,
         remember_me: Boolean(loginForm.remember_me),
       });
-      toast({ title: "Welcome back", description: "Logged in successfully." });
+      // AuthContext now shows a success toast before navigating
     } catch (err) {
       const message = err?.message || "Invalid credentials. Please try again.";
       setError(message);
@@ -102,10 +102,7 @@ const LandingPage = ({ initialMode = MODE.login }) => {
         remember_me: true,
       });
 
-      toast({
-        title: "Account created",
-        description: "You are now logged in and being redirected to your dashboard.",
-      });
+      // context toast already shown, additional feedback not needed
     } catch (err) {
       const message = err?.message || "Signup failed. Please try again.";
       setError(message);

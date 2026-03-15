@@ -22,27 +22,48 @@ const PerformancePage = ({ isEmbedded = false }) => {
 
   const loadData = useCallback(async ({ showLoader = false } = {}) => {
     try {
-      if (showLoader) {
-        setIsLoading(true);
-      }
+      if (showLoader) setIsLoading(true);
       setError(null);
-      
-      const portfolioResponse = await api.fetchPortfolio();
-      if (portfolioResponse.success) {
-        setPortfolioData(portfolioResponse);
+
+      const [pResp, oResp] = await Promise.allSettled([
+        api.fetchPortfolio(),
+        api.fetchOrders()
+      ]);
+
+      const errors = [];
+
+      if (pResp.status === 'fulfilled') {
+        const val = pResp.value;
+        if (val?.success) {
+          setPortfolioData(val);
+        } else {
+          errors.push(val?.message || 'Portfolio fetch failed');
+        }
+      } else {
+        errors.push(pResp.reason?.message || String(pResp.reason));
       }
-      
-      const ordersResponse = await api.fetchOrders();
-      if (ordersResponse.success) {
-        setOrders(ordersResponse.executed || []);
+
+      if (oResp.status === 'fulfilled') {
+        const val = oResp.value;
+        if (val?.success) {
+          setOrders(val.executed || []);
+        } else {
+          errors.push(val?.message || 'Orders fetch failed');
+        }
+      } else {
+        errors.push(oResp.reason?.message || String(oResp.reason));
+      }
+
+      if (errors.length) {
+        const msg = errors.join('; ');
+        setError(msg);
+        toast.error(`Error: ${msg}`);
       }
     } catch (err) {
       setError(err.message);
       toast.error(`Error: ${err.message}`);
     } finally {
-      if (showLoader) {
-        setIsLoading(false);
-      }
+      if (showLoader) setIsLoading(false);
     }
   }, []);
 
@@ -50,6 +71,18 @@ const PerformancePage = ({ isEmbedded = false }) => {
     loadData({ showLoader: true });
     const interval = setInterval(() => loadData(), 30000);
     return () => clearInterval(interval);
+  }, [loadData]);
+
+  useEffect(() => {
+    const onPortfolioReset = () => {
+      setPortfolioData(null);
+      setOrders([]);
+      setLivePrices({});
+      loadData({ showLoader: true });
+    };
+
+    window.addEventListener('te:portfolio-reset', onPortfolioReset);
+    return () => window.removeEventListener('te:portfolio-reset', onPortfolioReset);
   }, [loadData]);
 
   useEffect(() => {

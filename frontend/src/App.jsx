@@ -18,6 +18,42 @@ import NotFoundPage from './features/NotFoundPage.jsx';
 import DashboardLayout from "./features/DashboardLayout.jsx";
 import { Toaster } from "./assets/ui/toaster.jsx";
 import { Toaster as HotToaster } from "react-hot-toast";
+import { Skeleton } from "./assets/ui/skeleton.jsx";
+
+const StartupLoadingShell = () => (
+  <div className="min-h-screen bg-slate-50 text-slate-900">
+    <div className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
+      <div className="mx-auto flex h-16 max-w-[1600px] items-center gap-3 px-4">
+        <Skeleton className="h-9 w-9 rounded-full" />
+        <Skeleton className="h-9 w-32 rounded-full" />
+        <Skeleton className="h-9 flex-1 rounded-full" />
+        <Skeleton className="h-9 w-24 rounded-full" />
+      </div>
+    </div>
+
+    <div className="mx-auto flex max-w-[1600px] gap-3 px-2 pt-3 lg:px-3">
+      <aside className="hidden w-[340px] shrink-0 rounded-2xl border border-slate-200 bg-white p-3 lg:block">
+        <div className="space-y-2">
+          {Array.from({ length: 8 }).map((_, index) => (
+            <Skeleton key={`watchlist-skeleton-${index}`} className="h-10 w-full rounded-xl" />
+          ))}
+        </div>
+      </aside>
+
+      <main className="flex-1 space-y-3 pb-6">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <Skeleton key={`metric-skeleton-${index}`} className="h-[112px] w-full rounded-3xl" />
+          ))}
+        </div>
+        <div className="grid gap-4 lg:grid-cols-3">
+          <Skeleton className="min-h-[430px] w-full rounded-3xl lg:col-span-2" />
+          <Skeleton className="min-h-[430px] w-full rounded-3xl" />
+        </div>
+      </main>
+    </div>
+  </div>
+);
 
 /**
  * A wrapper component that protects routes requiring authentication.
@@ -28,8 +64,7 @@ const ProtectedRoute = ({ children }) => {
   const { isAuthenticated, isLoading } = useAuth();
   
   if (isLoading) {
-      // Optional: Render a loading spinner here while auth check completes
-      return <div className="flex min-h-screen items-center justify-center bg-gray-50">Loading...</div>;
+      return <StartupLoadingShell />;
   }
 
   if (!isAuthenticated) {
@@ -73,7 +108,6 @@ function App() {
           <Route path="/profile" element={<ProfilePage />} />
           
           {/* Market Routes */}
-          {/* Legacy redirect for any old links to /markets */}
           <Route path="/markets" element={<Navigate to="/market" replace />} />
           <Route path="/market" element={<MarketPage />} />
           <Route path="/indices" element={<Indices />} />

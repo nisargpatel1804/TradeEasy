@@ -118,11 +118,12 @@ def login():
             # Respect the remember_me flag from the client; default to False for security
             remember = bool(data.get('remember_me', False))
             # Prevent session fixation: clear previous session data before login
+            # and set the last activity timestamp in one shot to avoid two
+            # separate writes to the session store.
             session.clear()
-            login_user(user, remember=remember)
-            session.pop('login_attempts', None) # Clear attempts on successful login
-            # Update last activity timestamp for session idle timeout
             session['last_activity'] = time.time()
+            login_user(user, remember=remember)
+            session.pop('login_attempts', None)  # Clear attempts on successful login
             session.modified = True
             logger.info(f"User {user.client_id} logged in successfully (remember={remember}, ip={request.remote_addr}).")
             # Audit log (no secrets): successful login
@@ -134,7 +135,8 @@ def login():
             }), 200
         else:
             attempts.append(now)
-            session['login_attempts'] = attempts
+            # keep the list trimmed to the window length to avoid ever-growing
+            session['login_attempts'] = [ts for ts in attempts if now - ts < LOGIN_ATTEMPT_WINDOW_SECONDS]
             logger.warning(f"Failed login attempt for Client ID: {client_id} from IP: {request.remote_addr}")
             # Audit log (no secrets): failed login
             logger.info(f'AUDIT: login_failed client_id={client_id} ip={request.remote_addr} user_agent={request.headers.get("User-Agent")}')
@@ -180,16 +182,23 @@ def check_auth():
     This endpoint intentionally returns 200 even when the user is not
     authenticated to avoid noisy 401 console/network errors during normal
     logged-out states.
+
+    Returning the profile here allows the front-end to skip a follow-up
+    `/profile` request on page load, saving a network round trip.
     """
     if not current_user.is_authenticated:
-        return jsonify({"isAuthenticated": False, "user": None}), 200
+        return jsonify({"isAuthenticated": False, "user": None, "profile": None}), 200
+
+    # import here to avoid any potential circular import during module load
+    from app.routes.profile import _serialize_profile
 
     return jsonify({
         "isAuthenticated": True,
         "user": {
             "client_id": current_user.client_id,
             "username": current_user.username,
-        }
+        },
+        "profile": _serialize_profile(current_user),
     }), 200
 
 @auth_bp.route('/forgot-password', methods=['POST'])
@@ -223,7 +232,6 @@ def forgot_password():
         # Audit: password reset requested (do not include token in logs)
         logger.info(f"Password reset requested for user: {user.client_id} from IP: {request.remote_addr}")
         
-        # TODO: Send email with reset link in production (link should embed the plaintext token)
         # Note: We intentionally do NOT return the reset token in API responses.
         return jsonify({
             "success": True,

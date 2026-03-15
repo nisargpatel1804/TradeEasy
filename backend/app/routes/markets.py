@@ -1,59 +1,95 @@
-import csv
-import io
 import logging
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from datetime import time as dt_time
 from flask import Blueprint, jsonify
-from flask_login import login_required
-from mongoengine.queryset.visitor import Q
-import requests
+from app.moapi import get_mo_api_client
+from app.services.market_data import MO_INDEX_CATALOG
 from app.socket_manager import MO_WebSocket_Manager
-from app.models import AQScrip
-from app.services.market_data import MAJOR_INDEX_TARGETS
+from app.services.market_time import get_current_ist_time, is_market_holiday
 
 # --- Configuration ---
 logger = logging.getLogger(__name__)
 markets_bp = Blueprint("markets", __name__)
 
-# --- In-Memory Cache with TTL ---
-_api_cache = {}
-_index_lookup_warnings = set()
-CACHE_TTL_SECONDS = 30  # Cache API responses for 30 seconds to reduce load
+# --- In-memory caches ---
+_ltp_bulk_cache = {"data": {}, "ts": 0.0}
+_ltp_bulk_cache_lock = threading.Lock()
+_market_payload_cache = {"payload": None, "ts": 0.0}
+_indices_payload_cache = {"payload": None, "ts": 0.0}
+_nifty50_constituents = []
+LTP_BULK_CACHE_TTL = 30
+MARKET_PAYLOAD_CACHE_TTL = 5
+INDICES_PAYLOAD_CACHE_TTL = 5
+MARKET_PAYLOAD_CACHE_TTL_CLOSED = 300   # 5 min cache when market is closed
+LTP_BULK_CACHE_TTL_CLOSED = 600          # 10 min LTP bulk cache when market is closed
+INDICES_PAYLOAD_CACHE_TTL_CLOSED = 300   # 5 min cache for indices when market is closed
+MARKET_LTP_MAX_WORKERS = max(1, int(os.getenv("MARKET_LTP_MAX_WORKERS", "8")))
+INDEX_LTP_MAX_WORKERS = max(1, int(os.getenv("INDEX_LTP_MAX_WORKERS", "8")))
+MARKET_OPEN_DISPLAY_START = dt_time(9, 15)
+MARKET_CLOSE_DISPLAY_END = dt_time(15, 30)
 
-# Last-good market snapshot (used when provider is down / after-hours).
-_market_snapshot_cache = {"payload": None, "timestamp": 0.0}
-MARKET_SNAPSHOT_TTL_SECONDS = 12 * 60 * 60
-
-# Nifty 50 constituents CSV (official source)
-NIFTY50_CSV_URL = "https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv"
-NIFTY50_CACHE_TTL_SECONDS = 6 * 60 * 60  # refresh every 6 hours
-_nifty50_cache = {"symbols": [], "timestamp": 0.0}
-
-# Static fallback list (used only when the CSV is unreachable and no cached list exists).
-# This keeps the app functional during transient network/provider issues.
-NIFTY50_STATIC_SYMBOLS = [
-    "ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK",
-    "BAJAJ-AUTO", "BAJFINANCE", "BAJAJFINSV", "BEL", "BHARTIARTL",
-    "BPCL", "BRITANNIA", "CIPLA", "COALINDIA", "DRREDDY",
-    "EICHERMOT", "ETERNAL", "GRASIM", "HCLTECH", "HDFCBANK",
-    "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDUNILVR", "ICICIBANK",
-    "ITC", "INDUSINDBK", "INFY", "JSWSTEEL", "KOTAKBANK",
-    "LT", "M&M", "MARUTI", "NESTLEIND", "NTPC",
-    "ONGC", "POWERGRID", "RELIANCE", "SBILIFE", "SBIN",
-    "SUNPHARMA", "TCS", "TATACONSUM", "TATAMOTORS", "TATASTEEL",
-    "TECHM", "TITAN", "TRENT", "ULTRACEMCO", "WIPRO",
+# Authoritative static Nifty 50 universe used by the movers endpoint.
+# Scripcodes are pinned here so /market can skip the cold NSE master-data lookup.
+NIFTY50_STATIC_CONSTITUENTS = [
+    {"symbol": "ADANIENT.NSE", "name": "ADANIENT", "exchange": "NSE", "scripcode": 25},
+    {"symbol": "ADANIPORTS.NSE", "name": "ADANIPORTS", "exchange": "NSE", "scripcode": 15083},
+    {"symbol": "APOLLOHOSP.NSE", "name": "APOLLOHOSP", "exchange": "NSE", "scripcode": 157},
+    {"symbol": "ASIANPAINT.NSE", "name": "ASIANPAINT", "exchange": "NSE", "scripcode": 236},
+    {"symbol": "AXISBANK.NSE", "name": "AXISBANK", "exchange": "NSE", "scripcode": 5900},
+    {"symbol": "BAJAJ-AUTO.NSE", "name": "BAJAJ-AUTO", "exchange": "NSE", "scripcode": 16669},
+    {"symbol": "BAJFINANCE.NSE", "name": "BAJFINANCE", "exchange": "NSE", "scripcode": 317},
+    {"symbol": "BAJAJFINSV.NSE", "name": "BAJAJFINSV", "exchange": "NSE", "scripcode": 16675},
+    {"symbol": "BEL.NSE", "name": "BEL", "exchange": "NSE", "scripcode": 383},
+    {"symbol": "BHARTIARTL.NSE", "name": "BHARTIARTL", "exchange": "NSE", "scripcode": 10604},
+    {"symbol": "BPCL.NSE", "name": "BPCL", "exchange": "NSE", "scripcode": 526},
+    {"symbol": "BRITANNIA.NSE", "name": "BRITANNIA", "exchange": "NSE", "scripcode": 547},
+    {"symbol": "CIPLA.NSE", "name": "CIPLA", "exchange": "NSE", "scripcode": 694},
+    {"symbol": "COALINDIA.NSE", "name": "COALINDIA", "exchange": "NSE", "scripcode": 20374},
+    {"symbol": "DRREDDY.NSE", "name": "DRREDDY", "exchange": "NSE", "scripcode": 881},
+    {"symbol": "EICHERMOT.NSE", "name": "EICHERMOT", "exchange": "NSE", "scripcode": 910},
+    {"symbol": "ETERNAL.NSE", "name": "ETERNAL", "exchange": "NSE", "scripcode": 5097},
+    {"symbol": "GRASIM.NSE", "name": "GRASIM", "exchange": "NSE", "scripcode": 1232},
+    {"symbol": "HCLTECH.NSE", "name": "HCLTECH", "exchange": "NSE", "scripcode": 7229},
+    {"symbol": "HDFCBANK.NSE", "name": "HDFCBANK", "exchange": "NSE", "scripcode": 1333},
+    {"symbol": "HDFCLIFE.NSE", "name": "HDFCLIFE", "exchange": "NSE", "scripcode": 467},
+    {"symbol": "HEROMOTOCO.NSE", "name": "HEROMOTOCO", "exchange": "NSE", "scripcode": 1348},
+    {"symbol": "HINDALCO.NSE", "name": "HINDALCO", "exchange": "NSE", "scripcode": 1363},
+    {"symbol": "HINDUNILVR.NSE", "name": "HINDUNILVR", "exchange": "NSE", "scripcode": 1394},
+    {"symbol": "ICICIBANK.NSE", "name": "ICICIBANK", "exchange": "NSE", "scripcode": 4963},
+    {"symbol": "ITC.NSE", "name": "ITC", "exchange": "NSE", "scripcode": 1660},
+    {"symbol": "INDUSINDBK.NSE", "name": "INDUSINDBK", "exchange": "NSE", "scripcode": 5258},
+    {"symbol": "INFY.NSE", "name": "INFY", "exchange": "NSE", "scripcode": 1594},
+    {"symbol": "JSWSTEEL.NSE", "name": "JSWSTEEL", "exchange": "NSE", "scripcode": 11723},
+    {"symbol": "KOTAKBANK.NSE", "name": "KOTAKBANK", "exchange": "NSE", "scripcode": 1922},
+    {"symbol": "LT.NSE", "name": "LT", "exchange": "NSE", "scripcode": 11483},
+    {"symbol": "M&M.NSE", "name": "M&M", "exchange": "NSE", "scripcode": 2031},
+    {"symbol": "MARUTI.NSE", "name": "MARUTI", "exchange": "NSE", "scripcode": 10999},
+    {"symbol": "NESTLEIND.NSE", "name": "NESTLEIND", "exchange": "NSE", "scripcode": 17963},
+    {"symbol": "NTPC.NSE", "name": "NTPC", "exchange": "NSE", "scripcode": 11630},
+    {"symbol": "ONGC.NSE", "name": "ONGC", "exchange": "NSE", "scripcode": 2475},
+    {"symbol": "POWERGRID.NSE", "name": "POWERGRID", "exchange": "NSE", "scripcode": 14977},
+    {"symbol": "RELIANCE.NSE", "name": "RELIANCE", "exchange": "NSE", "scripcode": 2885},
+    {"symbol": "SBILIFE.NSE", "name": "SBILIFE", "exchange": "NSE", "scripcode": 21808},
+    {"symbol": "SBIN.NSE", "name": "SBIN", "exchange": "NSE", "scripcode": 3045},
+    {"symbol": "SUNPHARMA.NSE", "name": "SUNPHARMA", "exchange": "NSE", "scripcode": 3351},
+    {"symbol": "TCS.NSE", "name": "TCS", "exchange": "NSE", "scripcode": 11536},
+    {"symbol": "TATACONSUM.NSE", "name": "TATACONSUM", "exchange": "NSE", "scripcode": 3432},
+    {"symbol": "TATAMOTORS.NSE", "name": "TATAMOTORS", "exchange": "NSE", "scripcode": 3456},
+    {"symbol": "TATASTEEL.NSE", "name": "TATASTEEL", "exchange": "NSE", "scripcode": 3499},
+    {"symbol": "TECHM.NSE", "name": "TECHM", "exchange": "NSE", "scripcode": 13538},
+    {"symbol": "TITAN.NSE", "name": "TITAN", "exchange": "NSE", "scripcode": 3506},
+    {"symbol": "TRENT.NSE", "name": "TRENT", "exchange": "NSE", "scripcode": 1964},
+    {"symbol": "ULTRACEMCO.NSE", "name": "ULTRACEMCO", "exchange": "NSE", "scripcode": 11532},
+    {"symbol": "WIPRO.NSE", "name": "WIPRO", "exchange": "NSE", "scripcode": 3787},
 ]
-
-# NOTE: This module now focuses on Nifty 50 via the official CSV.
-# Other market/constituent routes were intentionally removed per spec.
 
 PRICE_KEYS = ("ltp", "indexvalue", "indexValue", "lastprice", "lastPrice", "close", "Close")
 CHANGE_KEYS = ("change", "indexchange", "indexChange")
 PERCENT_KEYS = ("percent_change", "percentChange", "pChange", "pchange", "indexpercentchange")
 PREV_CLOSE_KEYS = ("prevclose", "prevClose", "previousclose", "previousClose", "close", "Close")
-
-STOCK_PRICE_KEYS = ("ltp", "LTP", "close", "Close", "lastprice", "LastPrice", "LastRate")
-STOCK_PREV_CLOSE_KEYS = ("prevClose", "PrevClose", "prevclose", "PrevDayClose", "Close", "close")
-SCRIP_LOOKUP_KEYS = ("token", "scripcode", "ScripCode", "InstrumentToken", "instrumenttoken")
 
 
 def _extract_number(entry, candidate_keys):
@@ -92,107 +128,9 @@ def _normalize_index_payload(response):
         return data
     return {}
 
-# --- Helper Functions ---
-
-def _get_cached_or_fetch(cache_key, fetch_function, *args, **kwargs):
-    """
-    A simple time-based cache wrapper for API fetch functions to reduce redundant calls.
-    """
-    now = time.time()
-    if cache_key in _api_cache:
-        cached_data, timestamp = _api_cache[cache_key]
-        if now - timestamp < CACHE_TTL_SECONDS:
-            logger.debug(f"Cache HIT for key: {cache_key}")
-            return cached_data
-
-    logger.debug(f"Cache MISS for key: {cache_key}. Fetching from API.")
-    new_data = fetch_function(*args, **kwargs)
-    if new_data and new_data.get("status") == "SUCCESS":
-        _api_cache[cache_key] = (new_data, now)
-    return new_data
-
-def _to_rupees(paisa_value):
-    """Safely converts a value from paisa to rupees."""
-    try:
-        return float(paisa_value or 0) / 100.0
-    except (ValueError, TypeError):
-        return 0.0
-
-def _normalize_price_map(raw_data, key_candidates):
-    """Converts the API's price payload into a dictionary keyed by the first matching identifier."""
-    if isinstance(raw_data, dict):
-        return raw_data
-
-    normalized = {}
-    if isinstance(raw_data, list):
-        for entry in raw_data:
-            if not isinstance(entry, dict):
-                continue
-
-            for key in key_candidates:
-                identifier = entry.get(key)
-                if identifier is None or identifier == "":
-                    continue
-
-                normalized[str(identifier)] = entry
-                break
-
-    return normalized
-
-
-def _resolve_stock_price(entry, candidates):
-    """Extracts and converts the first numeric value (stored in paisa) into rupees."""
-    if not isinstance(entry, dict):
-        return 0.0
-
-    for key in candidates:
-        if key in entry:
-            value = entry.get(key)
-            rupee_value = _to_rupees(value)
-            if rupee_value > 0:
-                return rupee_value
-
-        # Case-insensitive fallback
-        matching_key = next((k for k in entry.keys() if isinstance(k, str) and k.lower() == key.lower()), None)
-        if matching_key:
-            value = entry.get(matching_key)
-            rupee_value = _to_rupees(value)
-            if rupee_value > 0:
-                return rupee_value
-
-    return 0.0
-
-
-def _resolve_stock_price_eod(entry, candidates):
-    """Extracts the first numeric price from EOD payload (values are already in rupees)."""
-    if not isinstance(entry, dict):
-        return 0.0
-
-    for key in candidates:
-        value = entry.get(key)
-        if value in (None, "", "NA", "NaN", "-", "null"):
-            value = None
-
-        if value is None:
-            matching_key = next((k for k in entry.keys() if isinstance(k, str) and k.lower() == key.lower()), None)
-            value = entry.get(matching_key) if matching_key else None
-
-        if value in (None, "", "NA", "NaN", "-", "null"):
-            continue
-
-        try:
-            numeric = float(value)
-            if numeric > 0:
-                return numeric
-        except (TypeError, ValueError):
-            continue
-
-    return 0.0
-
-
 def _split_movers(payload, limit=10):
-    """Splits the stock payload into top gainers and losers."""
-    gainers = [stock for stock in payload if stock.get("change", 0) > 0]
+    """Splits payload into two buckets: gainers (includes unchanged) and losers."""
+    gainers = [stock for stock in payload if stock.get("change", 0) >= 0]
     losers = [stock for stock in payload if stock.get("change", 0) < 0]
 
     sorted_gainers = sorted(gainers, key=lambda item: item.get("percent_change", 0), reverse=True)[:limit]
@@ -203,438 +141,389 @@ def _split_movers(payload, limit=10):
         "losers": sorted_losers,
         "gainer_count": len(gainers),
         "loser_count": len(losers),
-        "unchanged_count": len(payload) - (len(gainers) + len(losers)),
+        "unchanged_count": 0,
     }
 
 
-def _fetch_nifty50_symbols() -> list[str]:
-    """Fetch Nifty 50 constituent symbols (tickers) from the official CSV."""
+def _is_live_market_window(now_ist=None) -> bool:
+    now_ist = now_ist or get_current_ist_time()
+    return (
+        now_ist.weekday() < 5
+        and not is_market_holiday(now_ist)
+        and MARKET_OPEN_DISPLAY_START <= now_ist.time() <= MARKET_CLOSE_DISPLAY_END
+    )
+
+
+def _get_cached_market_payload(effective_ttl=MARKET_PAYLOAD_CACHE_TTL):
+    payload = _market_payload_cache.get("payload")
+    timestamp = float(_market_payload_cache.get("ts") or 0.0)
+    if not payload or not timestamp:
+        return None
+    if (time.time() - timestamp) >= effective_ttl:
+        _market_payload_cache["payload"] = None
+        _market_payload_cache["ts"] = 0.0
+        return None
+    return dict(payload)
+
+
+def _store_market_payload(payload):
+    _market_payload_cache["payload"] = dict(payload)
+    _market_payload_cache["ts"] = time.time()
+
+
+def _get_cached_indices_payload(effective_ttl=INDICES_PAYLOAD_CACHE_TTL):
+    payload = _indices_payload_cache.get("payload")
+    timestamp = float(_indices_payload_cache.get("ts") or 0.0)
+    if not payload or not timestamp:
+        return None
+    if (time.time() - timestamp) >= effective_ttl:
+        _indices_payload_cache["payload"] = None
+        _indices_payload_cache["ts"] = 0.0
+        return None
+    return dict(payload)
+
+
+def _store_indices_payload(payload):
+    _indices_payload_cache["payload"] = dict(payload)
+    _indices_payload_cache["ts"] = time.time()
+
+
+def _build_indices_response_payload(indices, market_status, provider_available=True):
+    return {
+        "success": True,
+        "provider_available": bool(provider_available),
+        "market_status": market_status,
+        "indices": indices,
+        "last_updated": int(time.time() * 1000),
+    }
+
+
+def _resolve_constituents() -> list[dict]:
+    """Return the static Nifty 50 universe with pinned MO scripcodes."""
+    global _nifty50_constituents
+
+    if _nifty50_constituents and all(item.get("scripcode") is not None for item in _nifty50_constituents):
+        return _nifty50_constituents
+
+    _nifty50_constituents = [dict(item) for item in NIFTY50_STATIC_CONSTITUENTS]
+    logger.info(
+        "Nifty50 static universe loaded from pinned mapping: %d symbols, %d scripcodes resolved.",
+        len(_nifty50_constituents),
+        len(_nifty50_constituents),
+    )
+    return _nifty50_constituents
+
+
+def _fetch_ltp_bulk(constituents: list[dict], mo_api, effective_ttl: float = LTP_BULK_CACHE_TTL) -> dict[str, dict]:
+    """Fetch LTP + prev_close in parallel for all Nifty 50 stocks, with a short TTL cache."""
     now = time.time()
-    if _nifty50_cache["symbols"] and (now - _nifty50_cache["timestamp"] < NIFTY50_CACHE_TTL_SECONDS):
-        return list(_nifty50_cache["symbols"])
+    cached_data = _ltp_bulk_cache.get("data") or {}
+    cached_ts = float(_ltp_bulk_cache.get("ts") or 0.0)
+    if cached_data and (now - cached_ts) < effective_ttl:
+        return cached_data
 
-    try:
-        # Use browser-like headers to avoid being blocked by the server
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1"
-        }
+    if not constituents:
+        return {}
 
-        # NiftyIndices can be slow/occasionally block default clients.
-        # Try a couple times before falling back.
-        resp = None
-        last_error = None
-        for attempt in range(2):
-            try:
-                resp = requests.get(NIFTY50_CSV_URL, headers=headers, timeout=(10, 30))
-                resp.raise_for_status()
-                break
-            except Exception as exc:
-                last_error = exc
-                # Short sleep before retry
-                time.sleep(1)
+    def _fetch_one(item):
+        scripcode = int(item.get("scripcode") or 0)
+        if not scripcode:
+            return None
 
-        if resp is None:
-            raise last_error or RuntimeError("CSV fetch failed")
-
-        content = resp.content.decode("utf-8", errors="replace")
-        reader = csv.DictReader(io.StringIO(content))
-
-        symbols: list[str] = []
-        for row in reader:
-            # Column is typically "Symbol"
-            sym = (row.get("Symbol") or row.get("SYMBOL") or "").strip().upper()
-            if sym:
-                symbols.append(sym)
-
-        # Keep order stable, de-dup just in case
-        seen = set()
-        deduped = []
-        for sym in symbols:
-            if sym in seen:
-                continue
-            seen.add(sym)
-            deduped.append(sym)
-
-        if deduped:
-            _nifty50_cache["symbols"] = deduped
-            _nifty50_cache["timestamp"] = now
-            logger.info(f"Successfully fetched {len(deduped)} symbols from Nifty CSV.")
-        return deduped
-    except Exception as e:
-        # Warn but don't error out - fallback to static list to keep app running
-        logger.warning(f"Failed to fetch Nifty 50 CSV (using static fallback): {e}")
-        
-        # Best-effort fallback to last cached result
-        cached = list(_nifty50_cache.get("symbols") or [])
-        if cached:
-            return cached
-        return list(NIFTY50_STATIC_SYMBOLS)
-
-
-def _seed_and_subscribe_nifty50(socket_manager: MO_WebSocket_Manager) -> list[dict]:
-    """Ensure all Nifty 50 scrips are subscribed and seeded with initial snapshots."""
-    mo_api = socket_manager.mo_api
-    symbols = _fetch_nifty50_symbols()
-    if not symbols:
-        # Fallback to the well-known static NIFTY 50 symbol list. Deriving from DB can be
-        # unreliable at first startup if CSV fetch fails and database index metadata is missing
-        # or inconsistent. The static fallback is a safer default to avoid showing unrelated
-        # watchlist symbols as Nifty constituents.
-        symbols = list(NIFTY50_STATIC_SYMBOLS)
-
-    if not symbols:
-        return []
-
-    # Resolve to MO scripcodes via master DB
-    aq_scrips = list(AQScrip.objects(exchangename="NSE", scripshortname__in=symbols).only(
-        "scripcode", "scripshortname", "scripname", "exchangename"
-    ))
-    by_short = {str(doc.scripshortname).upper(): doc for doc in aq_scrips if doc and doc.scripshortname}
-
-    # Fetch bulk EOD once for seeding prev_close + fallback price.
-    # NOTE: MO EOD values are already in rupees (not paisa).
-    eod_list = []
-    try:
-        eod_resp = _get_cached_or_fetch("eod_bulk_NSE", mo_api.get_eod_data, "NSE")
-        if eod_resp and eod_resp.get("status") == "SUCCESS":
-            eod_list = eod_resp.get("data", []) or []
-    except Exception as e:
-        logger.warning(f"Unable to fetch NSE EOD bulk for seeding: {e}")
-
-    eod_by_scrip = _normalize_price_map(eod_list, SCRIP_LOOKUP_KEYS) if eod_list else {}
-
-    constituents: list[dict] = []
-    subscribed_count = 0
-    seeded_count = 0
-
-    for ticker in symbols:
-        doc = by_short.get(ticker)
-        if not doc:
-            logger.debug(f"Nifty50 ticker '{ticker}' not found in AQScrip.")
-            continue
-
-        full_symbol = f"{ticker}.NSE"
-        scripcode = int(doc.scripcode)
-
-        # Queue websocket subscription (idempotent)
         try:
-            socket_manager.register_scrip(symbol=full_symbol, exchange="NSE", scripcode=scripcode, exchange_type="CASH")
-            subscribed_count += 1
-        except Exception as e:
-            logger.warning(f"Failed to register websocket for {full_symbol}: {e}")
+            response = mo_api.get_ltp_data("NSE", scripcode)
+            if not response or response.get("status") != "SUCCESS":
+                return None
 
-        # Seed prev_close + initial snapshot (so % change works immediately)
-        price_data = eod_by_scrip.get(str(scripcode)) if eod_by_scrip else None
-        if isinstance(price_data, dict):
-            ltp = _resolve_stock_price_eod(price_data, STOCK_PRICE_KEYS)
-            prev_close = _resolve_stock_price_eod(price_data, STOCK_PREV_CLOSE_KEYS)
+            data = response.get("data") or {}
+            if isinstance(data, list):
+                data = data[0] if data else {}
+            if not isinstance(data, dict):
+                return None
 
-            if prev_close > 0:
-                composite_key = f"NSE:{scripcode}"
-                with socket_manager.data_lock:
-                    socket_manager.scrip_prev_close[composite_key] = prev_close
+            prev_close = float(data.get("close") or 0) / 100.0
+            ltp_price = float(data.get("ltp") or data.get("close") or 0) / 100.0
+            if ltp_price <= 0 or prev_close <= 0:
+                return None
 
-            if ltp > 0 and prev_close > 0:
-                change = ltp - prev_close
-                percent_change = (change / prev_close) * 100 if prev_close else 0.0
-                payload = {
-                    "symbol": full_symbol,
-                    "ltp": round(ltp, 2),
-                    "change": round(change, 2),
-                    "percent_change": round(percent_change, 2),
-                    "volume": int(price_data.get("volume", 0) or 0),
-                    "price_source": "eod_seed",
-                    "last_updated": int(time.time() * 1000),
-                }
-                with socket_manager.data_lock:
-                    # Don't clobber a fresher websocket value, but DO replace empty/zero snapshots.
-                    existing = socket_manager.latest_stock_data.get(full_symbol)
-                    existing_ltp = 0.0
-                    if isinstance(existing, dict):
-                        try:
-                            existing_ltp = float(existing.get("ltp") or 0.0)
-                        except (TypeError, ValueError):
-                            existing_ltp = 0.0
+            return str(scripcode), {
+                "ltp": round(ltp_price, 2),
+                "prev_close": round(prev_close, 2),
+            }
+        except Exception as exc:
+            logger.debug("Failed bulk LTP fetch for scripcode=%s: %s", scripcode, exc)
+            return None
 
-                    if not existing or existing_ltp <= 0:
-                        socket_manager.latest_stock_data[full_symbol] = payload
-                seeded_count += 1
+    with _ltp_bulk_cache_lock:
+        cached_data = _ltp_bulk_cache.get("data") or {}
+        cached_ts = float(_ltp_bulk_cache.get("ts") or 0.0)
+        if cached_data and (time.time() - cached_ts) < effective_ttl:
+            return cached_data
 
-        constituents.append({
-            "symbol": full_symbol,
-            "name": (doc.scripname or ticker).replace(" EQ", ""),
+        results = {}
+        max_workers = min(MARKET_LTP_MAX_WORKERS, len(constituents))
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        futures = {executor.submit(_fetch_one, item): item for item in constituents}
+        timed_out = False
+        try:
+            for future in as_completed(futures, timeout=20):
+                result = future.result()
+                if not result:
+                    continue
+                scripcode, payload = result
+                results[scripcode] = payload
+        except FuturesTimeoutError:
+            timed_out = True
+            logger.warning(
+                "Timed out waiting for all Nifty50 LTP responses; returning partial data (%d/%d).",
+                len(results),
+                len(futures),
+            )
+            for future in futures:
+                if not future.done():
+                    future.cancel()
+        finally:
+            executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
+
+        _ltp_bulk_cache["data"] = results
+        _ltp_bulk_cache["ts"] = time.time()
+        return results
+
+
+def _build_market_payload(constituents, ltp_bulk=None, market_status="CLOSED"):
+    ltp_bulk = ltp_bulk or {}
+
+    stocks_payload = []
+    for item in constituents:
+        symbol = item["symbol"]
+        scripcode = str(item.get("scripcode")) if item.get("scripcode") is not None else None
+        ltp_entry = ltp_bulk.get(scripcode) if scripcode else {}
+        prev_close = float((ltp_entry or {}).get("prev_close") or 0.0)
+
+        price = float((ltp_entry or {}).get("ltp") or 0.0)
+        change = 0.0
+        percent_change = 0.0
+        if price > 0 and prev_close > 0:
+            change = price - prev_close
+            percent_change = (change / prev_close) * 100.0
+
+        stocks_payload.append({
+            "symbol": symbol,
+            "name": item.get("name") or symbol,
+            "ltp": round(price, 2),
+            "change": round(change, 2),
+            "percent_change": round(percent_change, 2),
             "exchange": "NSE",
-            "scripcode": scripcode,
         })
 
-    logger.info(
-        "Nifty50 init complete: %s constituents, %s registered, %s seeded",
-        len(constituents),
-        subscribed_count,
-        seeded_count,
-    )
-    return constituents
+    movers = _split_movers(stocks_payload, limit=10)
+    return {
+        "success": True,
+        "provider_available": market_status == "OPEN",
+        "market_name": "Nifty 50",
+        "market_status": market_status,
+        "total_count": len(stocks_payload),
+        "gainers": movers["gainers"],
+        "losers": movers["losers"],
+        "gainer_count": movers["gainer_count"],
+        "loser_count": movers["loser_count"],
+        "unchanged": movers["unchanged_count"],
+        "stocks": stocks_payload,
+        "last_updated": int(time.time() * 1000),
+    }
 
-def _get_index_constituents(exchange, search_terms, preferred_codes=None):
-    """Finds constituent scrips for a major index from the database."""
-    normalized_exchange = (exchange or "").upper()
-    normalized_terms = [term.strip() for term in (search_terms or []) if term]
-    normalized_codes = [str(code).strip() for code in (preferred_codes or []) if code]
+def _build_index_payload(name, exchange, code, ltp_payload=None):
+    ltp_payload = ltp_payload or {}
 
-    base_query = Q(exchangename=normalized_exchange) & Q(instrumentname="INDEX")
+    price = _extract_number(ltp_payload, PRICE_KEYS)
+    prev_close = _extract_number(ltp_payload, PREV_CLOSE_KEYS)
+    change = _extract_number(ltp_payload, CHANGE_KEYS)
+    percent_change = _extract_number(ltp_payload, PERCENT_KEYS)
 
-    index_doc = None
-    if normalized_codes:
-        numeric_codes = []
-        for code in normalized_codes:
-            try:
-                numeric_codes.append(int(code))
-            except (TypeError, ValueError):
+    if (not prev_close or prev_close <= 0) and change is not None and price is not None:
+        approx_prev = price - change
+        if approx_prev > 0:
+            prev_close = approx_prev
+
+    if (change is None or percent_change is None) and price and prev_close and prev_close > 0:
+        change = price - prev_close
+        percent_change = (change / prev_close) * 100.0
+
+    if not price or price <= 0:
+        return None
+
+    if (change is None or percent_change is None) and (not prev_close or prev_close <= 0):
+        return None
+
+    if change is None:
+        change = 0.0
+    if percent_change is None:
+        percent_change = 0.0
+
+    return {
+        "symbol": f"{exchange}:{code}",
+        "name": name,
+        "exchange": exchange,
+        "price": round(float(price), 2),
+        "change": round(float(change), 2),
+        "percent_change": round(float(percent_change), 2),
+        "entityType": "index",
+        "prev_close": round(float(prev_close), 2) if prev_close and prev_close > 0 else 0.0,
+    }
+
+
+def _fetch_index_payloads_bulk(mo_api, index_catalog):
+    """Fetch all configured index LTP payloads in parallel for cold /indices loads."""
+    catalog_items = []
+    for exchange, entries in index_catalog.items():
+        for catalog_entry in entries:
+            code = str(catalog_entry.get("code") or "").strip()
+            name = catalog_entry.get("name") or f"{exchange}:{code}"
+            if not code:
+                logger.warning("Skipping index with missing code for %s: %s", exchange, catalog_entry)
                 continue
-        if numeric_codes:
-            index_doc = AQScrip.objects(base_query & Q(scripcode__in=numeric_codes)).first()
+            catalog_items.append((exchange, code, name))
 
-    if not index_doc and normalized_terms:
-        term_query = Q()
-        for term in normalized_terms:
-            term_query |= Q(scripname__icontains=term) | Q(scripshortname__icontains=term)
-        if term_query:
-            index_doc = AQScrip.objects(base_query & term_query).first()
-
-    if not index_doc:
-        warning_key = (normalized_exchange, tuple(sorted(normalized_terms or normalized_codes)))
-        if warning_key not in _index_lookup_warnings:
-            logger.warning(f"Could not resolve index identifier for {normalized_terms or normalized_codes} on {normalized_exchange}")
-            _index_lookup_warnings.add(warning_key)
+    if not catalog_items:
         return []
 
-    if not index_doc.indicesidentifier:
-        logger.warning(f"Index document for {normalized_terms or normalized_codes} on {normalized_exchange} lacks indicesidentifier")
-        return []
+    def _fetch_one(item):
+        exchange, code, name = item
+        try:
+            ltp_resp = mo_api.get_index_ltp(exchange, int(code))
+            ltp_data = _normalize_index_payload(ltp_resp)
+            payload = _build_index_payload(name=name, exchange=exchange, code=code, ltp_payload=ltp_data)
+            if not payload:
+                logger.warning("Skipping incomplete index payload for %s:%s", exchange, code)
+                return None
+            return payload
+        except Exception as exc:
+            logger.warning("Failed fetching index payload for %s:%s: %s", exchange, code, exc)
+            return None
 
-    return list(AQScrip.objects(
-        exchangename=normalized_exchange,
-        indicesidentifier=index_doc.indicesidentifier,
-        instrumentname__ne="INDEX"  # Filter out the index itself from its own constituents
-    ))
+    results = []
+    max_workers = min(INDEX_LTP_MAX_WORKERS, len(catalog_items))
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    futures = {executor.submit(_fetch_one, item): item for item in catalog_items}
+    timed_out = False
+    try:
+        for future in as_completed(futures, timeout=20):
+            payload = future.result()
+            if payload:
+                results.append(payload)
+    except FuturesTimeoutError:
+        timed_out = True
+        logger.warning(
+            "Timed out waiting for index LTP responses; returning partial data (%d/%d).",
+            len(results),
+            len(futures),
+        )
+        for future in futures:
+            if not future.done():
+                future.cancel()
+    finally:
+        executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
+
+    return results
 
 # --- API Routes ---
 
 @markets_bp.route("/indices", methods=["GET"])
 def get_market_indices():
-    """
-    Provides a snapshot of major market indices by efficiently fetching and
-    caching bulk data from the Motilal Oswal API.
-    """
-    formatted_indices = []
+    """Returns the full configured index catalog with direct MO index LTP data."""
     try:
         socket_manager = MO_WebSocket_Manager()
-        mo_api = socket_manager.mo_api
+        now_ist = get_current_ist_time()
+        in_live_window = _is_live_market_window(now_ist)
+        market_status = "OPEN" if in_live_window else "CLOSED"
+        effective_indices_ttl = INDICES_PAYLOAD_CACHE_TTL if in_live_window else INDICES_PAYLOAD_CACHE_TTL_CLOSED
+        cache_max_age = 5 if in_live_window else 300
+        cached_payload = _get_cached_indices_payload(effective_indices_ttl)
+        if cached_payload:
+            cached_payload["market_status"] = market_status
+            response = jsonify(cached_payload)
+            response.headers["Cache-Control"] = f"public, max-age={cache_max_age}, must-revalidate"
+            return response, 200
 
-        if not mo_api.auth_token and not mo_api.login():
+        cached_manager_indices = socket_manager.get_latest_indices_data()
+        if cached_manager_indices:
+            sorted_indices = sorted(cached_manager_indices, key=lambda item: (item.get("exchange", ""), item.get("name", "")))
+            payload = _build_indices_response_payload(sorted_indices, market_status=market_status, provider_available=True)
+            _store_indices_payload(payload)
+            response = jsonify(payload)
+            response.headers["Cache-Control"] = f"public, max-age={cache_max_age}, must-revalidate"
+            return response, 200
+
+        mo_api = get_mo_api_client()
+        if not mo_api.login():
             logger.error("API authentication failed in /indices endpoint.")
             return jsonify({"success": False, "message": "Market data provider is currently unavailable."}), 503
 
-        market_status = "OPEN" if mo_api.market_hours.is_market_open() else "CLOSED"
-        
-        index_payloads = {}
+        formatted_indices = []
+        for payload in _fetch_index_payloads_bulk(mo_api, MO_INDEX_CATALOG):
+            code = str(payload.get("symbol", "").split(":")[-1]).strip()
+            latest_payload = {key: value for key, value in payload.items() if key != "prev_close"}
+            formatted_indices.append(latest_payload)
+            socket_manager.update_index_metadata(
+                indexcode=code,
+                name=payload.get("name"),
+                exchange=payload.get("exchange"),
+                prev_close=payload.get("prev_close"),
+                latest_payload=latest_payload,
+            )
 
-        for exchange in ["NSE", "BSE"]:
-            try:
-                master_resp = _get_cached_or_fetch(f"index_master_{exchange}", mo_api.get_index_data, exchange)
+        formatted_indices.sort(key=lambda item: (item["exchange"], item["name"]))
+        payload = _build_indices_response_payload(formatted_indices, market_status=market_status, provider_available=True)
+        _store_indices_payload(payload)
 
-                if not (master_resp and master_resp.get("status") == "SUCCESS"):
-                    logger.warning(f"Failed to fetch index master data for {exchange}")
-                    continue
-
-                master_list = master_resp.get("data", []) or []
-
-                for entry in master_list:
-                    try:
-                        indexcode = str(entry.get("indexcode") or entry.get("IndexCode") or entry.get("scripcode"))
-                        display_name = entry.get("indexname") or entry.get("IndexName") or entry.get("name")
-
-                        if not indexcode or not display_name:
-                            continue
-
-                        price = _extract_number(entry, PRICE_KEYS)
-                        change = _extract_number(entry, CHANGE_KEYS)
-                        percent_change = _extract_number(entry, PERCENT_KEYS)
-                        prev_close = _extract_number(entry, PREV_CLOSE_KEYS)
-
-                        if not price or price <= 0:
-                            cache_key = f"index_ltp_{exchange}_{indexcode}"
-                            ltp_resp = _get_cached_or_fetch(cache_key, mo_api.get_index_ltp, exchange, indexcode)
-                            ltp_data = _normalize_index_payload(ltp_resp)
-
-                            price = _extract_number(ltp_data, PRICE_KEYS) or price
-                            if change is None:
-                                change = _extract_number(ltp_data, CHANGE_KEYS)
-                            if percent_change is None:
-                                percent_change = _extract_number(ltp_data, PERCENT_KEYS)
-                            if not prev_close or prev_close <= 0:
-                                prev_close = _extract_number(ltp_data, PREV_CLOSE_KEYS)
-
-                        if not price or price <= 0:
-                            continue
-
-                        if (not prev_close or prev_close <= 0) and change is not None:
-                            approx_prev = price - change
-                            if approx_prev > 0:
-                                prev_close = approx_prev
-
-                        if (not prev_close or prev_close <= 0) and percent_change not in (None, 0):
-                            try:
-                                ratio = 1 + (percent_change / 100.0)
-                                if ratio:
-                                    approx_prev = price / ratio
-                                    if approx_prev > 0:
-                                        prev_close = approx_prev
-                            except ZeroDivisionError:
-                                pass
-
-                        if change is None and prev_close and prev_close > 0:
-                            change = price - prev_close
-
-                        if percent_change is None and prev_close and prev_close > 0:
-                            percent_change = ((price - prev_close) / prev_close) * 100
-
-                        change = change if change is not None else 0.0
-                        percent_change = percent_change if percent_change is not None else 0.0
-
-                        symbol = f"{exchange}:{indexcode}"
-                        payload = {
-                            "symbol": symbol,
-                            "name": display_name,
-                            "exchange": exchange,
-                            "price": round(price, 2),
-                            "change": round(change, 2),
-                            "percent_change": round(percent_change, 2),
-                            "entityType": "index",
-                        }
-
-                        index_payloads[symbol] = payload
-                        socket_manager.update_index_metadata(
-                            indexcode=indexcode,
-                            name=display_name,
-                            exchange=exchange,
-                            prev_close=prev_close,
-                            latest_payload=payload,
-                        )
-                    except Exception as entry_error:
-                        logger.error(f"Error processing index entry on {exchange}: {entry_error}", exc_info=True)
-                        continue
-            except Exception as exchange_error:
-                logger.error(f"Error fetching indices for {exchange}: {exchange_error}", exc_info=True)
-                continue
-
-        if not index_payloads and MAJOR_INDEX_TARGETS:
-            for exchange, targets in MAJOR_INDEX_TARGETS.items():
-                for target in targets:
-                    for code in target.get("codes", []):
-                        symbol = f"{exchange}:{code}"
-                        index_payloads[symbol] = {
-                            "symbol": symbol,
-                            "name": target.get("display") or symbol,
-                            "exchange": exchange,
-                            "price": 0.0,
-                            "change": 0.0,
-                            "percent_change": 0.0,
-                            "entityType": "index",
-                        }
-
-        formatted_indices = sorted(index_payloads.values(), key=lambda item: (item["exchange"], item["name"]))
-
-        return jsonify({
-            "success": True,
-            "market_status": market_status,
-            "indices": formatted_indices,
-            "last_updated": int(time.time() * 1000)
-        }), 200
+        response = jsonify(payload)
+        response.headers["Cache-Control"] = f"public, max-age={cache_max_age}, must-revalidate"
+        return response, 200
 
     except Exception as e:
         logger.error(f"Error in /indices endpoint: {e}", exc_info=True)
         return jsonify({
             "success": False, 
             "message": "An internal server error occurred.",
-            "indices": formatted_indices  # Return whatever we managed to fetch
+            "indices": []
         }), 500
 
 
 @markets_bp.route("/market", methods=["GET"])
 def get_market():
-    """Returns Nifty 50 constituents + real-time movers (server-side)."""
+    """Returns Nifty 50 gainers/losers from direct MO LTP data for the static universe."""
     try:
-        socket_manager = MO_WebSocket_Manager()
-        mo_api = socket_manager.mo_api
+        mo_api = get_mo_api_client()
+        now_ist = get_current_ist_time()
+        in_live_window = _is_live_market_window(now_ist)
+        effective_payload_ttl = MARKET_PAYLOAD_CACHE_TTL if in_live_window else MARKET_PAYLOAD_CACHE_TTL_CLOSED
+        effective_ltp_ttl = LTP_BULK_CACHE_TTL if in_live_window else LTP_BULK_CACHE_TTL_CLOSED
+        cache_max_age = 5 if in_live_window else 300
+        cached_payload = _get_cached_market_payload(effective_payload_ttl)
+        if cached_payload:
+            cached_payload["market_status"] = "OPEN" if in_live_window else "CLOSED"
+            response = jsonify(cached_payload)
+            response.headers["Cache-Control"] = f"public, max-age={cache_max_age}, must-revalidate"
+            return response, 200
 
-        provider_available = bool(mo_api.auth_token) or bool(mo_api.login())
+        provider_available = bool(mo_api.login())
+        if not provider_available:
+            return jsonify({"success": False, "message": "Market data provider is currently unavailable."}), 503
 
-        constituents = _seed_and_subscribe_nifty50(socket_manager)
+        constituents = _resolve_constituents()
         if not constituents:
             return jsonify({"success": False, "message": "Could not load Nifty 50 constituents."}), 503
 
-        market_status = "OPEN" if mo_api.market_hours.is_market_open() else "CLOSED"
+        market_status = "OPEN" if in_live_window else "CLOSED"
 
-        # Build stock payload from the websocket manager's latest cache
-        symbols = [item["symbol"] for item in constituents]
-        latest_map = socket_manager.get_latest_stock_data(symbols=symbols)
+        ltp_bulk = _fetch_ltp_bulk(constituents, mo_api, effective_ltp_ttl)
+        payload = _build_market_payload(constituents=constituents, ltp_bulk=ltp_bulk, market_status=market_status)
+        payload["provider_available"] = True
+        _store_market_payload(payload)
 
-        stocks_payload = []
-        for item in constituents:
-            symbol = item["symbol"]
-            latest = latest_map.get(symbol) or {}
-            ltp = float(latest.get("ltp") or 0.0)
-            change = float(latest.get("change") or 0.0)
-            percent_change = float(latest.get("percent_change") or 0.0)
-            stocks_payload.append({
-                "symbol": symbol,
-                "name": item.get("name") or symbol,
-                "ltp": round(ltp, 2),
-                "change": round(change, 2),
-                "percent_change": round(percent_change, 2),
-                "exchange": "NSE",
-            })
-
-        # Movers should be classified from live websocket-derived fields
-        movers = _split_movers(stocks_payload, limit=10)
-
-        payload = {
-            "success": True,
-            "provider_available": bool(provider_available),
-            "market_name": "Nifty 50",
-            "market_status": market_status,
-            "total_count": len(stocks_payload),
-            "gainers": movers["gainers"],
-            "losers": movers["losers"],
-            "gainer_count": movers["gainer_count"],
-            "loser_count": movers["loser_count"],
-            "unchanged": movers["unchanged_count"],
-            "stocks": sorted(stocks_payload, key=lambda x: x["symbol"]),
-            "last_updated": int(time.time() * 1000),
-        }
-
-        # If provider is unavailable, serve the last-good snapshot (best-effort).
-        now = time.time()
-        cached_snapshot = _market_snapshot_cache.get("payload")
-        cached_at = float(_market_snapshot_cache.get("timestamp") or 0.0)
-        if not provider_available and cached_snapshot and (now - cached_at) < MARKET_SNAPSHOT_TTL_SECONDS:
-            cached_payload = dict(cached_snapshot)
-            cached_payload["provider_available"] = False
-            cached_payload["market_status"] = market_status
-            cached_payload["last_updated"] = int(time.time() * 1000)
-            return jsonify(cached_payload), 200
-
-        # Cache only when we have provider-backed values (not all-zero placeholders).
-        if provider_available and payload.get("total_count"):
-            _market_snapshot_cache["payload"] = payload
-            _market_snapshot_cache["timestamp"] = now
-
-        return jsonify(payload), 200
+        response = jsonify(payload)
+        response.headers["Cache-Control"] = f"public, max-age={cache_max_age}, must-revalidate"
+        return response, 200
 
     except Exception as e:
         logger.error(f"Error in /market endpoint: {e}", exc_info=True)

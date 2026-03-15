@@ -10,6 +10,7 @@ import { Activity, Briefcase, Box, RefreshCw, TrendingDown, TrendingUp, Wallet, 
 import * as api from "../services/api.js";
 import { useDataContext } from "../context/DataContext.jsx";
 import priceUpdateService from "../services/priceUpdateService.js";
+import MarketCache from "../utils/marketCache.js";
 import TradeForm from "./TradeForm.jsx";
 import PortfolioPage from "./PortfolioPage.jsx";
 import PerformancePage from "./PerformancePage.jsx";
@@ -33,15 +34,59 @@ const INITIAL_ORDER_STATE = ORDER_TABS.reduce((acc, tab) => {
 }, {});
 
 const MOVERS_PAGE_SIZE = 10;
+const MOVERS_SKELETON_COUNT = 10;
 const HOLDINGS_PAGE_SIZE = 5;
+const DASHBOARD_CACHE_VERSION = 1;
+const DASHBOARD_PORTFOLIO_CACHE_KEY = `te:dashboard:portfolio:v${DASHBOARD_CACHE_VERSION}`;
+const DASHBOARD_ORDERS_CACHE_KEY = `te:dashboard:orders:v${DASHBOARD_CACHE_VERSION}`;
+
+const getIstDateKey = () => {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    });
+    return formatter.format(new Date());
+};
+
+const isAfterMarketHours = (status) => {
+    if (!status) return false;
+    return Boolean(status?.is_holiday) || !Boolean(status?.is_market_open);
+};
+
+const safeParseJson = (value) => {
+    if (!value) return null;
+    try {
+        return JSON.parse(value);
+    } catch {
+        return null;
+    }
+};
+
+const toNumber = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const getOrderBucketFromStatus = (statusValue) => {
+    const status = String(statusValue || '').toUpperCase();
+    if (status === 'EXECUTED') return 'executed';
+    if (status === 'CANCELLED') return 'cancelled';
+    if (status === 'REJECTED') return 'rejected';
+    return 'pending';
+};
 
 const DashboardPage = () => {
     const { profileData } = useDataContext();
 
     const [portfolioSummary, setPortfolioSummary] = useState(null);
+    const [hasPortfolioSnapshot, setHasPortfolioSnapshot] = useState(false);
     const [holdings, setHoldings] = useState([]);
     const [orders, setOrders] = useState(INITIAL_ORDER_STATE);
+    const [hasOrdersSnapshot, setHasOrdersSnapshot] = useState(false);
     const [loading, setLoading] = useState({ portfolio: true, orders: true });
+    const [portfolioError, setPortfolioError] = useState(null);
     const [tradeContext, setTradeContext] = useState(null);
     const [orderRange, setOrderRange] = useState(ORDER_RANGE_FILTERS[0].key);
     
@@ -52,7 +97,6 @@ const DashboardPage = () => {
     const [moversError, setMoversError] = useState(null);
     const [isTradeSubmitting, setIsTradeSubmitting] = useState(false);
     const [tradeCloseRequested, setTradeCloseRequested] = useState(false);
-
     const [livePriceMap, setLivePriceMap] = useState({});
     const [marketStatus, setMarketStatus] = useState(null);
 
@@ -60,15 +104,19 @@ const DashboardPage = () => {
 
     const fetchPortfolio = useCallback(async () => {
         setLoading((prev) => ({ ...prev, portfolio: true }));
+        setPortfolioError(null);
         try {
             const response = await api.fetchPortfolio();
-            if (response?.success !== false) {
+            if (response?.success) {
                 setPortfolioSummary(response?.summary || null);
                 setHoldings(response?.holdings || []);
+                setHasPortfolioSnapshot(true);
+            } else {
+                throw new Error(response?.message || "Failed to fetch portfolio");
             }
         } catch (error) {
             console.error("Portfolio fetch error:", error);
-            // Toast removed here to prevent spamming if auto-refresh fails
+            setPortfolioError(error?.message || "Unable to load portfolio right now.");
         } finally {
             setLoading((prev) => ({ ...prev, portfolio: false }));
         }
@@ -85,6 +133,7 @@ const DashboardPage = () => {
                     cancelled: data.cancelled || [],
                     rejected: data.rejected || [],
                 });
+                setHasOrdersSnapshot(true);
             }
         } catch (error) {
             console.error("Order fetch error:", error);
@@ -98,7 +147,6 @@ const DashboardPage = () => {
             const status = await api.getMarketStatus();
             setMarketStatus(status);
         } catch {
-            // Non-critical; keep last known
         }
     }, []);
 
@@ -108,8 +156,9 @@ const DashboardPage = () => {
             return live ? { ...stock, ...live } : stock;
         });
 
+        // Business rule: unchanged constituents are grouped with gainers.
         const gainers = merged
-            .filter((stock) => Number(stock.percent_change) > 0)
+            .filter((stock) => Number(stock.percent_change) >= 0)
             .sort((a, b) => Number(b.percent_change) - Number(a.percent_change))
             .slice();
 
@@ -122,18 +171,11 @@ const DashboardPage = () => {
     }, []);
 
     const fetchNiftyMarket = useCallback(async () => {
-        setIsLoadingMovers(true);
-        setMoversError(null);
-        try {
-            const response = await api.fetchMarket();
-            if (!response?.success) {
-                throw new Error(response?.message || "Failed to load market movers");
-            }
-
-            const stocks = Array.isArray(response.stocks) ? response.stocks : [];
+        const cacheHit = MarketCache.isValid();
+        if (cacheHit) {
+            const cached = MarketCache.get();
+            const stocks = Array.isArray(cached.stocks) ? cached.stocks : [];
             setNiftyStocks(stocks);
-
-            // Seed initial prices into the websocket-driven cache
             const seedMap = stocks.reduce((acc, stock) => {
                 if (!stock?.symbol) return acc;
                 acc[stock.symbol] = {
@@ -145,25 +187,105 @@ const DashboardPage = () => {
                 };
                 return acc;
             }, {});
-            
             if (priceUpdateService && typeof priceUpdateService.seedPrices === 'function') {
                 priceUpdateService.seedPrices(seedMap);
             }
-
+            setNiftyMovers(computeMovers(stocks, seedMap));
+            setIsLoadingMovers(false);
+            // Market is closed — data is static; skip background revalidation
+            if (cached.market_status !== 'OPEN') return;
+            // Market is open — silently revalidate in background; no loading spinner
+        } else {
+            setIsLoadingMovers(true);
+        }
+        setMoversError(null);
+        try {
+            const response = await api.fetchMarket();
+            if (!response?.success) {
+                throw new Error(response?.message || "Failed to load market movers");
+            }
+            MarketCache.set(response, response?.market_status === 'OPEN');
+            const stocks = Array.isArray(response.stocks) ? response.stocks : [];
+            setNiftyStocks(stocks);
+            const seedMap = stocks.reduce((acc, stock) => {
+                if (!stock?.symbol) return acc;
+                acc[stock.symbol] = {
+                    symbol: stock.symbol,
+                    ltp: typeof stock.ltp === 'number' ? stock.ltp : (typeof stock.price === 'number' ? stock.price : 0),
+                    change: Number(stock.change) || 0,
+                    percent_change: Number(stock.percent_change) || 0,
+                    entityType: 'stock',
+                };
+                return acc;
+            }, {});
+            if (priceUpdateService && typeof priceUpdateService.seedPrices === 'function') {
+                priceUpdateService.seedPrices(seedMap);
+            }
             setNiftyMovers(computeMovers(stocks, seedMap));
         } catch (error) {
-            setMoversError(error.message);
+            if (!cacheHit) setMoversError(error.message);
         } finally {
             setIsLoadingMovers(false);
         }
     }, [computeMovers]);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') {
+            return;
+        }
+
+        const portfolioCache = safeParseJson(window.localStorage.getItem(DASHBOARD_PORTFOLIO_CACHE_KEY));
+        if (portfolioCache?.summary || Array.isArray(portfolioCache?.holdings)) {
+            setPortfolioSummary(portfolioCache.summary || null);
+            setHoldings(Array.isArray(portfolioCache.holdings) ? portfolioCache.holdings : []);
+            setHasPortfolioSnapshot(true);
+        }
+
+        const ordersCache = safeParseJson(window.localStorage.getItem(DASHBOARD_ORDERS_CACHE_KEY));
+        if (ordersCache?.orders) {
+            setOrders({
+                pending: Array.isArray(ordersCache.orders.pending) ? ordersCache.orders.pending : [],
+                executed: Array.isArray(ordersCache.orders.executed) ? ordersCache.orders.executed : [],
+                cancelled: Array.isArray(ordersCache.orders.cancelled) ? ordersCache.orders.cancelled : [],
+                rejected: Array.isArray(ordersCache.orders.rejected) ? ordersCache.orders.rejected : [],
+            });
+            setHasOrdersSnapshot(true);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (typeof window === 'undefined' || !hasPortfolioSnapshot || !isAfterMarketHours(marketStatus)) {
+            return;
+        }
+
+        const payload = {
+            summary: portfolioSummary,
+            holdings,
+            snapshotDate: getIstDateKey(),
+            savedAt: Date.now(),
+        };
+        window.localStorage.setItem(DASHBOARD_PORTFOLIO_CACHE_KEY, JSON.stringify(payload));
+    }, [hasPortfolioSnapshot, holdings, marketStatus, portfolioSummary]);
+
+    useEffect(() => {
+        if (typeof window === 'undefined' || !hasOrdersSnapshot || !isAfterMarketHours(marketStatus)) {
+            return;
+        }
+
+        const payload = {
+            orders,
+            snapshotDate: getIstDateKey(),
+            savedAt: Date.now(),
+        };
+        window.localStorage.setItem(DASHBOARD_ORDERS_CACHE_KEY, JSON.stringify(payload));
+    }, [hasOrdersSnapshot, marketStatus, orders]);
 
     // Initial Load & Subscription
     useEffect(() => {
         fetchPortfolio();
         fetchOrders();
         fetchNiftyMarket();
-        fetchMarketStatus();
+        // note: market status will be fetched by the dedicated poll below
         
         // Auto-refresh portfolio/orders every 30 seconds
         const interval = setInterval(() => {
@@ -213,18 +335,85 @@ const DashboardPage = () => {
     }, []);
 
     useEffect(() => {
-        const handler = () => {
+        const applyOptimisticUpdates = (detail) => {
+            const optimisticOrder = detail?.optimisticOrder;
+            if (!optimisticOrder) {
+                return;
+            }
+
+            const bucket = getOrderBucketFromStatus(optimisticOrder.status);
+            const optimisticId = optimisticOrder.id || optimisticOrder.orderId || `${optimisticOrder.symbol || 'order'}-${Date.now()}`;
+            const normalizedOrder = {
+                id: optimisticId,
+                order_id: optimisticId,
+                symbol: optimisticOrder.symbol,
+                transaction_type: optimisticOrder.transaction_type,
+                quantity: optimisticOrder.quantity,
+                price: optimisticOrder.price,
+                date: optimisticOrder.date || new Date().toISOString(),
+            };
+
+            setOrders((prev) => ({
+                ...prev,
+                [bucket]: [normalizedOrder, ...(prev?.[bucket] || []).filter((item) => String(item?.id || item?.order_id) !== String(optimisticId))],
+            }));
+            setHasOrdersSnapshot(true);
+
+            const isExecuted = String(optimisticOrder.status || '').toUpperCase() === 'EXECUTED';
+            if (!isExecuted) {
+                return;
+            }
+
+            const qty = toNumber(optimisticOrder.quantity);
+            const price = toNumber(optimisticOrder.price);
+            const notional = qty * price;
+            if (notional <= 0) {
+                return;
+            }
+
+            setPortfolioSummary((prev) => {
+                if (!prev) {
+                    return prev;
+                }
+
+                const isBuy = String(optimisticOrder.transaction_type || '').toUpperCase() === 'BUY';
+                const investment = toNumber(prev.total_investment);
+                const holdingsValue = toNumber(prev.holdings_value);
+
+                return {
+                    ...prev,
+                    total_investment: isBuy ? investment + notional : Math.max(0, investment - notional),
+                    holdings_value: isBuy ? holdingsValue + notional : Math.max(0, holdingsValue - notional),
+                };
+            });
+        };
+
+        const handler = (event) => {
+            applyOptimisticUpdates(event?.detail || {});
+            fetchPortfolio();
+            fetchOrders();
+        };
+        const resetHandler = () => {
+            setPortfolioSummary(null);
+            setHasPortfolioSnapshot(false);
+            setHoldings([]);
+            setOrders(INITIAL_ORDER_STATE);
+            setHasOrdersSnapshot(false);
             fetchPortfolio();
             fetchOrders();
         };
         window.addEventListener('te:trade-success', handler);
-        return () => window.removeEventListener('te:trade-success', handler);
+        window.addEventListener('te:portfolio-reset', resetHandler);
+        return () => {
+            window.removeEventListener('te:trade-success', handler);
+            window.removeEventListener('te:portfolio-reset', resetHandler);
+        };
     }, [fetchOrders, fetchPortfolio]);
 
     return (
-        <div className="mx-auto max-w-7xl space-y-3 pb-4 pt-2">
-            <Tabs defaultValue="home" className="space-y-3">
-                <div className="flex items-center gap-2 overflow-x-auto">
+        <div className="mx-auto max-w-7xl space-y-1 pb-1 pt-0">
+            <Tabs defaultValue="home" className="gap-1">
+                <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
                     <Button
                         asChild
                         variant="outline"
@@ -239,42 +428,52 @@ const DashboardPage = () => {
                     <TabsList className="flex-1 justify-start gap-2 bg-transparent p-0">
                         <TabsTrigger 
                             value="home" 
-                            className="whitespace-nowrap rounded-full border border-transparent px-3 py-1.5 text-[13px] font-semibold text-slate-600 transition-colors data-[state=active]:border-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-none"
+                            className="whitespace-nowrap rounded-full border border-transparent px-2.5 py-1 text-[13px] font-semibold text-slate-600 transition-colors data-[state=active]:border-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-none"
                         >
                             Home
                         </TabsTrigger>
                         <TabsTrigger 
                             value="portfolio"
-                            className="whitespace-nowrap rounded-full border border-transparent px-3 py-1.5 text-[13px] font-semibold text-slate-600 transition-colors data-[state=active]:border-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-none"
+                            className="whitespace-nowrap rounded-full border border-transparent px-2.5 py-1 text-[13px] font-semibold text-slate-600 transition-colors data-[state=active]:border-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-none"
                         >
                             Portfolio
                         </TabsTrigger>
                         <TabsTrigger 
                             value="performance"
-                            className="whitespace-nowrap rounded-full border border-transparent px-3 py-1.5 text-[13px] font-semibold text-slate-600 transition-colors data-[state=active]:border-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-none"
+                            className="whitespace-nowrap rounded-full border border-transparent px-2.5 py-1 text-[13px] font-semibold text-slate-600 transition-colors data-[state=active]:border-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-none"
                         >
                             Performance
                         </TabsTrigger>
                         <TabsTrigger 
                             value="orders"
-                            className="whitespace-nowrap rounded-full border border-transparent px-3 py-1.5 text-[13px] font-semibold text-slate-600 transition-colors data-[state=active]:border-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-none"
+                            className="whitespace-nowrap rounded-full border border-transparent px-2.5 py-1 text-[13px] font-semibold text-slate-600 transition-colors data-[state=active]:border-slate-900 data-[state=active]:bg-slate-900 data-[state=active]:text-white data-[state=active]:shadow-none"
                         >
                             Orders
                         </TabsTrigger>
                     </TabsList>
                 </div>
 
-                <TabsContent value="home" className="border-none bg-transparent p-0 shadow-none">
-                    <div className="space-y-3">
+                <TabsContent value="home" className="mt-0 border-none bg-transparent p-0 shadow-none">
+                    <div className="space-y-2">
+                        {portfolioError && !portfolioSummary && (
+                            <Card className="rounded-2xl border-amber-200 bg-amber-50/70 shadow-sm">
+                                <CardContent className="flex items-center justify-between gap-3 p-3 text-sm text-amber-800">
+                                    <span>{portfolioError}</span>
+                                    <Button type="button" variant="outline" size="sm" className="h-8" onClick={fetchPortfolio}>
+                                        Retry
+                                    </Button>
+                                </CardContent>
+                            </Card>
+                        )}
                         <PortfolioStrip
                             summary={portfolioSummary}
                             holdings={holdings}
                             livePriceMap={livePriceMap}
                             marketStatus={marketStatus}
-                            isLoading={loading.portfolio}
+                            hasSnapshot={hasPortfolioSnapshot}
                         />
                         
-                        <div className="grid gap-4 lg:grid-cols-3">
+                        <div className="grid gap-3 lg:grid-cols-3">
                             {/* Market Movers takes up 2 columns on large screens */}
                             <div className="lg:col-span-2">
                                 <MarketMoversSection
@@ -288,28 +487,29 @@ const DashboardPage = () => {
                             
                             {/* Portfolio Holdings Summary takes up 1 column */}
                             <div className="lg:col-span-1">
-                                <PortfolioHoldings holdings={holdings} isLoading={loading.portfolio} />
+                                <PortfolioHoldings holdings={holdings} hasSnapshot={hasPortfolioSnapshot} />
                             </div>
                         </div>
                     </div>
                 </TabsContent>
 
-                <TabsContent value="portfolio" className="border-none bg-transparent p-0 shadow-none">
+                <TabsContent value="portfolio" className="mt-0 border-none bg-transparent p-0 shadow-none">
                     <div className="-mx-2 sm:-mx-4 lg:-mx-6">
                         <PortfolioPage isEmbedded />
                     </div>
                 </TabsContent>
 
-                <TabsContent value="performance" className="border-none bg-transparent p-0 shadow-none">
+                <TabsContent value="performance" className="mt-0 border-none bg-transparent p-0 shadow-none">
                     <div className="-mx-2 sm:-mx-4 lg:-mx-6">
                         <PerformancePage isEmbedded />
                     </div>
                 </TabsContent>
 
-                <TabsContent value="orders" className="border-none bg-transparent p-0 shadow-none">
+                <TabsContent value="orders" className="mt-0 border-none bg-transparent p-0 shadow-none">
                     <OrdersPanel
                         orders={orders}
                         isLoading={loading.orders}
+                        hasSnapshot={hasOrdersSnapshot}
                         range={orderRange}
                         onRangeChange={setOrderRange}
                     />
@@ -340,7 +540,7 @@ const DashboardPage = () => {
     );
 };
 
-const PortfolioStrip = ({ summary, holdings = [], livePriceMap = {}, marketStatus, isLoading }) => {
+const PortfolioStrip = ({ summary, holdings = [], livePriceMap = {}, marketStatus, hasSnapshot = false }) => {
     const investedFromSummary = Number(summary?.total_investment) || 0;
     const realizedFromSummary = Number(summary?.realized_pnl) || 0;
 
@@ -444,27 +644,27 @@ const PortfolioStrip = ({ summary, holdings = [], livePriceMap = {}, marketStatu
         },
     ];
 
-    if (isLoading) {
+    if (!hasSnapshot) {
         return (
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="grid gap-2.5 md:grid-cols-2 xl:grid-cols-4">
                 {items.map((_, index) => (
-                    <Skeleton key={index} className="h-20 rounded-3xl" />
+                    <Skeleton key={index} className="h-[104px] min-h-[104px] w-full rounded-3xl" />
                 ))}
             </div>
         );
     }
 
     return (
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-2.5 md:grid-cols-2 xl:grid-cols-4">
             {items.map((item) => (
-                <Card key={item.label} className="rounded-3xl border border-slate-100 shadow-sm transition-shadow hover:shadow-md">
-                    <CardContent className="flex flex-col gap-1.5 p-4">
+                <Card key={item.label} className="min-h-[104px] rounded-3xl border border-slate-100 shadow-sm transition-shadow hover:shadow-md">
+                    <CardContent className="flex flex-col gap-1 p-3.5">
                         <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                             <item.icon className="h-4 w-4 text-amber-500" />
                             {item.label}
                         </div>
                         <div>
-                            <p className={`text-xl font-bold ${item.color}`}>
+                            <p className={`text-[1.35rem] font-bold leading-tight ${item.color}`}>
                                 {formatCurrency(item.value)}
                             </p>
                             {typeof item.percent === "number" && Number.isFinite(item.percent) && (
@@ -500,7 +700,7 @@ const MarketMoversSection = ({ movers, isLoading, error, onRefresh, onTrade }) =
 
     return (
         <Card className="h-full rounded-3xl border border-slate-100 shadow-sm">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardHeader className="flex flex-row items-center justify-between pb-1.5">
                 <div>
                     <CardTitle className="text-base font-semibold text-slate-900">Market Movers</CardTitle>
                     <p className="text-[11px] text-slate-500">Nifty 50 Real-time</p>
@@ -533,7 +733,7 @@ const MarketMoversSection = ({ movers, isLoading, error, onRefresh, onTrade }) =
                     </Button>
                 </div>
             </CardHeader>
-            <CardContent className="pt-0">
+            <CardContent className="pt-0 pb-3">
                 {error && stocks.length > 0 && (
                     <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                         {error}. Showing cached data.
@@ -541,8 +741,19 @@ const MarketMoversSection = ({ movers, isLoading, error, onRefresh, onTrade }) =
                 )}
                 {showSkeleton ? (
                     <div className="grid gap-1.5 sm:grid-cols-2">
-                        {[...Array(MOVERS_PAGE_SIZE)].map((_, index) => (
-                            <Skeleton key={index} className="h-[56px] rounded-2xl" />
+                        {Array.from({ length: MOVERS_SKELETON_COUNT }).map((_, index) => (
+                            <div key={`mover-skeleton-${index}`} className="h-[56px] rounded-2xl border border-slate-100 bg-white px-3 py-1.5">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="space-y-1.5">
+                                        <Skeleton className="h-3.5 w-16 rounded-full" />
+                                        <Skeleton className="h-3 w-24 rounded-full" />
+                                    </div>
+                                    <div className="space-y-1.5 text-right">
+                                        <Skeleton className="ml-auto h-3.5 w-14 rounded-full" />
+                                        <Skeleton className="ml-auto h-3 w-18 rounded-full" />
+                                    </div>
+                                </div>
+                            </div>
                         ))}
                     </div>
                 ) : showErrorState ? (
@@ -565,7 +776,7 @@ const MarketMoversSection = ({ movers, isLoading, error, onRefresh, onTrade }) =
                             ))}
                         </div>
                         {totalPages > 1 && (
-                            <div className="mt-3 flex items-center justify-center gap-2">
+                            <div className="mt-2 flex items-center justify-center gap-2">
                                 <Button
                                     type="button"
                                     variant="outline"
@@ -667,15 +878,15 @@ const MarketMoverRow = ({ stock, onTrade }) => {
     );
 };
 
-const PortfolioHoldings = ({ holdings, isLoading }) => {
+const PortfolioHoldings = ({ holdings, hasSnapshot = false }) => {
     const [page, setPage] = useState(1);
 
     useEffect(() => {
         setPage(1);
     }, [holdings]);
 
-    if (isLoading) {
-        return <Skeleton className="h-full min-h-[300px] rounded-3xl" />;
+    if (!hasSnapshot) {
+        return <Skeleton className="h-full min-h-[390px] w-full rounded-3xl" />;
     }
 
     // Sort by value (Quantity * LTP) descending to show most impactful holdings
@@ -691,21 +902,18 @@ const PortfolioHoldings = ({ holdings, isLoading }) => {
     const pageHoldings = sortedHoldings.slice(start, start + HOLDINGS_PAGE_SIZE);
 
     return (
-        <Card className="flex h-full flex-col rounded-3xl border border-slate-100 shadow-sm">
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
+        <Card className="flex h-full min-h-[390px] flex-col rounded-3xl border border-slate-100 shadow-sm">
+            <CardHeader className="flex flex-row items-center justify-between pb-1.5">
                 <CardTitle className="text-lg font-semibold text-slate-900">Top Holdings</CardTitle>
                 <div className="flex items-center gap-2">
-                    {sortedHoldings.length > HOLDINGS_PAGE_SIZE && (
-                        <span className="text-[11px] font-semibold text-slate-500">{currentPage}/{totalPages}</span>
-                    )}
                     <Button asChild variant="ghost" size="sm" className="h-8 rounded-full text-slate-500 hover:text-slate-900">
                         <Link to="/dashboard?tab=portfolio">View All</Link>
                     </Button>
                 </div>
             </CardHeader>
-            <CardContent className="flex-1">
+            <CardContent className="flex h-full flex-1 flex-col pt-0">
                 {!sortedHoldings.length ? (
-                    <div className="flex h-full flex-col items-center justify-center space-y-3 py-8 text-center text-slate-500">
+                    <div className="flex h-full flex-1 flex-col items-center justify-center space-y-2 py-6 text-center text-slate-500">
                         <div className="rounded-full bg-slate-100 p-3">
                             <PieChart className="h-6 w-6 text-slate-400" />
                         </div>
@@ -716,14 +924,14 @@ const PortfolioHoldings = ({ holdings, isLoading }) => {
                     </div>
                 ) : (
                     <>
-                    <div className="space-y-2">
+                    <div className="flex-1 space-y-1.5">
                         {pageHoldings.map((holding) => {
                             const pnl = Number(holding.unrealized_pnl) || 0;
                             const isPositive = pnl >= 0;
                             const currentValue = (holding.quantity * holding.ltp);
                             
                             return (
-                                <div key={holding.symbol} className="flex items-center justify-between rounded-2xl border border-slate-100 bg-white/70 p-2 transition-colors hover:bg-white">
+                                <div key={holding.symbol} className="flex items-center justify-between rounded-2xl border border-slate-100 bg-white/70 p-1.5 transition-colors hover:bg-white">
                                     <div className="min-w-0 flex-1">
                                         <div className="flex items-center justify-between">
                                             <p className="truncate text-[13px] font-bold text-slate-900">{holding.symbol}</p>
@@ -741,7 +949,7 @@ const PortfolioHoldings = ({ holdings, isLoading }) => {
                         })}
                     </div>
                     {totalPages > 1 && (
-                        <div className="mt-3 flex items-center justify-center gap-2">
+                        <div className="mt-auto pt-2 flex items-center justify-center gap-2">
                             <Button
                                 type="button"
                                 variant="outline"
@@ -776,7 +984,7 @@ const PortfolioHoldings = ({ holdings, isLoading }) => {
     );
 };
 
-const OrdersPanel = ({ orders, isLoading, range = ORDER_RANGE_FILTERS[0].key, onRangeChange }) => {
+const OrdersPanel = ({ orders, isLoading, hasSnapshot = false, range = ORDER_RANGE_FILTERS[0].key, onRangeChange }) => {
     const filteredOrders = useMemo(() => {
         const now = Date.now();
         const threshold = now - 24 * 60 * 60 * 1000; // last 1 day
@@ -795,12 +1003,12 @@ const OrdersPanel = ({ orders, isLoading, range = ORDER_RANGE_FILTERS[0].key, on
         }, {});
     }, [orders, range]);
 
-    if (isLoading) {
-        return <Skeleton className="h-64 rounded-3xl" />;
+    if (!hasSnapshot) {
+        return <Skeleton className="min-h-[420px] w-full rounded-3xl" />;
     }
 
     return (
-        <Card className="rounded-3xl border border-slate-100 shadow-sm">
+        <Card className="min-h-[420px] rounded-3xl border border-slate-100 shadow-sm">
             <CardHeader className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex items-center justify-between">
                      <CardTitle className="text-lg font-semibold">Orders</CardTitle>
@@ -832,6 +1040,12 @@ const OrdersPanel = ({ orders, isLoading, range = ORDER_RANGE_FILTERS[0].key, on
                 </div>
             </CardHeader>
             <CardContent>
+                {isLoading && (
+                    <div className="mb-3 flex items-center gap-2">
+                        <Skeleton className="h-2.5 w-24 rounded-full" />
+                        <Skeleton className="h-2.5 w-14 rounded-full" />
+                    </div>
+                )}
                 <Tabs defaultValue="executed" className="space-y-4">
                     <TabsList className="grid w-full grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1 md:grid-cols-4">
                         {ORDER_TABS.map((tab) => (

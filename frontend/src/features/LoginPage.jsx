@@ -22,9 +22,10 @@ const LoginPage = () => {
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
-    // Convert Client ID to uppercase as the user types for better UX
-    const processedValue = name === 'client_id' ? value.toUpperCase().trim() : value;
-    setFormData((prev) => ({ ...prev, [name]: type === 'checkbox' ? checked : processedValue }));
+    setFormData((prev) => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value,
+    }));
   };
 
   const handleSubmit = async (e) => {
@@ -39,20 +40,17 @@ const LoginPage = () => {
     setIsLoading(true);
 
     try {
-      // Call the login function from the context.
-      // It will handle the API call, update global state, and navigate on success.
-      await login({
-        client_id: formData.client_id,
+      // normalize client ID only once right before submission
+      const payload = {
+        client_id: formData.client_id.toUpperCase().trim(),
         password: formData.password,
         remember_me: formData.remember_me,
-      });
+      };
 
-      // On successful login, AuthContext will navigate to '/dashboard'.
-      // A toast provides immediate feedback.
-      toast({
-        title: "Login Successful!",
-        description: "Welcome back to TradeEasy.",
-      });
+      // Call the login function from the context. It will handle the API call,
+      // update global state, and navigate on success.
+      await login(payload);
+
 
     } catch (err) {
       // The AuthContext's login function rejects with an error on failure.

@@ -1,51 +1,50 @@
-"""Shared configuration and helpers for major market index tracking."""
+"""Shared configuration for market index tracking."""
 
-from typing import Any, Dict, List, Optional
+from typing import Dict, List
 
-MAJOR_INDEX_TARGETS: Dict[str, List[Dict[str, Any]]] = {
+MO_INDEX_CATALOG: Dict[str, List[Dict[str, str]]] = {
     "NSE": [
-        {
-            "id": "nifty50",
-            "display": "Nifty 50",
-            "codes": ["26000"],
-            "terms": ["NIFTY 50", "NIFTY50"],
-        },
-        {
-            "id": "india_vix",
-            "display": "India VIX",
-            "codes": [],
-            "terms": ["INDIA VIX", "VIX"],
-            "min_value": 5.0,
-            "max_value": 100.0,
-        },
+        {"code": "26009", "name": "Nifty Bank"},
+        {"code": "26012", "name": "Nifty 100"},
+        {"code": "26065", "name": "Nifty 200"},
+        {"code": "26003", "name": "Nifty 500"},
+        {"code": "26061", "name": "Nifty Auto"},
+        {"code": "26066", "name": "Nifty Commodities"},
+        {"code": "26067", "name": "Nifty Consumption"},
+        {"code": "26054", "name": "Nifty Energy"},
+        {"code": "26037", "name": "NIFTY FIN SERVICE"},
+        {"code": "26055", "name": "Nifty FMCG"},
+        {"code": "26019", "name": "Nifty Infra"},
+        {"code": "26008", "name": "Nifty IT"},
+        {"code": "26063", "name": "Nifty Media"},
+        {"code": "26062", "name": "Nifty Metal"},
+        {"code": "26010", "name": "Nifty MIDCAP 100"},
+        {"code": "26000", "name": "Nifty 50"},
+        {"code": "26013", "name": "Nifty Next 50"},
+        {"code": "26057", "name": "Nifty Pharma"},
+        {"code": "26024", "name": "Nifty PSE"},
+        {"code": "26059", "name": "Nifty PSU Bank"},
+        {"code": "26052", "name": "Nifty Realty"},
+        {"code": "26064", "name": "Nifty SMLCAP 100"},
+        {"code": "26051", "name": "India VIX"},
+        {"code": "26014", "name": "Nifty Midcap 50"},
+        {"code": "26074", "name": "Nifty MID SELECT"},
     ],
     "BSE": [
-        {
-            "id": "sensex",
-            "display": "S&P BSE Sensex",
-            "codes": ["999901"],
-            "terms": ["SENSEX", "BSE SENSEX"],
-        },
+        {"code": "999901", "name": "SENSEX"},
+        {"code": "999907", "name": "BSE CAPGOOD"},
+        {"code": "999908", "name": "BSE CONSDUR"},
+        {"code": "999923", "name": "BSE IPO"},
+        {"code": "999936", "name": "ALLCAP"},
+        {"code": "999915", "name": "BSE OIL&GAS"},
+        {"code": "999922", "name": "BSE POWER"},
+        {"code": "999911", "name": "BSE TECK"},
+        {"code": "999941", "name": "INDSTR"},
+        {"code": "999945", "name": "TELCOM"},
+        {"code": "999946", "name": "UTILS"},
+        {"code": "999974", "name": "BSE Capital Markets & Insurance"},
+        {"code": "999990", "name": "BSE INDIA 150"},
+        {"code": "999996", "name": "BSE INDIA DEFENCE"},
     ],
 }
 
-
-def resolve_index_entry(master_list: List[Dict[str, Any]], target_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Finds the index entry whose code or name matches the requested target."""
-    if not target_config:
-        return None
-
-    preferred_codes = {str(code) for code in target_config.get("codes", []) if code}
-    lowered_terms = [term.lower() for term in target_config.get("terms", []) if term]
-
-    for entry in master_list:
-        code = str(entry.get("indexcode"))
-        if code and code in preferred_codes:
-            return entry
-
-    for entry in master_list:
-        name = (entry.get("indexname") or "").lower()
-        if any(term in name for term in lowered_terms):
-            return entry
-
-    return None

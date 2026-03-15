@@ -49,6 +49,8 @@ class TradeExecutor:
             user = User.objects(id=user_id).first()
             if not user:
                 return {"success": False, "message": "User not found"}
+            if getattr(user, 'reset_in_progress', False):
+                return {"success": False, "message": "Portfolio reset in progress."}
 
             exec_price = Decimal(str(price))
             total_cost = exec_price * Decimal(quantity)
@@ -106,13 +108,27 @@ class TradeExecutor:
                 try:
                     if needed_balance <= 0:
                         # Reserved covers cost entirely; allow update without balance check
-                        res = User.objects(id=user.id).update_one(
+                        res = User.objects(
+                            id=user.id,
+                            reserved_balance__gte=float(reserved_amt)
+                        ).update_one(
                             inc__balance=-float(total_cost),
                             inc__reserved_balance=-float(reserved_amt)
                         )
                     else:
-                        # Require available balance to be >= needed_balance
-                        res = User.objects(id=user.id, balance__gte=float(needed_balance)).update_one(
+                        # Require available balance (balance - reserved) to be >= needed_balance
+                        res = User.objects(
+                            id=user.id,
+                            reserved_balance__gte=float(reserved_amt),
+                            __raw={
+                                "$expr": {
+                                    "$gte": [
+                                        {"$subtract": ["$balance", "$reserved_balance"]},
+                                        float(needed_balance)
+                                    ]
+                                }
+                            }
+                        ).update_one(
                             inc__balance=-float(total_cost),
                             inc__reserved_balance=-float(reserved_amt)
                         )
@@ -128,10 +144,17 @@ class TradeExecutor:
                     logger.error(f"Fund deduction failed for pending order {transaction.id}")
                     
             else:
-                # Market Order: Standard atomic deduction from Balance
+                # Market Order: Atomic deduction from available balance (balance - reserved).
                 res = User.objects(
-                    id=user.id, 
-                    balance__gte=float(total_cost)
+                    id=user.id,
+                    __raw={
+                        "$expr": {
+                            "$gte": [
+                                {"$subtract": ["$balance", "$reserved_balance"]},
+                                float(total_cost)
+                            ]
+                        }
+                    }
                 ).update_one(
                     inc__balance=-float(total_cost)
                 )
@@ -239,6 +262,8 @@ class TradeExecutor:
             user = User.objects(id=user_id).first()
             if not user:
                 return {"success": False, "message": "User not found"}
+            if getattr(user, 'reset_in_progress', False):
+                return {"success": False, "message": "Portfolio reset in progress."}
 
             exec_price = Decimal(str(price))
             total_proceeds = exec_price * Decimal(quantity)
@@ -279,6 +304,7 @@ class TradeExecutor:
             shares_sold_from_holding = 0
             short_sold_qty = 0
             deduction_success = False
+            holding = None
             
             # --- RACE CONDITION FIX: Optimistic Locking Loop ---
             for _ in range(cls.MAX_RETRIES):
@@ -303,7 +329,7 @@ class TradeExecutor:
                 else:
                     # Market Sell: Must ensure we don't sell reserved shares.
                     # We check available quantity, then try to update while ensuring reserved_qty hasn't changed.
-                    available = holding.quantity - holding.reserved_quantity
+                    available = int(holding.quantity) - int(holding.reserved_quantity or 0)
                     if available >= quantity:
                         res = Holding.objects(
                             id=holding.id,
@@ -325,7 +351,14 @@ class TradeExecutor:
             
             # 3. Handle Short Selling
             if not deduction_success:
-                if product_type == 'MIS' and allow_short:
+                # Only allow pure short when no sellable holding is available.
+                # This prevents conflicting long+short states if a long-sell update races.
+                available_after_check = 0
+                if holding:
+                    holding.reload()
+                    available_after_check = max(int(holding.quantity) - int(holding.reserved_quantity or 0), 0)
+
+                if product_type == 'MIS' and allow_short and not is_pending_execution and available_after_check <= 0:
                     # Short sell logic
                     short_sold_qty = quantity
                     cls._upsert_short_position(user, symbol, quantity, float(exec_price))
@@ -338,12 +371,6 @@ class TradeExecutor:
                     transaction.metadata = msg
                     transaction.save()
                     
-                    # Fix: If it was a pending order that failed to deduct, strictly speaking we should
-                    # ensure the reservation is released if it exists.
-                    if is_pending_execution and holding:
-                         logger.warning(f"Reverting reserved quantity for failed pending sell {transaction.id}")
-                         Holding.objects(id=holding.id).update_one(inc__reserved_quantity=-quantity)
-                         
                     return {"success": False, "message": msg}
 
             # 4. CREDIT BALANCE
@@ -351,7 +378,14 @@ class TradeExecutor:
 
             # 5. MATCH LOTS
             if shares_sold_from_holding > 0:
-                cls._process_fifo_lots(user, symbol, shares_sold_from_holding, product_type)
+                fifo_ok = cls._process_fifo_lots(user, symbol, shares_sold_from_holding, product_type)
+                if not fifo_ok:
+                    logger.error(
+                        "FIFO lot synchronization issue for user=%s symbol=%s qty=%s",
+                        user.id,
+                        symbol,
+                        shares_sold_from_holding,
+                    )
 
             if holding:
                 holding.reload()
@@ -403,6 +437,8 @@ class TradeExecutor:
             user = User.objects(id=user_id).first()
             if not user:
                 return {"success": False, "message": "User not found"}
+            if getattr(user, 'reset_in_progress', False):
+                return {"success": False, "message": "Portfolio reset in progress."}
 
             price_dec = Decimal(str(price))
             qty_dec = Decimal(quantity)
@@ -410,35 +446,43 @@ class TradeExecutor:
 
             # 1. RESERVE RESOURCES
             if action == 'BUY':
-                # Atomic check and update
+                # Atomic reservation based on available balance at write-time.
                 res = User.objects(
                     id=user.id,
-                    balance__gte=float(total_value) + user.reserved_balance 
+                    __raw={
+                        "$expr": {
+                            "$gte": [
+                                {"$subtract": ["$balance", "$reserved_balance"]},
+                                float(total_value)
+                            ]
+                        }
+                    }
                 ).update_one(inc__reserved_balance=float(total_value))
-                
-                # Double check
-                user.reload()
-                if user.balance < user.reserved_balance:
-                    User.objects(id=user.id).update_one(inc__reserved_balance=-float(total_value))
+
+                if res == 0:
                     return {"success": False, "message": "Insufficient available funds"}
 
             elif action == 'SELL':
                 holding = Holding.objects(user=user, symbol=symbol, product_type=product_type).first()
                 if not holding:
-                     if product_type == 'MIS':
-                         # Allow pending short sell without holding? Depends on broker rules.
-                         # Here we assume yes for MIS if defined in business logic, but strict for CNC.
-                         pass
-                     else:
-                         return {"success": False, "message": "No holdings to sell"}
-                else:
-                    available = holding.quantity - holding.reserved_quantity
-                    if available < quantity:
-                        return {"success": False, "message": "Insufficient available shares"}
-                    
-                    res = Holding.objects(id=holding.id).update_one(inc__reserved_quantity=quantity)
-                    if res == 0:
-                         return {"success": False, "message": "Failed to reserve shares"}
+                    if product_type == 'MIS':
+                        return {"success": False, "message": "MIS short-sell requires immediate MARKET execution."}
+                    return {"success": False, "message": "No holdings to sell"}
+
+                # Reserve shares atomically from currently available quantity.
+                res = Holding.objects(
+                    id=holding.id,
+                    __raw={
+                        "$expr": {
+                            "$gte": [
+                                {"$subtract": ["$quantity", "$reserved_quantity"]},
+                                int(quantity),
+                            ]
+                        }
+                    },
+                ).update_one(inc__reserved_quantity=int(quantity))
+                if res == 0:
+                    return {"success": False, "message": "Insufficient available shares"}
 
             # 2. Create Transaction
             txn = Transaction(
@@ -474,6 +518,8 @@ class TradeExecutor:
         try:
             user = User.objects(id=user_id).first()
             if not user: return {"success": False, "message": "User not found"}
+            if getattr(user, 'reset_in_progress', False):
+                return {"success": False, "message": "Portfolio reset in progress."}
             
             # 1. Reserve Shares (Atomic)
             # We reserve the full available quantity once. 
@@ -532,6 +578,12 @@ class TradeExecutor:
         Handles OCO siblings intelligently to avoid double-release.
         """
         try:
+            user = User.objects(id=user_id).only('id', 'reset_in_progress').first()
+            if not user:
+                return {"success": False, "message": "User not found"}
+            if getattr(user, 'reset_in_progress', False):
+                return {"success": False, "message": "Portfolio reset in progress."}
+
             # 1. Lock Transaction
             txn = Transaction.objects(id=order_id, user=user_id, status='PENDING').first()
             if not txn:
@@ -613,7 +665,8 @@ class TradeExecutor:
             
             res = Holding.objects(
                 id=holding.id,
-                quantity=holding.quantity # Optimistic Lock
+                quantity=holding.quantity,
+                reserved_quantity=holding.reserved_quantity
             ).update_one(
                 set__average_price=new_avg_price,
                 inc__quantity=quantity
@@ -670,24 +723,36 @@ class TradeExecutor:
 
     @classmethod
     def _process_fifo_lots(cls, user, symbol, qty_to_sell, product_type):
-        """Updates Lots based on FIFO logic."""
-        remaining = qty_to_sell
-        lots = Lot.objects(
-            user=user, symbol=symbol, product_type=product_type, 
-            is_active=True, quantity__gt=0
-        ).order_by('purchase_date')
-        
-        for lot in lots:
-            if remaining <= 0:
+        """Updates Lots based on FIFO logic with atomic, race-safe deductions."""
+        remaining = int(qty_to_sell)
+
+        while remaining > 0:
+            lot = Lot.objects(
+                user=user,
+                symbol=symbol,
+                product_type=product_type,
+                is_active=True,
+                quantity__gt=0,
+            ).order_by('purchase_date').first()
+
+            if not lot:
                 break
-            
-            deduct = min(remaining, lot.quantity)
-            Lot.objects(id=lot.id).update_one(inc__quantity=-deduct)
-            
-            if lot.quantity - deduct <= 0:
-                Lot.objects(id=lot.id).update_one(set__is_active=False)
-                
+
+            deduct = min(remaining, int(lot.quantity))
+            updated = Lot.objects(
+                id=lot.id,
+                is_active=True,
+                quantity__gte=deduct,
+            ).update_one(inc__quantity=-deduct)
+
+            if updated == 0:
+                # Contention: retry with latest lot snapshot.
+                continue
+
+            Lot.objects(id=lot.id, quantity__lte=0).update_one(set__quantity=0, set__is_active=False)
             remaining -= deduct
+
+        return remaining == 0
 
     @classmethod
     def create_bracket_legs(cls, user, entry_txn, symbol, quantity, product_type):

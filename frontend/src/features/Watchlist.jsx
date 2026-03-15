@@ -105,78 +105,67 @@ const Watchlist = () => {
     }, [activeWatchlistName, pickActiveWatchlist, watchlists]);
 
     // --- Memoized Stock List with Live Data ---
-    const stocksWithLiveData = useMemo(() => {
-        if (!Array.isArray(stocks)) {
-            return [];
+
+    // Structural sort indices: recomputes only when stock list or sort column/direction changes.
+    // For name-sort or no-sort the order is independent of live prices, so price ticks
+    // do NOT trigger a re-sort.  Returns null to signal a price-based sort is active.
+    const sortedIndices = useMemo(() => {
+        if (!Array.isArray(stocks)) return [];
+        const allIndices = stocks.map((_, i) => i);
+        if (sortConfig.column === 'name') {
+            const dir = sortConfig.direction === 'asc' ? 1 : -1;
+            allIndices.sort((a, b) => {
+                const nameA = (stocks[a]?.name || stocks[a]?.symbol || '').toLowerCase();
+                const nameB = (stocks[b]?.name || stocks[b]?.symbol || '').toLowerCase();
+                return (nameA < nameB ? -1 : nameA > nameB ? 1 : 0) * dir;
+            });
+            return allIndices;
         }
-
-        const enriched = stocks
-            .map((stock, index) => {
-                if (!stock || !stock.symbol) {
-                    return null;
-                }
-
-                const liveData = livePrices[stock.symbol];
-                const merged = liveData ? { ...stock, ...liveData } : { ...stock };
-                
-                // Fallback to previous_close if ltp is 0 or missing
-                if (!merged.ltp || merged.ltp === 0) {
-                    merged.ltp = merged.previous_close || 0;
-                    merged.price_source = 'previous_close';
-                }
-                
-                return { ...merged, originalIndex: index };
-            })
-            .filter(Boolean);
-
         if (!sortConfig.column) {
-            return enriched;
+            return allIndices; // original order, no sort
         }
+        return null; // price-based sort — handled below
+    }, [stocks, sortConfig]);
 
-        const directionMultiplier = sortConfig.direction === 'asc' ? 1 : -1;
+    // Enrichment + optional price-based sort.
+    // When sortedIndices !== null the order is already known, so each tick only does
+    // an O(n) enrichment pass instead of O(n log n) sort + enrichment.
+    const stocksWithLiveData = useMemo(() => {
+        if (!Array.isArray(stocks)) return [];
 
         const toNumber = (value) => {
-            if (typeof value === 'number' && Number.isFinite(value)) {
-                return value;
-            }
+            if (typeof value === 'number' && Number.isFinite(value)) return value;
             const parsed = parseFloat(value);
             return Number.isFinite(parsed) ? parsed : 0;
         };
 
-        const sorted = [...enriched].sort((a, b) => {
-            switch (sortConfig.column) {
-                case 'name': {
-                    const nameA = (a.name || a.symbol || '').toString().toLowerCase();
-                    const nameB = (b.name || b.symbol || '').toString().toLowerCase();
-                    if (nameA < nameB) return -1 * directionMultiplier;
-                    if (nameA > nameB) return 1 * directionMultiplier;
-                    break;
-                }
-                case 'ltp': {
-                    const priceA = toNumber(a.ltp ?? a.price);
-                    const priceB = toNumber(b.ltp ?? b.price);
-                    if (priceA !== priceB) {
-                        return (priceA - priceB) * directionMultiplier;
-                    }
-                    break;
-                }
-                case 'percent_change': {
-                    const pctA = toNumber(a.percent_change ?? a.percentChange);
-                    const pctB = toNumber(b.percent_change ?? b.percentChange);
-                    if (pctA !== pctB) {
-                        return (pctA - pctB) * directionMultiplier;
-                    }
-                    break;
-                }
-                default:
-                    break;
+        const enrich = (stock, originalIndex) => {
+            if (!stock?.symbol) return null;
+            const liveData = livePrices[stock.symbol];
+            const merged = liveData ? { ...stock, ...liveData } : { ...stock };
+            return { ...merged, originalIndex };
+        };
+
+        if (sortedIndices !== null) {
+            // Name-sort or unsorted: just enrich in the pre-computed order
+            return sortedIndices.map((i) => enrich(stocks[i], i)).filter(Boolean);
+        }
+
+        // Price-based sort: enrich first, then sort
+        const enriched = stocks.map(enrich).filter(Boolean);
+        const dir = sortConfig.direction === 'asc' ? 1 : -1;
+        return [...enriched].sort((a, b) => {
+            if (sortConfig.column === 'ltp') {
+                const diff = toNumber(a.ltp ?? a.price) - toNumber(b.ltp ?? b.price);
+                return diff !== 0 ? diff * dir : a.originalIndex - b.originalIndex;
             }
-
-            return (a.originalIndex - b.originalIndex);
+            if (sortConfig.column === 'percent_change') {
+                const diff = toNumber(a.percent_change ?? a.percentChange) - toNumber(b.percent_change ?? b.percentChange);
+                return diff !== 0 ? diff * dir : a.originalIndex - b.originalIndex;
+            }
+            return a.originalIndex - b.originalIndex;
         });
-
-        return sorted;
-    }, [stocks, livePrices, sortConfig]);
+    }, [stocks, livePrices, sortedIndices, sortConfig]);
 
     const isLoading = isLoadingWatchlists && !watchlistsData;
 
@@ -240,6 +229,16 @@ const Watchlist = () => {
         return true;
     };
 
+    const handleSearchResultClick = (stock) => {
+        const symbol = stock?.symbol;
+        if (!symbol) {
+            return false;
+        }
+        const cleanSymbol = symbol.includes('.') ? symbol.split('.')[0] : symbol;
+        navigate(`/stock/${cleanSymbol}`);
+        return true;
+    };
+
     const handleCreateWatchlist = async (event) => {
         if (event?.preventDefault) {
             event.preventDefault();
@@ -298,7 +297,7 @@ const Watchlist = () => {
                     <StockSearch
                         activeWatchlist={activeWatchlist}
                         onAddStock={handleAddStock}
-                        onResultClick={handleAddStock}
+                        onResultClick={handleSearchResultClick}
                         placeholder="Search to add stocks..."
                     />
                     <WatchlistSelector
@@ -528,9 +527,10 @@ const StockRow = ({ stock, onTrade, onRemove }) => {
         return Number.isFinite(parsed) ? parsed : fallback;
     };
 
-    const ltp = toNumber(stock.ltp ?? stock.price, 0);
-    const change = toNumber(stock.change, 0);
-    const percentChange = toNumber(stock.percent_change ?? stock.percentChange, 0);
+    const ltp = toNumber(stock.ltp ?? stock.price, Number.NaN);
+    const hasLivePrice = Number.isFinite(ltp) && ltp > 0;
+    const change = hasLivePrice ? toNumber(stock.change, 0) : Number.NaN;
+    const percentChange = hasLivePrice ? toNumber(stock.percent_change ?? stock.percentChange, 0) : Number.NaN;
     const isPositive = change >= 0;
     const priceSource = stock.price_source || 'ltp';
     const isFallbackPrice = priceSource !== 'ltp';
@@ -546,16 +546,23 @@ const StockRow = ({ stock, onTrade, onRemove }) => {
                 <div className="text-sm text-slate-500 truncate max-w-xs">{stock.name}</div>
             </TableCell>
             <TableCell className="text-right">
-                <div className="font-semibold">₹{ltp.toFixed(2)}</div>
-                {isFallbackPrice && (
+                {hasLivePrice ? (
+                    <div className="font-semibold">₹{ltp.toFixed(2)}</div>
+                ) : (
+                    <div className="inline-flex items-center gap-1 text-xs font-medium text-slate-500">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Updating...
+                    </div>
+                )}
+                {hasLivePrice && isFallbackPrice && (
                     <div className="text-xs text-slate-400">Prev Close</div>
                 )}
             </TableCell>
-            <TableCell className={`text-right font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                {isPositive ? '+' : ''}{change.toFixed(2)}
+            <TableCell className={`text-right font-semibold ${Number.isFinite(change) ? (isPositive ? 'text-green-600' : 'text-red-600') : 'text-slate-400'}`}>
+                {Number.isFinite(change) ? `${isPositive ? '+' : ''}${change.toFixed(2)}` : '--'}
             </TableCell>
-            <TableCell className={`text-right font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                {isPositive ? '+' : ''}{percentChange.toFixed(2)}%
+            <TableCell className={`text-right font-semibold ${Number.isFinite(percentChange) ? (isPositive ? 'text-green-600' : 'text-red-600') : 'text-slate-400'}`}>
+                {Number.isFinite(percentChange) ? `${isPositive ? '+' : ''}${percentChange.toFixed(2)}%` : '--'}
             </TableCell>
             <TableCell className="text-center">
                  <div className="flex items-center justify-center gap-2" onClick={e => e.stopPropagation()}>
@@ -598,9 +605,10 @@ const CompactStockCard = ({ stock, onTrade, onRemove }) => {
         return Number.isFinite(parsed) ? parsed : fallback;
     };
 
-    const ltp = toNumber(stock.ltp ?? stock.price, 0);
-    const change = toNumber(stock.change, 0);
-    const percentChange = toNumber(stock.percent_change ?? stock.percentChange, 0);
+    const ltp = toNumber(stock.ltp ?? stock.price, Number.NaN);
+    const hasLivePrice = Number.isFinite(ltp) && ltp > 0;
+    const change = hasLivePrice ? toNumber(stock.change, 0) : Number.NaN;
+    const percentChange = hasLivePrice ? toNumber(stock.percent_change ?? stock.percentChange, 0) : Number.NaN;
     const isPositive = change >= 0;
     const cleanSymbol = sanitizeSymbol(stock.symbol) || stock.symbol;
 
@@ -615,10 +623,19 @@ const CompactStockCard = ({ stock, onTrade, onRemove }) => {
                     <p className="text-sm text-slate-500 truncate">{stock.name || "--"}</p>
                 </div>
                 <div className="text-right">
-                    <p className="text-base font-semibold text-slate-900">₹{ltp.toFixed(2)}</p>
-                    <p className={`text-sm font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
-                        {isPositive ? '+' : ''}{change.toFixed(2)} ({percentChange.toFixed(2)}%)
-                    </p>
+                    {hasLivePrice ? (
+                        <>
+                            <p className="text-base font-semibold text-slate-900">₹{ltp.toFixed(2)}</p>
+                            <p className={`text-sm font-semibold ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
+                                {isPositive ? '+' : ''}{change.toFixed(2)} ({percentChange.toFixed(2)}%)
+                            </p>
+                        </>
+                    ) : (
+                        <p className="inline-flex items-center gap-1 text-xs font-medium text-slate-500">
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            Updating...
+                        </p>
+                    )}
                 </div>
             </div>
             <div className="mt-4 flex flex-wrap items-center gap-3">

@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useAuth } from "../context/AuthContext.jsx";
+import { useDataContext } from "../context/DataContext.jsx";
 import * as api from "../services/api.js";
 import { Input } from "../assets/ui/input.jsx";
 import { Button } from "../assets/ui/button.jsx";
@@ -28,6 +29,7 @@ const TradeForm = ({
   onCloseRequestHandled,
 }) => {
   const { isAuthenticated } = useAuth();
+  const { profileData } = useDataContext();
   const [action, setAction] = useState(initialAction);
   const [productType, setProductType] = useState(initialAction === "SELL" ? "MIS" : "CNC");
   const [quantity, setQuantity] = useState("");
@@ -42,23 +44,43 @@ const TradeForm = ({
   const [stockData, setStockData] = useState(null);
   const [livePrice, setLivePrice] = useState(null);
   const [portfolioData, setPortfolioData] = useState(null);
+  const [isPortfolioLoading, setIsPortfolioLoading] = useState(true);
   const cancelAfterCreateRef = useRef(false);
   const isMountedRef = useRef(true);
+  const portfolioRequestIdRef = useRef(0);
+  const stockRequestIdRef = useRef(0);
+  // guard so the BUY/SELL action effect skips the initial mount run
+  const actionChangedRef = useRef(false);
 
-  const refreshPortfolioData = useCallback(async () => {
+  const refreshPortfolioData = useCallback(async ({ silent = false } = {}) => {
+    const requestId = portfolioRequestIdRef.current + 1;
+    portfolioRequestIdRef.current = requestId;
+
+    if (!silent && isMountedRef.current) {
+      setIsPortfolioLoading(true);
+    }
+
     try {
       const data = await api.fetchPortfolio();
+      if (!isMountedRef.current || requestId !== portfolioRequestIdRef.current) {
+        return;
+      }
+
       if (data?.success) {
         setPortfolioData(data);
       }
     } catch {
-      // Non-critical.
+    } finally {
+      if (!silent && isMountedRef.current && requestId === portfolioRequestIdRef.current) {
+        setIsPortfolioLoading(false);
+      }
     }
   }, []);
 
+  const resolvedExchange = stockData?.exchange || livePrice?.exchange || livePrice?.market || livePrice?.exchange_code;
   const subscriptionSymbols = useMemo(
-    () => getSymbolVariants(symbol, stockData?.exchange),
-    [symbol, stockData?.exchange]
+    () => getSymbolVariants(symbol, resolvedExchange),
+    [symbol, resolvedExchange]
   );
 
   useEffect(() => {
@@ -84,6 +106,20 @@ const TradeForm = ({
       onLoadingChange(isLoading);
     }
   }, [isLoading, onLoadingChange]);
+
+  useEffect(() => {
+    const onPortfolioReset = () => {
+      setError("Portfolio reset detected. Please review quantity and submit again.");
+      setQuantity("");
+      setEntryPrice("");
+      setStopLoss("");
+      setTarget("");
+      refreshPortfolioData();
+    };
+
+    window.addEventListener('te:portfolio-reset', onPortfolioReset);
+    return () => window.removeEventListener('te:portfolio-reset', onPortfolioReset);
+  }, [refreshPortfolioData]);
 
   useEffect(() => {
     if (!closeRequested) {
@@ -141,6 +177,40 @@ const TradeForm = ({
   const hasPositionalHolding = cncHoldingQty > 0;
   const hasIntradayHolding = misHoldingQty > 0;
 
+  const fetchStockData = useCallback(async (stockSymbol) => {
+    const requestId = stockRequestIdRef.current + 1;
+    stockRequestIdRef.current = requestId;
+
+    try {
+      const response = await api.getStockDetails(stockSymbol);
+      if (!isMountedRef.current || requestId !== stockRequestIdRef.current) {
+        return;
+      }
+
+      const priceData = response?.price_data;
+      if (!priceData) {
+        return;
+      }
+
+      setStockData(priceData);
+      setLivePrice({
+        ltp: priceData.ltp,
+        change: priceData.change,
+        percent_change: priceData.percent_change,
+        exchange: priceData.exchange,
+      });
+
+      if (priceData && priceData.provider_available === false) {
+        toast.error('Price provider is currently unavailable. Showing cached or EOD prices. Live updates may be delayed.');
+      } else if (priceData && priceData.is_stale) {
+        toast('Showing fallback price (EOD or previous close). Live prices may be unavailable.', { icon: 'ℹ️' });
+      }
+
+      setSymbol((prev) => prev || (priceData.symbol || '').toUpperCase());
+    } catch {
+    }
+  }, []);
+
   // Update symbol if the initial prop changes
   useEffect(() => {
     const normalized = (initialSymbol || "").toUpperCase();
@@ -149,27 +219,16 @@ const TradeForm = ({
       fetchStockData(normalized);
     }
     refreshPortfolioData();
-  }, [initialSymbol]);
+  }, [initialSymbol, fetchStockData, refreshPortfolioData]);
 
   useEffect(() => {
     // Keep holdings snapshot fresh when user switches BUY/SELL.
-    refreshPortfolioData();
+    if (actionChangedRef.current) {
+      refreshPortfolioData({ silent: true });
+    } else {
+      actionChangedRef.current = true;
+    }
   }, [action, refreshPortfolioData]);
-
-  // Fetch portfolio data on mount
-  useEffect(() => {
-    const fetchPortfolio = async () => {
-      try {
-        const data = await api.fetchPortfolio();
-        if (data.success) {
-          setPortfolioData(data);
-        }
-      } catch (err) {
-        // Non-critical: portfolio is used only for optional UI hints.
-      }
-    };
-    fetchPortfolio();
-  }, []);
 
   // Subscribe to live price updates
   useEffect(() => {
@@ -192,44 +251,14 @@ const TradeForm = ({
     return () => unsubscribe();
   }, [subscriptionSymbols]);
 
-  // Fetch stock data
-  const fetchStockData = async (stockSymbol) => {
-    try {
-      const response = await api.getStockDetails(stockSymbol);
-      const priceData = response?.price_data;
-      if (!priceData) {
-        return;
-      }
-
-      setStockData(priceData);
-      setLivePrice({
-        ltp: priceData.ltp,
-        change: priceData.change,
-        percent_change: priceData.percent_change,
-      });
-
-      // Notify user if provider is down or data is stale
-      if (priceData && priceData.provider_available === false) {
-        toast.error('Price provider is currently unavailable. Showing cached or EOD prices. Live updates may be delayed.');
-      } else if (priceData && priceData.is_stale) {
-        toast('Showing fallback price (EOD or previous close). Live prices may be unavailable.', { icon: 'ℹ️' });
-      }
-
-      // Ensure symbol input aligns with canonical symbol casing
-      if (!symbol) {
-        setSymbol((priceData.symbol || "").toUpperCase());
-      }
-    } catch (err) {
-      // Non-critical: user can still place orders if data fetch fails.
-    }
-  };
-
   // Fetch market status on mount
   useEffect(() => {
+    let isCancelled = false;
+
     const fetchMarketStatus = async () => {
       try {
         const data = await api.getMarketStatus();
-        if (data.success) {
+        if (!isCancelled && data.success) {
           setMarketStatus({
             session: data.session || (data.is_market_open ? 'REGULAR' : 'CLOSED'),
             is_holiday: data.is_holiday || false,
@@ -237,13 +266,15 @@ const TradeForm = ({
           });
         }
       } catch (err) {
-        // Non-critical: treat as unknown/closed if status can't be fetched.
       }
     };
     fetchMarketStatus();
     // Refresh every minute
     const interval = setInterval(fetchMarketStatus, 60000);
-    return () => clearInterval(interval);
+    return () => {
+      isCancelled = true;
+      clearInterval(interval);
+    };
   }, []);
 
   // Calculate margin required and charges
@@ -269,19 +300,19 @@ const TradeForm = ({
 
   // Handle timeframe change
   const handleTimeframeChange = useCallback((value) => {
-    if (action === "SELL" && value === "delivery" && !hasPositionalHolding) {
+    if (action === "SELL" && !isPortfolioLoading && value === "delivery" && !hasPositionalHolding) {
       toast.error("No delivery (positional) holding available to sell.");
       return;
     }
 
-    if (action === "SELL" && value === "intraday" && hasPositionalHolding && !hasIntradayHolding) {
+    if (action === "SELL" && !isPortfolioLoading && value === "intraday" && hasPositionalHolding && !hasIntradayHolding) {
       toast.error("Intraday short-sell is disabled when you already hold this stock as delivery.");
       return;
     }
 
     setTimeframe(value);
     setProductType(value === "intraday" ? "MIS" : "CNC");
-  }, [action, hasIntradayHolding, hasPositionalHolding]);
+  }, [action, hasIntradayHolding, hasPositionalHolding, isPortfolioLoading]);
 
   useEffect(() => {
     // Keep timeframe/productType consistent when action or symbol changes.
@@ -290,6 +321,10 @@ const TradeForm = ({
         setTimeframe("delivery");
         setProductType("CNC");
       }
+      return;
+    }
+
+    if (isPortfolioLoading) {
       return;
     }
 
@@ -306,7 +341,30 @@ const TradeForm = ({
       setTimeframe("delivery");
       setProductType("CNC");
     }
-  }, [action, hasIntradayHolding, hasPositionalHolding, timeframe]);
+  }, [action, hasIntradayHolding, hasPositionalHolding, timeframe, isPortfolioLoading]);
+
+  const mapTradeErrorMessage = useCallback((err) => {
+    const status =
+      err?.status
+      ?? err?.response?.status
+      ?? err?.originalError?.response?.status
+      ?? err?.data?.status;
+    const text = String(err?.message || "").trim();
+
+    if (status === 402) {
+      return "Insufficient available funds or margin for this order.";
+    }
+    if (status === 409) {
+      return text || "This order was already processed or conflicts with another request.";
+    }
+    if (status === 423) {
+      return "Portfolio reset in progress. Please wait a moment and retry.";
+    }
+    if (status === 400) {
+      return text || "Invalid order parameters. Please review quantity, price, and timeframe.";
+    }
+    return text || "An unexpected error occurred.";
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -318,45 +376,88 @@ const TradeForm = ({
     cancelAfterCreateRef.current = false;
     setIsLoading(true);
 
-    const qty = parseInt(quantity, 10);
+    const qty = Number.parseInt(quantity, 10);
+    if (!Number.isInteger(qty) || qty <= 0) {
+      toast.error("Enter a valid quantity greater than 0.");
+      setIsLoading(false);
+      return;
+    }
+
+    const symbolValue = String(symbol || "").trim().toUpperCase();
+    if (!symbolValue) {
+      toast.error("Symbol is required.");
+      setIsLoading(false);
+      return;
+    }
+
+    const hasLimitInput = String(entryPrice || "").trim().length > 0;
+    const parsedEntryPrice = hasLimitInput ? Number.parseFloat(entryPrice) : null;
+    if (hasLimitInput && (!Number.isFinite(parsedEntryPrice) || parsedEntryPrice <= 0)) {
+      toast.error("Enter a valid limit price greater than 0.");
+      setIsLoading(false);
+      return;
+    }
+
+    const hasUnsupportedExitInputs = String(stopLoss || "").trim().length > 0 || String(target || "").trim().length > 0;
+    if (hasUnsupportedExitInputs) {
+      toast.error("Stop Loss / Target from this ticket are not active for simple MARKET/LIMIT orders. Use Modify Exit Plan after entry.");
+      setIsLoading(false);
+      return;
+    }
+
     const currentLtp = livePrice?.ltp || stockData?.ltp || 0;
+    if (!hasLimitInput && (!Number.isFinite(currentLtp) || currentLtp <= 0)) {
+      toast.error("Live market price is unavailable. Add a valid limit price or retry.");
+      setIsLoading(false);
+      return;
+    }
     
     // Determine order type and price
     let orderType = "MARKET";
     let orderPrice = currentLtp;
     
-    if (entryPrice && parseFloat(entryPrice) > 0) {
+    if (hasLimitInput) {
       orderType = "LIMIT";
-      orderPrice = parseFloat(entryPrice);
+      orderPrice = parsedEntryPrice;
     }
 
-    // For SELL with MIS, check if it's a short sell (only when no existing position)
-    const isShortSell = action === "SELL" && productType === "MIS" && !hasPositionalHolding && !hasIntradayHolding;
+    const holdingsSnapshotReady = !isPortfolioLoading && portfolioData?.success;
+    if (action === "SELL" && productType === "MIS" && !holdingsSnapshotReady) {
+      toast.error("Holdings are still syncing. Please wait a moment before placing MIS sell.");
+      setIsLoading(false);
+      return;
+    }
+
+    const inferredShortSell = action === "SELL" && productType === "MIS" && holdingsSnapshotReady && !hasPositionalHolding && !hasIntradayHolding;
+    const allowShortIntent = inferredShortSell;
 
     // Short selling support is only implemented for immediate execution.
     // Prevent creating a pending MIS short-sell order that would later be cancelled by the processor.
     const session = marketStatus?.session;
     const isMarketRegular = session === 'REGULAR';
-    if (isShortSell) {
-      if (!isMarketRegular) {
+    if (inferredShortSell) {
+      if (session && !isMarketRegular) {
         toast.error("Intraday short sell is only allowed during regular market hours.");
         setIsLoading(false);
         return;
       }
-      if (entryPrice && parseFloat(entryPrice) > 0) {
+      if (hasLimitInput) {
         toast.error("Short sell supports MARKET orders only. Remove the limit price.");
         setIsLoading(false);
         return;
       }
+      if (!session) {
+        toast("Market status is currently unavailable. Server will validate short-sell eligibility.", { icon: "ℹ️" });
+      }
     }
 
-    if (action === "SELL" && productType === "MIS" && !isShortSell && !hasIntradayHolding) {
+    if (action === "SELL" && productType === "MIS" && holdingsSnapshotReady && !inferredShortSell && !hasIntradayHolding) {
       toast.error("No intraday position available to sell.");
       setIsLoading(false);
       return;
     }
     
-    if (isShortSell) {
+    if (inferredShortSell) {
       const confirmShortSell = window.confirm(
         `Confirm short sell for ${symbol}?\n\nThis is an intraday (MIS) short position and must be covered by 3:25 PM.`
       );
@@ -368,15 +469,13 @@ const TradeForm = ({
     }
 
     const tradeData = {
-      symbol,
+      symbol: symbolValue,
       quantity: qty,
       order_type: orderType,
       action: action,
       product_type: productType,
       price: orderType === "LIMIT" ? orderPrice : undefined,
-      stop_loss_price: stopLoss && parseFloat(stopLoss) > 0 ? parseFloat(stopLoss) : undefined,
-      target_price: target && parseFloat(target) > 0 ? parseFloat(target) : undefined,
-      allow_short: isShortSell,
+      allow_short: allowShortIntent,
     };
 
     const toastId = toast.loading("Placing order...");
@@ -399,9 +498,9 @@ const TradeForm = ({
           toast.success(successMessage, { id: toastId });
         }
         
-        const orderId = result.order_id || result.orderId || result.id;
+        const orderId = result.order_id || result.orderId || result.transaction_id || result.transactionId || result.id;
         const statusValue = String(result.status || "").toUpperCase();
-        const isPending = statusValue === 'PENDING';
+        const isPending = statusValue === 'PENDING' || (!statusValue && !!result.transaction_id && (result.price == null));
 
         // If user requested close while loading, auto-cancel only PENDING orders.
         if (cancelAfterCreateRef.current && orderId && isPending) {
@@ -415,10 +514,20 @@ const TradeForm = ({
           }
         }
 
-        window.dispatchEvent(new CustomEvent('te:trade-success', { detail: { orderId } }));
+        const optimisticOrder = {
+          id: orderId || `${symbolValue}-${Date.now()}`,
+          symbol: symbolValue,
+          transaction_type: action,
+          quantity: qty,
+          price: Number.isFinite(orderPrice) ? orderPrice : (Number(livePrice?.ltp) || Number(stockData?.ltp) || 0),
+          status: isPending ? 'PENDING' : 'EXECUTED',
+          date: new Date().toISOString(),
+        };
+
+        window.dispatchEvent(new CustomEvent('te:trade-success', { detail: { orderId, optimisticOrder } }));
 
         // Refresh holdings snapshot for accurate intraday/positional gating.
-        refreshPortfolioData();
+        refreshPortfolioData({ silent: true });
 
         // Reset form state after successful trade
         setQuantity("");
@@ -428,10 +537,13 @@ const TradeForm = ({
         if (onTradeSuccess) onTradeSuccess(result);
         if (onClose) onClose();
       } else {
-        throw new Error(result?.message || 'Order failed.');
+        const submitErr = new Error(result?.message || 'Order failed.');
+        submitErr.status = result?.status_code || result?.status || result?.code;
+        submitErr.data = result;
+        throw submitErr;
       }
     } catch (err) {
-      const errorMessage = err?.message || "An unexpected error occurred.";
+      const errorMessage = mapTradeErrorMessage(err);
       setError(errorMessage);
       toast.error(errorMessage, { id: toastId });
     } finally {
@@ -480,7 +592,32 @@ const TradeForm = ({
   const currentLtp = livePrice?.ltp || stockData?.ltp || 0;
   const priceChange = livePrice?.change || stockData?.change || 0;
   const percentChange = livePrice?.percent_change || stockData?.percent_change || 0;
-  const availableBalance = portfolioData?.summary?.available_balance || portfolioData?.summary?.cash_balance || 0;
+  const portfolioAvailableBalanceRaw = portfolioData?.summary?.available_balance ?? portfolioData?.summary?.cash_balance;
+  const profileAvailableBalanceRaw = profileData?.available_balance ?? profileData?.balance;
+
+  const availableBalance = useMemo(() => {
+    const portfolioBalance = Number(portfolioAvailableBalanceRaw);
+    if (Number.isFinite(portfolioBalance)) {
+      return portfolioBalance;
+    }
+
+    const profileBalance = Number(profileAvailableBalanceRaw);
+    if (Number.isFinite(profileBalance)) {
+      return profileBalance;
+    }
+
+    return 0;
+  }, [portfolioAvailableBalanceRaw, profileAvailableBalanceRaw]);
+
+  const isBalanceReady = useMemo(() => {
+    const portfolioBalance = Number(portfolioAvailableBalanceRaw);
+    if (Number.isFinite(portfolioBalance)) {
+      return true;
+    }
+
+    const profileBalance = Number(profileAvailableBalanceRaw);
+    return Number.isFinite(profileBalance);
+  }, [portfolioAvailableBalanceRaw, profileAvailableBalanceRaw]);
 
   return (
     <Card className="w-full max-w-none rounded-3xl border border-slate-100 bg-white shadow-sm">
@@ -530,6 +667,7 @@ const TradeForm = ({
                     <button
                       key={option.key}
                       type="button"
+                      disabled={isLoading}
                       onClick={() => setAction(option.key)}
                       className={`rounded-2xl border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/10 ${
                         isActive
@@ -572,7 +710,7 @@ const TradeForm = ({
                     }}
                     placeholder="e.g. RELIANCE"
                     required
-                    disabled={!!initialSymbol}
+                    disabled={isLoading || !!initialSymbol}
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -581,10 +719,14 @@ const TradeForm = ({
                     id="quantity"
                     type="number"
                     value={quantity}
-                    onChange={(e) => setQuantity(e.target.value)}
+                    onChange={(e) => {
+                      const cleaned = String(e.target.value || '').replace(/\D+/g, '');
+                      setQuantity(cleaned);
+                    }}
                     placeholder="0"
                     required
                     min="1"
+                    disabled={isLoading}
                   />
                 </div>
               </div>
@@ -596,10 +738,17 @@ const TradeForm = ({
                     id="entryPrice"
                     type="number"
                     value={entryPrice}
-                    onChange={(e) => setEntryPrice(e.target.value)}
+                    onChange={(e) => {
+                      const raw = String(e.target.value || '');
+                      const sanitized = raw
+                        .replace(/[^\d.]/g, '')
+                        .replace(/(\..*)\./g, '$1');
+                      setEntryPrice(sanitized);
+                    }}
                     placeholder="Market Price"
                     min="0.01"
                     step="0.01"
+                    disabled={isLoading}
                   />
                   {!entryPrice && (
                     <p className="text-xs text-slate-500">Executes at live price {formatCurrency(currentLtp)}</p>
@@ -607,13 +756,13 @@ const TradeForm = ({
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="timeframe" className="text-xs font-semibold uppercase tracking-wide text-slate-500">Timeframe</Label>
-                  <Select onValueChange={handleTimeframeChange} value={timeframe}>
+                  <Select onValueChange={handleTimeframeChange} value={timeframe} disabled={isLoading}>
                     <SelectTrigger id="timeframe">
                       <SelectValue placeholder="Select timeframe" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="intraday">Intraday (auto square-off 3:25 PM)</SelectItem>
-                      <SelectItem value="delivery" disabled={action === "SELL" && !hasPositionalHolding}>
+                      <SelectItem value="delivery" disabled={isLoading || (action === "SELL" && !isPortfolioLoading && !hasPositionalHolding)}>
                         {action === "SELL" ? "Delivery (positional exit)" : "Delivery (positional)"}
                       </SelectItem>
                     </SelectContent>
@@ -637,6 +786,7 @@ const TradeForm = ({
                     placeholder="0.00"
                     min="0.01"
                     step="0.01"
+                    disabled
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -649,7 +799,12 @@ const TradeForm = ({
                     placeholder="0.00"
                     min="0.01"
                     step="0.01"
+                    disabled
                   />
+                  <p className="flex items-start gap-1 text-xs text-slate-500">
+                    <Info className="mt-0.5 h-3 w-3" />
+                    Stop Loss / Target are managed via Modify Exit Plan after order execution.
+                  </p>
                 </div>
               </div>
             </div>
@@ -674,7 +829,9 @@ const TradeForm = ({
               <div className="space-y-2.5 rounded-2xl border border-slate-200/80 bg-white/70 p-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Available</span>
-                  <span className="text-base font-semibold text-slate-900">{formatCurrency(availableBalance)}</span>
+                  <span className="text-base font-semibold text-slate-900">
+                    {isBalanceReady ? formatCurrency(availableBalance) : "Loading..."}
+                  </span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">{action === "BUY" ? "Margin Req" : "Proceeds"}</span>
@@ -688,7 +845,7 @@ const TradeForm = ({
             </aside>
           </div>
 
-          {action === "BUY" && marginRequired > availableBalance && (
+          {action === "BUY" && isBalanceReady && marginRequired > availableBalance && (
             <div className="rounded-2xl border border-rose-200 bg-rose-50/70 p-3 text-sm text-rose-700">
               <div className="flex items-center gap-2">
                 <AlertCircle className="h-4 w-4" />
@@ -704,7 +861,7 @@ const TradeForm = ({
           <Button
             type="submit"
             className="w-full rounded-2xl py-4 text-sm font-semibold"
-            disabled={isLoading || (action === "BUY" && marginRequired > availableBalance)}
+            disabled={isLoading || (action === "BUY" && (!isBalanceReady || marginRequired > availableBalance))}
           >
             {isLoading ? <Loader2 className="mx-auto animate-spin" /> : `Place ${action} Order`}
           </Button>

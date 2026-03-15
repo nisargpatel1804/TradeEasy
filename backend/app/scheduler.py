@@ -5,9 +5,11 @@ Uses APScheduler to run tasks at specific times without blocking the main applic
 
 import logging
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from flask import current_app
+from pymongo import UpdateOne
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +73,11 @@ class TaskScheduler:
         start_time = datetime.utcnow()
         
         try:
-            from app.moapi.mo_api import MotilalOswalAPI
+            from app.moapi import get_mo_api_client
             from app.models import AQScrip
             from app.db_scrips_populate import _map_api_to_model_data
             
-            mo_api = MotilalOswalAPI()
+            mo_api = get_mo_api_client()
             if not mo_api.login():
                 logger.error("Failed to authenticate with MO API for daily update.")
                 return
@@ -84,42 +86,64 @@ class TaskScheduler:
             # F&O and commodities can be updated less frequently if needed
             exchanges = ["NSE", "BSE"]
             stats = {"total_processed": 0, "upserted": 0, "updated": 0}
-            
-            for exchange in exchanges:
-                logger.info(f"Updating scrips for {exchange}...")
-                scrips_response = mo_api.get_scrips_by_exchange(exchange)
-                
-                if not (scrips_response and scrips_response.get("status") == "SUCCESS"):
-                    logger.warning(f"Failed to fetch scrips for {exchange}.")
-                    continue
-                
-                scrips_list = scrips_response.get("data", [])
-                exchange_upserted = 0
-                exchange_updated = 0
-                
-                for scrip_api_data in scrips_list:
-                    model_data = _map_api_to_model_data(scrip_api_data, exchange)
-                    if not model_data:
+
+            with ThreadPoolExecutor(max_workers=min(4, len(exchanges))) as executor:
+                future_map = {
+                    executor.submit(mo_api.get_scrips_by_exchange, exchange): exchange
+                    for exchange in exchanges
+                }
+
+                for future in as_completed(future_map):
+                    exchange = future_map[future]
+                    logger.info(f"Updating scrips for {exchange}...")
+
+                    try:
+                        scrips_response = future.result()
+                    except Exception as fetch_error:
+                        logger.warning(f"Failed to fetch scrips for {exchange}: {fetch_error}")
                         continue
-                    
-                    # Upsert operation: update if exists, insert if new
-                    result = AQScrip.objects(
-                        scripcode=model_data['scripcode'],
-                        exchangename=model_data['exchangename']
-                    ).update_one(set__=model_data, upsert=True)
-                    
-                    if result.upserted_id:
-                        exchange_upserted += 1
-                    elif result.modified_count > 0:
-                        exchange_updated += 1
-                
-                stats["total_processed"] += len(scrips_list)
-                stats["upserted"] += exchange_upserted
-                stats["updated"] += exchange_updated
-                logger.info(
-                    f"Completed {exchange}: {len(scrips_list)} processed, "
-                    f"{exchange_upserted} new, {exchange_updated} updated."
-                )
+
+                    if not (scrips_response and scrips_response.get("status") == "SUCCESS"):
+                        logger.warning(f"Failed to fetch scrips for {exchange}.")
+                        continue
+
+                    scrips_list = scrips_response.get("data", [])
+                    operations = []
+                    now_utc = datetime.utcnow()
+
+                    for scrip_api_data in scrips_list:
+                        model_data = _map_api_to_model_data(scrip_api_data, exchange)
+                        if not model_data:
+                            continue
+
+                        operations.append(
+                            UpdateOne(
+                                {
+                                    "scripcode": model_data['scripcode'],
+                                    "exchangename": model_data['exchangename'],
+                                },
+                                {
+                                    "$set": model_data,
+                                    "$setOnInsert": {"created_at": now_utc},
+                                },
+                                upsert=True,
+                            )
+                        )
+
+                    exchange_upserted = 0
+                    exchange_updated = 0
+                    if operations:
+                        bulk_result = AQScrip._get_collection().bulk_write(operations, ordered=False)
+                        exchange_upserted = len(getattr(bulk_result, "upserted_ids", {}) or {})
+                        exchange_updated = int(getattr(bulk_result, "modified_count", 0) or 0)
+
+                    stats["total_processed"] += len(scrips_list)
+                    stats["upserted"] += exchange_upserted
+                    stats["updated"] += exchange_updated
+                    logger.info(
+                        f"Completed {exchange}: {len(scrips_list)} processed, "
+                        f"{exchange_upserted} new, {exchange_updated} updated."
+                    )
             
             # Mark inactive scrips (optional: could implement logic to mark scrips
             # not seen in the latest API response as inactive/delisted)

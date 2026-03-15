@@ -1,9 +1,12 @@
 import logging
 import re
+import time
+from datetime import datetime
 from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from mongoengine.errors import NotUniqueError
 from app.models import User, Holding, Transaction, Lot, ShortPosition
+from app.services.cache import cache as app_cache
 
 # --- Configuration ---
 logger = logging.getLogger(__name__)
@@ -20,6 +23,44 @@ WALLET_LABELS = {
     5_000_000: "₹50 Lakh",
     10_000_000: "₹1 Crore",
 }
+
+
+def _invalidate_user_route_caches(user_id):
+    patterns = [
+        f"route:get_profile:user:{user_id}",
+        f"route:get_portfolio:user:{user_id}",
+        f"route:get_orders:user:{user_id}",
+        f"route:get_watchlists:user:{user_id}",
+    ]
+    for pattern in patterns:
+        app_cache.invalidate_pattern(pattern)
+
+
+def _take_user_reset_snapshot(user):
+    return {
+        "user": User.objects(id=user.id).as_pymongo().first(),
+        "holdings": list(Holding.objects(user=user).as_pymongo()),
+        "lots": list(Lot.objects(user=user).as_pymongo()),
+        "short_positions": list(ShortPosition.objects(user=user).as_pymongo()),
+        "transactions": list(Transaction.objects(user=user).as_pymongo()),
+    }
+
+
+def _restore_user_reset_snapshot(user_id, snapshot):
+    user_doc = snapshot.get("user")
+    if user_doc:
+        User._get_collection().replace_one({"_id": user_doc["_id"]}, user_doc, upsert=True)
+
+    for model, key in (
+        (Holding, "holdings"),
+        (Lot, "lots"),
+        (ShortPosition, "short_positions"),
+        (Transaction, "transactions"),
+    ):
+        model.objects(user=user_id).delete()
+        docs = snapshot.get(key) or []
+        if docs:
+            model._get_collection().insert_many(docs, ordered=True)
 
 
 def _serialize_profile(user: User) -> dict:
@@ -56,6 +97,10 @@ def get_profile():
 @login_required
 def update_wallet_limit():
     """Updates the simulated wallet balance with pre-approved limits."""
+    lock_acquired = False
+    snapshot = None
+    user_id = None
+    user_client_id = None
     try:
         data = request.get_json() or {}
         raw_amount = data.get('amount')
@@ -71,32 +116,113 @@ def update_wallet_limit():
             return jsonify({"success": False, "message": "Amount must be one of the supported wallet limits."}), 400
 
         user = User.objects.get(id=current_user.id)
+        user_id = user.id
+        user_client_id = user.client_id
+        lock_result = User.objects(id=user.id, reset_in_progress__ne=True).update_one(
+            set__reset_in_progress=True,
+            set__reset_started_at=datetime.utcnow()
+        )
+        if lock_result == 0:
+            return jsonify({
+                "success": False,
+                "message": "A portfolio reset is already in progress. Please retry in a few seconds."
+            }), 409
+
+        lock_acquired = True
+        user.reload()
+
+        # Ensure no in-flight execution mutates state during reset snapshot/delete.
+        wait_deadline = time.time() + 5.0
+        inflight = Transaction.objects(user=user, is_processing=True).count()
+        while inflight > 0 and time.time() < wait_deadline:
+            time.sleep(0.1)
+            inflight = Transaction.objects(user=user, is_processing=True).count()
+
+        if inflight > 0:
+            User.objects(id=user.id).update_one(
+                set__reset_in_progress=False,
+                unset__reset_started_at=1
+            )
+            lock_acquired = False
+            return jsonify({
+                "success": False,
+                "message": "Orders are still being processed. Please retry reset in a few seconds."
+            }), 409
+
+        snapshot = _take_user_reset_snapshot(user)
+
+        reset_timestamp = datetime.utcnow()
+
+        # Finalize open/in-flight orders before hard-delete so downstream readers don't
+        # observe partially processed states.
+        Transaction.objects(user=user, status="PENDING").update(
+            set__status="CANCELLED",
+            set__is_processing=False,
+            set__metadata="Cancelled due to portfolio reset",
+            set__execution_date=reset_timestamp
+        )
+        Transaction.objects(user=user, is_processing=True).update(set__is_processing=False)
+
         user.balance = amount_value
         user.reserved_balance = 0.0
+        user.last_portfolio_reset_at = reset_timestamp
+
+        # Align reset scope with UX copy: keep watchlist containers but clear all symbols.
+        for watchlist in user.watchlists or []:
+            watchlist.stocks = []
+
         user.save()
 
-        # Reset every data surface so the wallet truly behaves like a portfolio reset
+        # Clear data surfaces associated with portfolio state.
         Holding.objects(user=user).delete()
         Lot.objects(user=user).delete()
         ShortPosition.objects(user=user).delete()
         Transaction.objects(user=user).delete()
 
-        reset_performed = True
+        _invalidate_user_route_caches(user.id)
+
+        User.objects(id=user.id).update_one(
+            set__reset_in_progress=False,
+            unset__reset_started_at=1
+        )
+        lock_acquired = False
+        user.reload()
+
         friendly_amount = WALLET_LABELS.get(int(amount_value), f"₹{int(amount_value):,}")
         logger.info("User %s reset their account with wallet limit %s", user.client_id, friendly_amount)
 
         profile_payload = _serialize_profile(user)
-        message = f"Wallet reset to {friendly_amount}. All positions, orders, and performance data were cleared."
+        message = f"Wallet reset to {friendly_amount}. Positions, orders, performance, and watchlist symbols were cleared."
 
         return jsonify({
             "success": True,
             "message": message,
             "profile": profile_payload,
-            "reset_performed": reset_performed
+            "reset_performed": True
         }), 200
     except Exception as e:
-        logger.error(f"Error updating wallet limit for user {current_user.client_id}: {e}", exc_info=True)
-        return jsonify({"success": False, "message": "An internal server error occurred."}), 500
+        if snapshot and user_id:
+            try:
+                _restore_user_reset_snapshot(user_id, snapshot)
+                _invalidate_user_route_caches(user_id)
+                logger.warning("Portfolio reset rollback restored user %s state", user_client_id or "unknown")
+            except Exception as rollback_err:
+                logger.error("Rollback failed for user %s: %s", user_client_id or "unknown", rollback_err, exc_info=True)
+
+        if lock_acquired and user_id:
+            try:
+                User.objects(id=user_id).update_one(
+                    set__reset_in_progress=False,
+                    unset__reset_started_at=1
+                )
+            except Exception:
+                logger.error("Failed to release reset lock for user %s", user_client_id or "unknown", exc_info=True)
+
+        logger.error("Error updating wallet limit for user %s: %s", user_client_id or "unknown", e, exc_info=True)
+        return jsonify({
+            "success": False,
+            "message": "Reset failed and was rolled back. Please try again."
+        }), 500
 
 @profile_bp.route('/profile', methods=['PUT'])
 @login_required

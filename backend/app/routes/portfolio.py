@@ -1,4 +1,5 @@
 import logging
+import threading
 from decimal import Decimal
 from collections import defaultdict, deque
 from flask import Blueprint, jsonify
@@ -183,13 +184,21 @@ def get_portfolio():
         all_symbols = [h.symbol for h in cnc_holdings] + [h.symbol for h in mis_holdings] + [s.symbol for s in short_positions]
 
         # Ensure these symbols are subscribed to the live websocket feed.
-        # This makes the frontend totals/holdings update in real-time via Socket.IO.
-        try:
-            from app.socket_manager import MO_WebSocket_Manager
+        # Run asynchronously so portfolio API latency is not tied to external provider latency.
+        if all_symbols:
+            def _register_realtime_symbols_async(symbols):
+                try:
+                    from app.socket_manager import MO_WebSocket_Manager
+                    MO_WebSocket_Manager().register_symbols_for_realtime(symbols)
+                except Exception as sub_err:
+                    logger.warning("Portfolio realtime subscription failed: %s", sub_err)
 
-            MO_WebSocket_Manager().register_symbols_for_realtime(all_symbols)
-        except Exception as sub_err:
-            logger.warning("Portfolio realtime subscription failed: %s", sub_err)
+            threading.Thread(
+                target=_register_realtime_symbols_async,
+                args=(all_symbols,),
+                daemon=True,
+                name="PortfolioRealtimeRegister",
+            ).start()
 
         live_price_map = _get_live_price_map(all_symbols)
 

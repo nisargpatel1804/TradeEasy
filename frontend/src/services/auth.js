@@ -1,41 +1,41 @@
 import { apiClient } from './api';
 
-/**
- * A dedicated service module for handling all authentication-related API calls.
- */
+// This module re‑exports the simple wrappers for signup/login/logout but
+// retains a custom checkAuth implementation.  The latter was previously
+// responsible for treating 401 responses and timeouts as a harmless
+// "not authenticated" result, which is convenient during app startup.
 
-/**
- * Registers a new user.
- * @param {object} credentials - The user's registration details 
- * (e.g., { email, mobile, password, confirm_password }).
- * @returns {Promise<any>} The response data from the server.
- */
-export const signup = (credentials) => {
-  return apiClient.post('/signup', credentials).then(res => res.data);
-};
-
-/**
- * Logs a user in.
- * @param {object} credentials - The user's login credentials ({ client_id, password }).
- * @returns {Promise<any>} The response data from the server, including user details on success.
- */
-export const login = (credentials) => {
-  return apiClient.post('/login', credentials).then(res => res.data);
-};
-
-/**
- * Logs the current user out by invalidating the session on the server.
- * @returns {Promise<any>} The confirmation message from the server.
- */
-export const logout = () => {
-  return apiClient.post('/logout').then(res => res.data);
-};
+export { signup, login, logout } from './api';
 
 /**
  * Checks if the current user's session is still valid with the backend.
- * This is a protected route, so it will fail with a 401 error if the session is invalid.
- * @returns {Promise<any>} The user's session details if authenticated.
+ * This is a protected route, so it will fail with a 401 error if the session is
+ * invalid.  The caller (AuthContext) expects the function to resolve to an
+ * object instead of rejecting when the session is gone.  In addition to the
+ * basic `isAuthenticated/user` fields we also return `profile` now so the
+ * client can bootstrap user data without making a second HTTP request.
  */
 export const checkAuth = () => {
-  return apiClient.get('/check-auth').then(res => res.data);
+  return apiClient
+    .get('/check-auth', {
+      timeout: 8000,
+      validateStatus: (status) => (status >= 200 && status < 300) || status === 401,
+    })
+    .then((res) => {
+      if (res.status === 401) {
+        return { isAuthenticated: false, user: null };
+      }
+      return res.data;
+    })
+    .catch((error) => {
+      if (
+        error?.code === 'ECONNABORTED' ||
+        error?.status === 401 ||
+        error?.response?.status === 401
+      ) {
+        return { isAuthenticated: false, user: null };
+      }
+      throw error;
+    });
 };
+

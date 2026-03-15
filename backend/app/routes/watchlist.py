@@ -6,6 +6,7 @@ from mongoengine.errors import NotUniqueError
 
 from app.models import User, Stock, Watchlist, Holding, ShortPosition
 from app.socket_manager import MO_WebSocket_Manager
+from app.services.cache import cached_route, cache as app_cache
 # Import the centralized function for symbol formatting
 from .stock import format_symbol
 
@@ -77,10 +78,39 @@ def _is_stock_tracked_elsewhere(stock: Stock) -> bool:
     return False
 
 
+def _is_user_resetting(user_id) -> bool:
+    user_doc = User.objects(id=user_id).only('reset_in_progress').first()
+    return bool(getattr(user_doc, 'reset_in_progress', False))
+
+
+def _reset_in_progress_response():
+    return jsonify({
+        "success": False,
+        "message": "Portfolio reset in progress. Watchlist changes are temporarily blocked."
+    }), 423
+
+
+def _invalidate_watchlist_cache(user_id):
+    """Drops the cached GET /watchlists response for this user."""
+    app_cache.invalidate_pattern(f"route:get_watchlists:user:{user_id}")
+
+
+def _find_tracked_symbols_bulk(symbols):
+    """Returns the set of symbols still referenced in any holding or active short
+    (two bulk queries instead of N individual ones)."""
+    if not symbols:
+        return set()
+    tracked = set()
+    tracked |= set(Holding.objects(symbol__in=symbols, quantity__gt=0).scalar('symbol'))
+    tracked |= set(ShortPosition.objects(symbol__in=symbols, is_active=True).scalar('symbol'))
+    return tracked
+
+
 # --- API Routes ---
 
 @watchlist_bp.route('/watchlists', methods=['GET'])
 @login_required
+@cached_route(ttl=120)
 def get_watchlists():
     """Fetches all watchlists and the symbols of the stocks they contain."""
     try:
@@ -97,6 +127,9 @@ def get_watchlists():
 @login_required
 def create_watchlist():
     """Creates a new, empty watchlist for the current user."""
+    if _is_user_resetting(current_user.id):
+        return _reset_in_progress_response()
+
     data = request.get_json()
     name = str(data.get('name', '')).strip()
 
@@ -114,6 +147,7 @@ def create_watchlist():
     try:
         user.watchlists.append(Watchlist(name=name, is_deletable=True, stocks=[]))
         user.save()
+        _invalidate_watchlist_cache(user.id)
         created_watchlist = _get_watchlist_or_404(user, name)
         logger.info("User %s created new watchlist: '%s'", user.client_id, name)
         return jsonify({
@@ -129,6 +163,9 @@ def create_watchlist():
 @login_required
 def add_stock_to_watchlist(watchlist_name):
     """Adds a stock to a specific watchlist and triggers a real-time data subscription."""
+    if _is_user_resetting(current_user.id):
+        return _reset_in_progress_response()
+
     data = request.get_json() or {}
     symbol_input = data.get('symbol')
 
@@ -194,11 +231,9 @@ def add_stock_to_watchlist(watchlist_name):
         if any(s and s.id == stock.id for s in target_watchlist.stocks):
             return jsonify({"success": False, "message": "Stock is already in this watchlist.", "error_code": "DUPLICATE_STOCK"}), 409
 
-        if len(target_watchlist.stocks) >= MAX_STOCKS_PER_WATCHLIST:
-            return jsonify({"success": False, "message": f"Watchlist limit of {MAX_STOCKS_PER_WATCHLIST} stocks reached."}), 409
-
         target_watchlist.stocks.append(stock)
         user.save()
+        _invalidate_watchlist_cache(user.id)
 
         # --- Trigger Real-Time Subscription ---
         socket_manager = MO_WebSocket_Manager()
@@ -207,10 +242,6 @@ def add_stock_to_watchlist(watchlist_name):
             exchange=stock.exchange, 
             scripcode=stock.scripcode
         )
-        # Defensive: ensure we always have a dict-like response
-        if not isinstance(subscription_result, dict):
-            logger.warning(f"register_scrip returned non-dict result for {stock.symbol}: {subscription_result}")
-            subscription_result = {"success": False, "message": "Subscription manager returned no status."}
 
         logger.info(f"User {user.client_id} added {stock.symbol} to watchlist '{watchlist_name}'")
         updated_watchlist = _serialize_watchlist(target_watchlist)
@@ -237,6 +268,9 @@ def add_stock_to_watchlist(watchlist_name):
 @login_required
 def remove_stock_from_watchlist(watchlist_name, symbol):
     """Removes a stock from a watchlist and unsubscribes from its real-time feed."""
+    if _is_user_resetting(current_user.id):
+        return _reset_in_progress_response()
+
     user = User.objects.get(id=current_user.id)
     target_watchlist = _get_watchlist_or_404(user, watchlist_name)
 
@@ -250,6 +284,7 @@ def remove_stock_from_watchlist(watchlist_name, symbol):
     try:
         target_watchlist.stocks.remove(stock_to_remove)
         user.save()
+        _invalidate_watchlist_cache(user.id)
         # --- Unsubscribe from the real-time feed ---
         socket_manager = MO_WebSocket_Manager()
         if not _is_stock_tracked_elsewhere(stock_to_remove):
@@ -279,6 +314,9 @@ def remove_stock_from_watchlist(watchlist_name, symbol):
 @login_required
 def delete_watchlist(watchlist_name):
     """Deletes an entire watchlist for the current user."""
+    if _is_user_resetting(current_user.id):
+        return _reset_in_progress_response()
+
     user = User.objects.get(id=current_user.id)
     target_watchlist = _get_watchlist_or_404(user, watchlist_name)
 
@@ -288,17 +326,32 @@ def delete_watchlist(watchlist_name):
         return jsonify({"success": False, "message": "This watchlist cannot be deleted."}), 403
 
     try:
-        # Unsubscribe from stocks that are not tracked in other watchlists
-        socket_manager = MO_WebSocket_Manager()
-        for stock in target_watchlist.stocks:
-            if stock and not _is_stock_tracked_elsewhere(stock):
-                socket_manager.unregister_scrip(exchange=stock.exchange, scripcode=stock.scripcode)
-                logger.info(f"Unsubscribed from {stock.symbol} (not tracked elsewhere)")
-            elif stock:
-                logger.info(f"Skipping unsubscription for {stock.symbol}; still tracked in other watchlists.")
+        # Collect stocks before modifying state so we can check them after the save
+        stocks_to_check = [s for s in target_watchlist.stocks if s and s.symbol]
 
+        # Persist the removal FIRST — _is_stock_tracked_elsewhere queries the DB, so
+        # the check must run after the watchlist is gone from the user's document,
+        # otherwise the query always finds the current user and skips unsubscription.
         user.watchlists.remove(target_watchlist)
         user.save()
+        _invalidate_watchlist_cache(user.id)
+
+        # Batch-check holdings and shorts (2 bulk queries instead of 2 per stock)
+        socket_manager = MO_WebSocket_Manager()
+        if stocks_to_check:
+            symbols = [s.symbol for s in stocks_to_check]
+            bulk_tracked = _find_tracked_symbols_bulk(symbols)
+            for stock in stocks_to_check:
+                if stock.symbol in bulk_tracked:
+                    logger.info("Skipping unsubscription for %s; still in holdings/shorts.", stock.symbol)
+                    continue
+                # Per-stock watchlist check (only runs when not already blocked above)
+                if User.objects(watchlists__stocks=stock).only('id').first() is not None:
+                    logger.info("Skipping unsubscription for %s; still in another watchlist.", stock.symbol)
+                    continue
+                socket_manager.unregister_scrip(exchange=stock.exchange, scripcode=stock.scripcode)
+                logger.info("Unsubscribed from %s (not tracked elsewhere)", stock.symbol)
+
         logger.info(f"User {user.client_id} deleted watchlist: '{watchlist_name}'")
         return jsonify({"success": True, "message": "Watchlist deleted successfully."}), 200
     except Exception as e:
@@ -310,6 +363,9 @@ def delete_watchlist(watchlist_name):
 @login_required
 def rename_watchlist(watchlist_name: str):
     """Renames an existing watchlist while enforcing uniqueness."""
+    if _is_user_resetting(current_user.id):
+        return _reset_in_progress_response()
+
     data = request.get_json() or {}
     new_name = str(data.get('new_name', '')).strip()
 
@@ -334,6 +390,7 @@ def rename_watchlist(watchlist_name: str):
     try:
         target_watchlist.name = new_name
         user.save()
+        _invalidate_watchlist_cache(user.id)
         logger.info("User %s renamed watchlist '%s' to '%s'", user.client_id, watchlist_name, new_name)
         return jsonify({
             "success": True,

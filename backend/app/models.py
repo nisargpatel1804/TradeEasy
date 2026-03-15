@@ -68,6 +68,9 @@ class User(Document, UserMixin):
     created_at = DateTimeField(default=datetime.utcnow, required=True)
     is_active = BooleanField(default=True, required=True)
     watchlists = ListField(EmbeddedDocumentField(Watchlist))
+    reset_in_progress = BooleanField(default=False, required=True)
+    reset_started_at = DateTimeField()
+    last_portfolio_reset_at = DateTimeField()
     
     # Password reset fields
     # Stores HMAC-SHA256(token) rather than the plaintext token to prevent token leakage
@@ -79,7 +82,8 @@ class User(Document, UserMixin):
         'indexes': [
             'email',
             'client_id',
-            'reset_token'
+            'reset_token',
+            'reset_in_progress'
         ]
     }
 
@@ -123,9 +127,9 @@ class Transaction(Document):
     square_off_time = DateTimeField()  # Auto square-off timestamp for MIS orders
     original_price = FloatField()  # Original limit/stop price (before execution price override)
     
-    # Legacy/additional fields for backward compatibility with old database records
-    is_portfolio_exit = BooleanField()  # Legacy field - marks portfolio exit transactions
-    metadata = StringField()  # Legacy field - additional transaction metadata
+    # Additional fields for backward compatibility with old database records
+    is_portfolio_exit = BooleanField()
+    metadata = StringField()
 
     meta = {
         'collection': 'transactions',
@@ -259,6 +263,8 @@ class AQScrip(Document):
             'exchangename',
             'instrumentname',
             'scripshortname',
+            'scripname',
+            'scripfullname',
             {'fields': ['exchangename', 'scripshortname']},  # helpful for prefix+exchange queries
             {'fields': ['issuspended', 'isbanscrip']},
             # Text index to accelerate 'contains' searches; weights favor shortname
@@ -306,15 +312,22 @@ signals.pre_save.connect(clean_aqscrip_data, sender=AQScrip)
 def _invalidate_search_cache_on_scrip_change(sender, document, **kwargs):
     try:
         from app.routes import search as search_module
-        prefixes = search_module.build_invalidation_prefixes([
+        build_prefixes = getattr(search_module, "build_invalidation_prefixes", None)
+        invalidate_cache = getattr(search_module, "invalidate_search_cache", None)
+
+        if not callable(invalidate_cache):
+            return
+
+        prefixes = build_prefixes([
             document.scripshortname or "",
             document.scripname or "",
             document.scripfullname or ""
-        ])
+        ]) if callable(build_prefixes) else None
+
         if prefixes:
-            search_module.invalidate_search_cache(prefixes)
+            invalidate_cache(prefixes)
         else:
-            search_module.invalidate_search_cache()
+            invalidate_cache()
     except Exception:
         # Avoid breaking writes if cache invalidation fails
         pass

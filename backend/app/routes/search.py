@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 search_bp = Blueprint("search", __name__)
 
 SEARCH_RESULT_LIMIT = 15
+MAX_RESULT_LIMIT = 50
 MAX_QUERY_LENGTH = 64
 
 def _normalize_query(value: str) -> str:
@@ -26,10 +27,10 @@ def _format_scrip_result(scrip):
     }
 
 
-def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT) -> list:
+def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT, page: int = 1) -> dict:
     q = _normalize_query(query)
     if len(q) < 2:
-        return []
+        return {"results": [], "page": page, "limit": max_results, "has_next": False}
 
     if len(q) > MAX_QUERY_LENGTH:
         q = q[:MAX_QUERY_LENGTH]
@@ -64,10 +65,20 @@ def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT) -> list:
         Q(scripfullname__istartswith=q)
     )
 
-    qs = AQScrip.objects(filters & prefix_query & Q(exchangename="NSE")).limit(max_results - len(results))
+    offset = max(0, (page - 1) * max_results)
+    qs = AQScrip.objects(filters & prefix_query & Q(exchangename="NSE")).skip(offset).limit(max_results + 1)
     _append_from_qs(qs)
 
-    return results
+    has_next = len(results) > max_results
+    if has_next:
+        results = results[:max_results]
+
+    return {
+        "results": results,
+        "page": page,
+        "limit": max_results,
+        "has_next": has_next,
+    }
 
 
 @search_bp.route("/search", methods=["GET"])
@@ -75,6 +86,23 @@ def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT) -> list:
 @login_required
 def search_stocks():
     query = _normalize_query(request.args.get("q", ""))
+    raw_page = request.args.get("page", "1")
+    raw_limit = request.args.get("limit", str(SEARCH_RESULT_LIMIT))
+
+    try:
+        page = max(1, int(raw_page))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Parameter 'page' must be a positive integer."}), 400
+
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Parameter 'limit' must be an integer."}), 400
+
+    if limit <= 0:
+        return jsonify({"success": False, "message": "Parameter 'limit' must be greater than 0."}), 400
+    limit = min(limit, MAX_RESULT_LIMIT)
+
     if len(query) > MAX_QUERY_LENGTH:
         query = query[:MAX_QUERY_LENGTH]
 
@@ -82,16 +110,21 @@ def search_stocks():
         return jsonify({"success": False, "message": "Query parameter 'q' is required and must be at least 2 characters."}), 400
 
     try:
-        if 'page' in request.args or 'limit' in request.args:
-            return jsonify({"success": False, "message": "Pagination parameters are not supported."}), 400
-        results = _perform_search(query, max_results=SEARCH_RESULT_LIMIT)
+        payload = _perform_search(query, max_results=limit, page=page)
+        results = payload.get("results", [])
 
         logger.info(
-            "Search query '%s' results=%s",
+            "Search query '%s' page=%s limit=%s results=%s has_next=%s",
             query,
-            len(results)
+            page,
+            limit,
+            len(results),
+            payload.get("has_next", False),
         )
-        return jsonify(results), 200
+        return jsonify({
+            "success": True,
+            **payload,
+        }), 200
     except Exception:
         logger.exception("Error during stock search for query '%s'", query)
         return jsonify({"success": False, "message": "An internal server error occurred. Please try again later."}), 500

@@ -1,4 +1,9 @@
 import axios from "axios";
+import {
+  SEARCH_DEFAULT_LIMIT,
+  SEARCH_MIN_QUERY_LENGTH,
+  normalizeSearchQuery,
+} from "../constants/search.js";
 
 // --- Configuration ---
 
@@ -42,29 +47,42 @@ export const apiClient = axios.create({
 // --- Interceptors ---
 
 let lastUnauthorizedDispatchAt = 0;
+let unauthorizedDispatched = false;
+
+const onApiSuccess = (response) => {
+  unauthorizedDispatched = false;
+  return response;
+};
 
 /**
  * Centralized API error handler.
  * Catches errors from all API responses and normalizes them.
  */
+// small set used by the interceptor; defined once at module scope so we
+// don't rebuild it every time an error is processed.
+const _authPaths = new Set(['/check-auth', '/logout', '/login', '/signup']);
+
 const handleApiError = (error) => {
   const originalRequest = error.config;
 
   const url = String(originalRequest?.url || "");
 
-  // Prevent infinite loops on auth checks
-  const isAuthEndpoint =
-    url.includes('/check-auth') ||
-    url.includes('/logout') ||
-    url.includes('/login') ||
-    url.includes('/signup');
+  // Prevent infinite loops on auth checks. (see _authPaths above)
+  let isAuthEndpoint = false;
+  for (const p of _authPaths) {
+    if (url.includes(p)) {
+      isAuthEndpoint = true;
+      break;
+    }
+  }
 
   // Handle Session Expiry (401)
   if (error.response?.status === 401 && !isAuthEndpoint) {
     // Throttle to avoid storms when many requests fail at once.
     const now = Date.now();
-    if (now - lastUnauthorizedDispatchAt > 1000) {
+    if (!unauthorizedDispatched && now - lastUnauthorizedDispatchAt > 1000) {
       lastUnauthorizedDispatchAt = now;
+      unauthorizedDispatched = true;
       window.dispatchEvent(new CustomEvent('unauthorized'));
     }
   }
@@ -87,7 +105,7 @@ const handleApiError = (error) => {
 
 // Response Interceptor
 apiClient.interceptors.response.use(
-  (response) => response,
+  onApiSuccess,
   handleApiError
 );
 
@@ -107,12 +125,13 @@ const withRetry = async (fn, attempts = 2) => {
       return await fn();
     } catch (err) {
       lastErr = err;
+      const responseStatus = err?.response?.status ?? err?.originalError?.response?.status ?? err?.status;
       // Do not retry if the request was intentionally cancelled/aborted
       if (err?.code === 'ERR_CANCELED' || err?.name === 'AbortError' || err?.name === 'CanceledError') {
         throw err;
       }
       // Retry on network errors (no response) or server 5xx
-      if (!err.response || (err.response && err.response.status >= 500) || err.code === 'ECONNABORTED') {
+      if (!responseStatus || responseStatus >= 500 || err.code === 'ECONNABORTED') {
         const delay = 100 * Math.pow(2, i);
         await new Promise((r) => setTimeout(r, delay));
         continue;
@@ -121,6 +140,19 @@ const withRetry = async (fn, attempts = 2) => {
     }
   }
   throw lastErr;
+};
+
+const parseRetryAfterMs = (retryAfterHeader) => {
+  if (!retryAfterHeader) return 0;
+  const asNumber = Number(retryAfterHeader);
+  if (Number.isFinite(asNumber) && asNumber >= 0) {
+    return asNumber * 1000;
+  }
+  const at = Date.parse(retryAfterHeader);
+  if (!Number.isNaN(at)) {
+    return Math.max(0, at - Date.now());
+  }
+  return 0;
 };
 
 // =========================================================================
@@ -136,12 +168,14 @@ export const checkAuth = () => fetchData('/check-auth');
 
 // --- User Profile ---
 export const getProfile = () => fetchData('/profile');
-export const fetchProfile = getProfile; // Alias
 export const updateProfile = (profileData) => apiClient.put('/profile', profileData).then(res => res.data);
-export const updateWalletLimit = (amount) => apiClient.post('/profile/wallet-limit', { amount }).then(res => res.data);
+export const updateWalletLimit = (amount, config = {}) => apiClient.post('/profile/wallet-limit', { amount }, config).then(res => res.data);
 
 // --- Portfolio ---
-export const getPortfolio = () => fetchData('/portfolio');
+export const getPortfolio = () => withRetry(
+  () => apiClient.get('/portfolio', { timeout: 45000 }).then((res) => res.data),
+  2
+);
 export const fetchPortfolio = getPortfolio; // Alias used in DashboardPage
 
 // --- Orders ---
@@ -156,11 +190,12 @@ export const fetchOrderDetail = getOrderDetail; // Alias
 export const getMarketIndices = () => fetchData('/indices', { timeout: 60000 });
 export const fetchMarketIndices = getMarketIndices; // Alias
 
-// Fetches Nifty 50 constituents and snapshot - Matches markets.py /market
-export const fetchMarket = () => fetchData('/market');
+// Fetches static Nifty 50 movers from direct MO LTP data.
+// Kept at 30 s so cold refreshes can complete when the backend has to refetch all 50 quotes.
+export const fetchMarket = () => fetchData('/market', { timeout: 30000 });
 export const getMarket = fetchMarket; // Alias
 
-// Backwards-compatible alias for legacy calls
+// Backwards-compatible alias for older endpoints
 export const fetchMarketStocks = (_marketName) => fetchMarket();
 
 // --- Stock Details ---
@@ -174,15 +209,51 @@ export const batchGetStockData = (symbols) => fetchData('/stocks/batch', { param
 
 // --- Search ---
 export const searchStocks = async (query, options = {}) => {
-    const q = (query || '').trim().replace(/\s+/g, ' ');
-    if (!q || q.length < 2) {
-    return [];
+    const q = normalizeSearchQuery(query);
+    const limit = options?.limit || SEARCH_DEFAULT_LIMIT;
+    if (!q || q.length < SEARCH_MIN_QUERY_LENGTH) {
+    return { success: true, results: [], page: 1, limit, has_next: false };
     }
-    const params = { q };
+    const params = {
+      q,
+      page: options?.page || 1,
+      limit,
+    };
 
-  const response = await withRetry(() => apiClient.get('/search', { params, signal: options?.signal }));
+  let response;
+  try {
+    response = await withRetry(() => apiClient.get('/search', { params, signal: options?.signal }));
+  } catch (error) {
+    const status = error?.status ?? error?.originalError?.response?.status ?? error?.response?.status;
+    if (status === 429) {
+      const retryAfter =
+        error?.data?.retry_after ||
+        error?.originalError?.response?.headers?.['retry-after'] ||
+        error?.response?.headers?.['retry-after'];
+      const delayMs = Math.min(2000, Math.max(300, parseRetryAfterMs(retryAfter) || 600));
+      await new Promise((r) => setTimeout(r, delayMs));
+      response = await apiClient.get('/search', { params, signal: options?.signal });
+    } else {
+      throw error;
+    }
+  }
     const data = response.data;
-    return Array.isArray(data) ? data : (data?.results || []);
+    if (Array.isArray(data)) {
+      return {
+        success: true,
+        results: data,
+        page: options?.page || 1,
+        limit,
+        has_next: false,
+      };
+    }
+    return {
+      success: data?.success !== false,
+      results: Array.isArray(data?.results) ? data.results : [],
+      page: data?.page || options?.page || 1,
+      limit: data?.limit || limit,
+      has_next: Boolean(data?.has_next),
+    };
 };
 
 // --- Trading ---
@@ -200,6 +271,7 @@ export const placeTrade = (tradeData) => {
 };
 
 export const cancelOrder = (orderId) => apiClient.delete(`/cancel-order/${orderId}`).then(res => res.data);
+export const modifyOrder = (orderId, payload) => apiClient.patch(`/modify-order/${orderId}`, payload).then(res => res.data);
 
 // --- Exit Plan (Stoploss/Target) ---
 

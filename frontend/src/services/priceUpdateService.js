@@ -297,6 +297,15 @@ class PriceUpdateService {
   }
 
   /**
+   * Clears only cached prices and keeps socket listeners attached.
+   * Useful after account-level reset flows where stale prices should be dropped.
+   */
+  clearPrices() {
+    this.latestPrices = {};
+    this._notifySubscribers({ type: 'reset' });
+  }
+
+  /**
    * Notifies all active subscribers with the new data.
    * @param {object} data - The price data received from the WebSocket.
    */
@@ -320,21 +329,41 @@ class PriceUpdateService {
   }
 
   _createBroadcastPayload({ type = 'snapshot', symbol = null, symbols = null } = {}) {
-    const allPrices = this._cloneLatestPrices();
-    
-    // Handle batch updates with multiple symbols
-    let changedPrices = {};
-    if (symbols && Array.isArray(symbols) && symbols.length > 0) {
-      symbols.forEach(sym => {
-        if (allPrices[sym]) {
-          changedPrices[sym] = { ...allPrices[sym] };
-        }
-      });
-    } else if (symbol && allPrices[symbol]) {
-      // Handle single symbol update
-      changedPrices = { [symbol]: { ...allPrices[symbol] } };
+    const isIncremental = type !== 'snapshot' && type !== 'reset';
+
+    if (isIncremental) {
+      // Incremental update: only clone the changed entries — avoid copying the full
+      // latestPrices map on every tick.
+      let changedPrices = {};
+      if (symbol) {
+        const entry = this.latestPrices[symbol];
+        if (entry) changedPrices[symbol] = { ...entry };
+      } else if (symbols?.length) {
+        symbols.forEach((sym) => {
+          const entry = this.latestPrices[sym];
+          if (entry) changedPrices[sym] = { ...entry };
+        });
+      }
+      return {
+        type,
+        symbol,
+        symbols,
+        data: changedPrices[symbol] || null,
+        changedPrices,
+        allPrices: null,
+      };
     }
 
+    // Full snapshot (initial subscribe, reset, or seed): clone everything
+    const allPrices = this._cloneLatestPrices();
+    let changedPrices = {};
+    if (symbols?.length) {
+      symbols.forEach((sym) => {
+        if (allPrices[sym]) changedPrices[sym] = { ...allPrices[sym] };
+      });
+    } else if (symbol && allPrices[symbol]) {
+      changedPrices = { [symbol]: { ...allPrices[symbol] } };
+    }
     return {
       type,
       symbol,

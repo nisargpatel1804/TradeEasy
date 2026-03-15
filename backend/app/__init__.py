@@ -1,6 +1,8 @@
 import os
 import logging
 import atexit
+import threading
+import time
 from flask import Flask, jsonify, request
 from flask_mongoengine import MongoEngine
 from flask_cors import CORS
@@ -153,8 +155,8 @@ def create_app():
         
         # Instantiate the singleton manager and pass the socketio server to it
         # This allows the manager's background threads to emit data to clients
-        # force_connect=True enables WebSocket connection even when markets are closed
-        socket_manager = MO_WebSocket_Manager(socketio_server=socketio, force_connect=True)
+        # Keep force_connect disabled so off-hours do not continuously reconnect/log disconnect noise.
+        socket_manager = MO_WebSocket_Manager(socketio_server=socketio, force_connect=False)
         socket_manager.start()
 
         # --- Initialize Task Scheduler for Background Jobs ---
@@ -256,6 +258,12 @@ def create_app():
         from flask_login import current_user
         from flask import session
         from datetime import datetime
+        from flask_login import logout_user
+
+        allow_graceful_auth_paths = {
+            '/api/check-auth',
+            '/api/logout',
+        }
         
         if current_user.is_authenticated:
             now = datetime.utcnow()
@@ -288,9 +296,10 @@ def create_app():
                     idle_duration = now - last_activity_dt
                     if idle_duration > app.config['SESSION_IDLE_TIMEOUT']:
                         logger.info(f"Session expired due to inactivity for user {current_user.client_id} (idle: {idle_duration})")
-                        from flask_login import logout_user
                         logout_user()
                         session.clear()
+                        if request.path in allow_graceful_auth_paths:
+                            return None
                         return jsonify({
                             "success": False,
                             "message": "Session expired due to inactivity. Please log in again."
@@ -328,12 +337,45 @@ def create_app():
             latest_indices = manager.get_latest_indices_data()
             if latest_indices:
                 emit('initial_indices', latest_indices, room=request.sid)
-            latest_stock_prices = manager.get_latest_stock_data()
+
+            # Scope the stock snapshot to the user's own symbols so the payload
+            # does not grow unboundedly as the global cache fills up.
+            user_symbols = None
+            if current_user.is_authenticated:
+                user_id_str = str(current_user.id)
+                with manager.subscription_lock:
+                    user_scrip_keys = set(manager.user_subscriptions.get(user_id_str, set()))
+                sym_set = set()
+                for key in user_scrip_keys:
+                    parts = key.split(':')  # "EXCHANGE:EXCHANGE_TYPE:SCRIPCODE"
+                    if len(parts) == 3:
+                        exchange_part, _, scripcode_part = parts
+                        map_key = f"{exchange_part}:{scripcode_part}"
+                        sym = manager.scrip_to_symbol_map.get(map_key)
+                        if sym:
+                            sym_set.add(sym)
+                if sym_set:
+                    user_symbols = list(sym_set)
+
+            sid = request.sid
+
+            latest_stock_prices = manager.get_latest_stock_data(symbols=user_symbols)
             if latest_stock_prices:
-                emit('initial_stock_prices', latest_stock_prices, room=request.sid)
+                emit('initial_stock_prices', latest_stock_prices, room=sid)
+
+            # Re-emit a short time later in case background warm-up completed after
+            # the initial snapshot was sent.
+            def _emit_updated_stock_prices():
+                time.sleep(0.35)
+                latest = manager.get_latest_stock_data(symbols=user_symbols)
+                if latest:
+                    socketio.emit('initial_stock_prices', latest, room=sid)
+
+            socketio.start_background_task(_emit_updated_stock_prices)
+
             # Inform client of current market status
             market_open = manager.mo_api.market_hours.is_market_open()
-            emit('market_status', {"isOpen": market_open}, room=request.sid)
+            emit('market_status', {"isOpen": market_open}, room=sid)
         except Exception as e:
             logger.error(f"Error in connect handler: {e}", exc_info=True)
 

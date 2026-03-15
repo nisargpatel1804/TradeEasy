@@ -43,6 +43,7 @@ const OrdersPage = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [cancellingOrderId, setCancellingOrderId] = useState(null);
+  const [modifyingOrderId, setModifyingOrderId] = useState(null);
   const navigate = useNavigate();
   const defaultTab = STATUS_TABS[0].value;
 
@@ -78,8 +79,18 @@ const OrdersPage = () => {
     const handler = () => {
       loadOrders();
     };
+
+    const resetHandler = () => {
+      setOrders(INITIAL_ORDERS_STATE);
+      loadOrders();
+    };
+
     window.addEventListener('te:trade-success', handler);
-    return () => window.removeEventListener('te:trade-success', handler);
+    window.addEventListener('te:portfolio-reset', resetHandler);
+    return () => {
+      window.removeEventListener('te:trade-success', handler);
+      window.removeEventListener('te:portfolio-reset', resetHandler);
+    };
   }, []);
 
   const handleCancelOrder = async (orderId) => {
@@ -96,6 +107,59 @@ const OrdersPage = () => {
       toast.error(err.message || "Error cancelling order");
     } finally {
       setCancellingOrderId(null);
+    }
+  };
+
+  const handleModifyOrder = async (order) => {
+    if (!order?.id) return;
+
+    const currentQty = Number(order.quantity) || 0;
+    const currentPrice = Number(order.price) || 0;
+
+    const qtyInput = window.prompt("Modify quantity (leave blank to keep unchanged)", String(currentQty));
+    if (qtyInput === null) return;
+
+    const priceInput = window.prompt("Modify price (leave blank to keep unchanged)", String(currentPrice));
+    if (priceInput === null) return;
+
+    const payload = {};
+
+    if (String(qtyInput).trim() !== "") {
+      const parsedQty = Number.parseInt(String(qtyInput).trim(), 10);
+      if (!Number.isInteger(parsedQty) || parsedQty <= 0) {
+        toast.error("Quantity must be a positive integer.");
+        return;
+      }
+      payload.quantity = parsedQty;
+    }
+
+    if (String(priceInput).trim() !== "") {
+      const parsedPrice = Number.parseFloat(String(priceInput).trim());
+      if (!Number.isFinite(parsedPrice) || parsedPrice <= 0) {
+        toast.error("Price must be a positive number.");
+        return;
+      }
+      payload.price = parsedPrice;
+    }
+
+    if (Object.keys(payload).length === 0) {
+      toast("No changes provided.", { icon: "ℹ️" });
+      return;
+    }
+
+    setModifyingOrderId(order.id);
+    try {
+      const result = await api.modifyOrder(order.id, payload);
+      if (result?.success) {
+        toast.success(result.message || "Order modified successfully.");
+        await loadOrders();
+      } else {
+        toast.error(result?.message || "Failed to modify order.");
+      }
+    } catch (err) {
+      toast.error(err?.message || "Failed to modify order.");
+    } finally {
+      setModifyingOrderId(null);
     }
   };
 
@@ -167,7 +231,9 @@ const OrdersPage = () => {
                   statusKey={value}
                   statusLabel={label}
                   onCancel={value === 'pending' ? handleCancelOrder : undefined}
+                  onModify={value === 'pending' ? handleModifyOrder : undefined}
                   cancellingOrderId={value === 'pending' ? cancellingOrderId : undefined}
+                  modifyingOrderId={value === 'pending' ? modifyingOrderId : undefined}
                   onOrderClick={handleOrderClick}
                 />
               </TabsContent>
@@ -180,7 +246,7 @@ const OrdersPage = () => {
   );
 };
 
-const OrderList = ({ orders, isLoading, error, statusKey, statusLabel, onCancel, cancellingOrderId, onOrderClick }) => {
+const OrderList = ({ orders, isLoading, error, statusKey, statusLabel, onCancel, onModify, cancellingOrderId, modifyingOrderId, onOrderClick }) => {
   if (isLoading) {
     return (
       <div className="space-y-4">
@@ -214,7 +280,9 @@ const OrderList = ({ orders, isLoading, error, statusKey, statusLabel, onCancel,
           index={index}
           isPending={statusKey === 'pending'}
           onCancel={onCancel}
+          onModify={onModify}
           isCancelling={cancellingOrderId === order.id}
+          isModifying={modifyingOrderId === order.id}
           onClick={() => onOrderClick(order)}
         />
       ))}
@@ -222,7 +290,7 @@ const OrderList = ({ orders, isLoading, error, statusKey, statusLabel, onCancel,
   );
 };
 
-const OrderCard = ({ order, index, isPending = false, onCancel, isCancelling = false, onClick }) => {
+const OrderCard = ({ order, index, isPending = false, onCancel, onModify, isCancelling = false, isModifying = false, onClick }) => {
   const isBuy = order.action === "BUY";
   const statusKey = (order.status || '').toUpperCase();
   const statusClass = STATUS_COLOR_MAP[statusKey] || 'text-gray-600';
@@ -230,6 +298,7 @@ const OrderCard = ({ order, index, isPending = false, onCancel, isCancelling = f
     ? formatStatus(order.status_display)
     : formatStatus(statusKey);
   const showCancel = isPending && statusKey === 'PENDING' && onCancel;
+  const showModify = isPending && statusKey === 'PENDING' && onModify;
   
   const getOrderTypeIcon = () => {
     if (order.order_type === 'BRACKET') return <Target className="h-4 w-4" />;
@@ -321,7 +390,21 @@ const OrderCard = ({ order, index, isPending = false, onCancel, isCancelling = f
               <p className="text-sm font-semibold text-slate-900">{new Date(order.date).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</p>
             </div>
             {showCancel && (
-              <div className="flex justify-end" onClick={(e) => e.stopPropagation()}>
+              <div className="flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                {showModify && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="rounded-full border-slate-300 text-slate-700 hover:bg-slate-50"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onModify(order);
+                    }}
+                    disabled={isModifying || isCancelling}
+                  >
+                    {isModifying ? "Modifying..." : "Modify"}
+                  </Button>
+                )}
                 <Button
                   variant="outline"
                   size="sm"
@@ -330,7 +413,7 @@ const OrderCard = ({ order, index, isPending = false, onCancel, isCancelling = f
                     e.stopPropagation();
                     onCancel(order.id);
                   }}
-                  disabled={isCancelling}
+                  disabled={isCancelling || isModifying}
                 >
                   {isCancelling ? (
                     <>Cancelling...</>
