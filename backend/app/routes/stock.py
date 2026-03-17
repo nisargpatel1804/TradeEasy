@@ -14,6 +14,20 @@ EOD_CACHE_TTL = 300
 _stock_data_cache = {}
 STOCK_DATA_CACHE_TTL = 2
 
+
+def _parse_symbol_and_exchange(symbol: str) -> tuple[str, str | None]:
+    clean_symbol = format_symbol(symbol)
+    if not isinstance(symbol, str):
+        return clean_symbol, None
+
+    normalized = symbol.strip().upper()
+    parts = normalized.split('.')
+    if len(parts) >= 2:
+        suffix = parts[-1]
+        if suffix in ('NSE', 'BSE'):
+            return clean_symbol, suffix
+    return clean_symbol, None
+
 def _get_cached_eod_data(mo_api, exchange: str, provider_available: bool = True) -> list:
     cache_key = f"eod_bulk_{exchange}"
     now = time.time()
@@ -46,7 +60,7 @@ def format_symbol(symbol: str) -> str:
     return clean_symbol
 
 
-def _iter_instrument_candidates(symbol: str) -> list[dict]:
+def _iter_instrument_candidates(symbol: str, preferred_exchange: str | None = None) -> list[dict]:
     candidates: list[dict] = []
     seen: set[tuple[str, int]] = set()
 
@@ -71,6 +85,16 @@ def _iter_instrument_candidates(symbol: str) -> list[dict]:
         if stock_doc.exchange and stock_doc.scripcode:
             _add(stock_doc.exchange, stock_doc.scripcode, f"Stock:{stock_doc.symbol}")
 
+    if preferred_exchange:
+        preferred_exchange = preferred_exchange.upper()
+
+    # Deterministic ordering avoids quote-source drift across calls.
+    def _sort_key(item: dict):
+        exch = str(item.get('exchange', '')).upper()
+        preferred_rank = 0 if preferred_exchange and exch == preferred_exchange else 1
+        return (preferred_rank, exch, int(item.get('scripcode', 0)))
+
+    candidates.sort(key=_sort_key)
     return candidates
 
 
@@ -120,12 +144,14 @@ def extract_price_with_fallback(api_data: dict) -> tuple[float, str]:
     return (0.0, 'unavailable')
 
 def get_stock_data_from_api(symbol: str) -> dict | None:
-    clean_symbol = format_symbol(symbol)
+    clean_symbol, preferred_exchange = _parse_symbol_and_exchange(symbol)
     if not clean_symbol:
         return None
 
+    cache_key = f"{clean_symbol}:{preferred_exchange or 'AUTO'}"
+
     now = time.time()
-    cached = _stock_data_cache.get(clean_symbol)
+    cached = _stock_data_cache.get(cache_key)
     if cached:
         cached_data, cached_at = cached
         if now - cached_at < STOCK_DATA_CACHE_TTL:
@@ -138,7 +164,7 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
         if not provider_available:
             logger.warning("MO API login failed; falling back where possible")
 
-        candidates = _iter_instrument_candidates(clean_symbol)
+        candidates = _iter_instrument_candidates(clean_symbol, preferred_exchange=preferred_exchange)
         if not candidates:
             return None
 
@@ -224,12 +250,12 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
             'last_updated': int(time.time() * 1000)
         }
 
-        _stock_data_cache[clean_symbol] = (result, now)
+        _stock_data_cache[cache_key] = (result, now)
         return result
 
     except Exception:
         logger.error("Error in get_stock_data_from_api for '%s'", clean_symbol, exc_info=True)
-        _stock_data_cache.pop(clean_symbol, None)
+        _stock_data_cache.pop(cache_key, None)
         return None
 
 @stock_bp.route("/stock/<string:symbol>", methods=["GET"])

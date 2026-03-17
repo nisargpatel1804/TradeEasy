@@ -2,6 +2,7 @@ import logging
 import os
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import time as dt_time
 
@@ -17,6 +18,11 @@ SOCKET_WINDOW_START = dt_time(8, 45)
 SOCKET_WINDOW_END = dt_time(15, 45)
 INDEX_BOOTSTRAP_MAX_WORKERS = 8
 WARMUP_MAX_WORKERS = max(1, int(os.getenv("MO_WARMUP_MAX_WORKERS", "4")))
+WARMUP_QUEUE_MAX_SIZE = max(1, int(os.getenv("MO_WARMUP_QUEUE_MAX", "300")))
+STOCK_CACHE_MAX_SIZE = max(1, int(os.getenv("MO_STOCK_CACHE_MAX", "2000")))
+INDEX_CACHE_MAX_SIZE = max(1, int(os.getenv("MO_INDEX_CACHE_MAX", "256")))
+STOCK_CACHE_TTL_SECONDS = max(30, int(os.getenv("MO_STOCK_CACHE_TTL_SECONDS", "1800")))
+INDEX_CACHE_TTL_SECONDS = max(30, int(os.getenv("MO_INDEX_CACHE_TTL_SECONDS", "1800")))
 
 PRICE_KEYS = ("ltp", "indexvalue", "indexValue", "lastprice", "lastPrice", "close", "Close")
 CHANGE_KEYS = ("change", "indexchange", "indexChange")
@@ -116,8 +122,8 @@ class MO_WebSocket_Manager:
         self.batch_thread = None
         
         # Data caches and mappings
-        self.latest_indices_data = {}
-        self.latest_stock_data = {}
+        self.latest_indices_data = OrderedDict()
+        self.latest_stock_data = OrderedDict()
         self.index_codes_map = {}
         self.scrip_to_symbol_map = {} # Maps 'EXCHANGE:SCRIPCODE' to a user-friendly symbol string
         self.scrip_prev_close = {}    # Caches previous day's close for change calculations
@@ -136,6 +142,34 @@ class MO_WebSocket_Manager:
         logger.info("MO WebSocket Manager initialized.")
         self._load_initial_index_data()
         # Note: Watchlist scrips are loaded on-demand when users connect, not at startup
+
+    def _prune_cache_locked(self, cache, ttl_seconds, max_size):
+        """Prunes stale entries first, then evicts oldest entries to enforce a hard max size."""
+        now_ms = int(time.time() * 1000)
+        ttl_ms = ttl_seconds * 1000
+
+        stale_keys = []
+        for key, payload in list(cache.items()):
+            last_updated = int(payload.get('last_updated', 0) or 0) if isinstance(payload, dict) else 0
+            if last_updated <= 0 or (now_ms - last_updated) > ttl_ms:
+                stale_keys.append(key)
+        for key in stale_keys:
+            cache.pop(key, None)
+
+        while len(cache) > max_size:
+            cache.popitem(last=False)
+
+    def _upsert_stock_cache_locked(self, symbol, payload):
+        if symbol in self.latest_stock_data:
+            self.latest_stock_data.move_to_end(symbol)
+        self.latest_stock_data[symbol] = payload
+        self._prune_cache_locked(self.latest_stock_data, STOCK_CACHE_TTL_SECONDS, STOCK_CACHE_MAX_SIZE)
+
+    def _upsert_index_cache_locked(self, symbol, payload):
+        if symbol in self.latest_indices_data:
+            self.latest_indices_data.move_to_end(symbol)
+        self.latest_indices_data[symbol] = payload
+        self._prune_cache_locked(self.latest_indices_data, INDEX_CACHE_TTL_SECONDS, INDEX_CACHE_MAX_SIZE)
 
     def _within_socket_window(self, current_dt=None):
         """Return True when within the websocket trading window (08:45-15:45 IST).
@@ -179,7 +213,7 @@ class MO_WebSocket_Manager:
             if isinstance(latest_payload, dict):
                 payload_copy = {**latest_payload}
                 payload_copy.setdefault('symbol', f"{exchange_key}:{indexcode_str}")
-                self.latest_indices_data[payload_copy['symbol']] = payload_copy
+                self._upsert_index_cache_locked(payload_copy['symbol'], payload_copy)
 
     def start(self):
         """Starts the WebSocket connection manager in a background thread."""
@@ -254,7 +288,7 @@ class MO_WebSocket_Manager:
                 payload = self._fetch_initial_stock_payload(stock, exchange.upper(), int(scripcode))
                 if payload:
                     with self.data_lock:
-                        self.latest_stock_data[symbol] = payload
+                        self._upsert_stock_cache_locked(symbol, payload)
 
                     # Push warm-up payload through the same batch channel used for
                     # websocket ticks so clients update immediately.
@@ -275,6 +309,13 @@ class MO_WebSocket_Manager:
         warmup_key = f"{exchange.upper()}:{int(scripcode)}"
         with self._warmup_lock:
             if warmup_key in self._warmup_inflight:
+                return False
+            if len(self._warmup_inflight) >= WARMUP_QUEUE_MAX_SIZE:
+                logger.warning(
+                    "Warm-up queue limit reached (%s). Dropping warm-up for %s.",
+                    WARMUP_QUEUE_MAX_SIZE,
+                    warmup_key,
+                )
                 return False
             self._warmup_inflight.add(warmup_key)
 
@@ -615,7 +656,7 @@ class MO_WebSocket_Manager:
         )
 
         with self.data_lock:
-            self.latest_stock_data[symbol] = payload
+            self._upsert_stock_cache_locked(symbol, payload)
         
         # Add to batch instead of emitting immediately
         with self.batch_lock:
@@ -646,7 +687,8 @@ class MO_WebSocket_Manager:
             'last_updated': int(time.time() * 1000),
             'entityType': 'index'
         }
-        self.latest_indices_data[payload['symbol']] = payload
+        with self.data_lock:
+            self._upsert_index_cache_locked(payload['symbol'], payload)
         
         # Add to batch instead of emitting immediately
         with self.batch_lock:
@@ -673,6 +715,7 @@ class MO_WebSocket_Manager:
     def get_latest_stock_data(self, symbols=None):
         """Returns a snapshot of the latest cached stock data."""
         with self.data_lock:
+            self._prune_cache_locked(self.latest_stock_data, STOCK_CACHE_TTL_SECONDS, STOCK_CACHE_MAX_SIZE)
             if symbols is None:
                 return {symbol: payload.copy() for symbol, payload in self.latest_stock_data.items()}
 
@@ -934,7 +977,10 @@ class MO_WebSocket_Manager:
             logger.warning(f"Failed to bootstrap tracked index values: {e}")
 
         self.index_codes_map = discovered_indices
-        self.latest_indices_data = latest_indices
+        with self.data_lock:
+            self.latest_indices_data = OrderedDict()
+            for symbol, payload in latest_indices.items():
+                self._upsert_index_cache_locked(symbol, payload)
         logger.info(f"Loaded {len(self.index_codes_map)} tracked indices with {len(self.latest_indices_data)} initial values.")
 
     def _heartbeat_loop(self):
@@ -998,7 +1044,9 @@ class MO_WebSocket_Manager:
 
     def get_latest_indices_data(self):
         """Returns the current cached state of all tracked indices."""
-        return list(self.latest_indices_data.values())
+        with self.data_lock:
+            self._prune_cache_locked(self.latest_indices_data, INDEX_CACHE_TTL_SECONDS, INDEX_CACHE_MAX_SIZE)
+            return [payload.copy() for payload in self.latest_indices_data.values()]
 
     def register_symbols_for_realtime(self, symbols):
         """Registers a batch of symbols for real-time updates.

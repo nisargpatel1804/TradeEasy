@@ -14,7 +14,8 @@ import MarketCache from "../utils/marketCache.js";
 import TradeForm from "./TradeForm.jsx";
 import PortfolioPage from "./PortfolioPage.jsx";
 import PerformancePage from "./PerformancePage.jsx";
-import { pickLivePriceForSymbol } from "../utils/symbolUtils.js";
+import { mergePriceMapWithVariants, seedPriceMapFromHoldings } from "../utils/symbolUtils.js";
+import usePortfolioSummary from "../hooks/usePortfolioSummary.js";
 
 const ORDER_TABS = [
     { key: "executed", label: "Executed" },
@@ -39,6 +40,7 @@ const HOLDINGS_PAGE_SIZE = 5;
 const DASHBOARD_CACHE_VERSION = 1;
 const DASHBOARD_PORTFOLIO_CACHE_KEY = `te:dashboard:portfolio:v${DASHBOARD_CACHE_VERSION}`;
 const DASHBOARD_ORDERS_CACHE_KEY = `te:dashboard:orders:v${DASHBOARD_CACHE_VERSION}`;
+const EMPTY_SHORT_POSITIONS = [];
 
 const getIstDateKey = () => {
     const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -62,11 +64,6 @@ const safeParseJson = (value) => {
     } catch {
         return null;
     }
-};
-
-const toNumber = (value) => {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
 };
 
 const getOrderBucketFromStatus = (statusValue) => {
@@ -98,6 +95,7 @@ const DashboardPage = () => {
     const [isTradeSubmitting, setIsTradeSubmitting] = useState(false);
     const [tradeCloseRequested, setTradeCloseRequested] = useState(false);
     const [livePriceMap, setLivePriceMap] = useState({});
+    const [lastPriceUpdate, setLastPriceUpdate] = useState(null);
     const [marketStatus, setMarketStatus] = useState(null);
 
     // --- Data Fetching ---
@@ -109,7 +107,10 @@ const DashboardPage = () => {
             const response = await api.fetchPortfolio();
             if (response?.success) {
                 setPortfolioSummary(response?.summary || null);
-                setHoldings(response?.holdings || []);
+                const nextHoldings = response?.holdings || [];
+                setHoldings(nextHoldings);
+                const seeded = seedPriceMapFromHoldings(nextHoldings);
+                setLivePriceMap((prev) => mergePriceMapWithVariants(prev, seeded));
                 setHasPortfolioSnapshot(true);
             } else {
                 throw new Error(response?.message || "Failed to fetch portfolio");
@@ -234,15 +235,24 @@ const DashboardPage = () => {
             return;
         }
 
+        const todayIst = getIstDateKey();
+
         const portfolioCache = safeParseJson(window.localStorage.getItem(DASHBOARD_PORTFOLIO_CACHE_KEY));
-        if (portfolioCache?.summary || Array.isArray(portfolioCache?.holdings)) {
+        if (portfolioCache && portfolioCache.snapshotDate !== todayIst) {
+            window.localStorage.removeItem(DASHBOARD_PORTFOLIO_CACHE_KEY);
+        } else if (portfolioCache?.summary || Array.isArray(portfolioCache?.holdings)) {
             setPortfolioSummary(portfolioCache.summary || null);
-            setHoldings(Array.isArray(portfolioCache.holdings) ? portfolioCache.holdings : []);
+            const cachedHoldings = Array.isArray(portfolioCache.holdings) ? portfolioCache.holdings : [];
+            setHoldings(cachedHoldings);
+            const seeded = seedPriceMapFromHoldings(cachedHoldings);
+            setLivePriceMap((prev) => mergePriceMapWithVariants(prev, seeded));
             setHasPortfolioSnapshot(true);
         }
 
         const ordersCache = safeParseJson(window.localStorage.getItem(DASHBOARD_ORDERS_CACHE_KEY));
-        if (ordersCache?.orders) {
+        if (ordersCache && ordersCache.snapshotDate !== todayIst) {
+            window.localStorage.removeItem(DASHBOARD_ORDERS_CACHE_KEY);
+        } else if (ordersCache?.orders) {
             setOrders({
                 pending: Array.isArray(ordersCache.orders.pending) ? ordersCache.orders.pending : [],
                 executed: Array.isArray(ordersCache.orders.executed) ? ordersCache.orders.executed : [],
@@ -280,21 +290,20 @@ const DashboardPage = () => {
         window.localStorage.setItem(DASHBOARD_ORDERS_CACHE_KEY, JSON.stringify(payload));
     }, [hasOrdersSnapshot, marketStatus, orders]);
 
-    // Initial Load & Subscription
     useEffect(() => {
         fetchPortfolio();
         fetchOrders();
         fetchNiftyMarket();
-        // note: market status will be fetched by the dedicated poll below
-        
-        // Auto-refresh portfolio/orders every 30 seconds
+
         const interval = setInterval(() => {
-            fetchPortfolio();
+            if (marketStatus?.is_market_open) {
+                fetchPortfolio();
+            }
             fetchOrders();
         }, 30000);
         
         return () => clearInterval(interval);
-    }, [fetchPortfolio, fetchOrders, fetchNiftyMarket, fetchMarketStatus]);
+    }, [fetchPortfolio, fetchOrders, fetchNiftyMarket, fetchMarketStatus, marketStatus]);
 
     useEffect(() => {
         fetchMarketStatus();
@@ -305,15 +314,16 @@ const DashboardPage = () => {
     // Real-time Market Updates
     useEffect(() => {
         const unsubscribe = priceUpdateService.subscribe((update) => {
+            setLastPriceUpdate(update || null);
             setLivePriceMap((prev) => {
                 let next = prev;
 
                 if (update?.type === 'snapshot' && update?.allPrices && Object.keys(update.allPrices).length > 0) {
-                    next = update.allPrices;
+                    next = mergePriceMapWithVariants(prev, update.allPrices);
                 } else if (update?.allPrices && Object.keys(update.allPrices).length > 0) {
-                    next = update.allPrices;
+                    next = mergePriceMapWithVariants(prev, update.allPrices);
                 } else if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
-                    next = { ...prev, ...update.changedPrices };
+                    next = mergePriceMapWithVariants(prev, update.changedPrices);
                 }
 
                 setNiftyMovers(computeMovers(niftyStocks, next));
@@ -323,6 +333,15 @@ const DashboardPage = () => {
 
         return () => unsubscribe();
     }, [computeMovers, niftyStocks]);
+
+    const canonicalSummary = usePortfolioSummary({
+        baseSummary: portfolioSummary,
+        holdings,
+        shortPositions: EMPTY_SHORT_POSITIONS,
+        livePriceMap,
+        marketStatus,
+        lastPriceUpdate,
+    });
 
     const openTradeModal = (stock, action) => {
         setTradeContext({ stock, action });
@@ -363,29 +382,6 @@ const DashboardPage = () => {
             if (!isExecuted) {
                 return;
             }
-
-            const qty = toNumber(optimisticOrder.quantity);
-            const price = toNumber(optimisticOrder.price);
-            const notional = qty * price;
-            if (notional <= 0) {
-                return;
-            }
-
-            setPortfolioSummary((prev) => {
-                if (!prev) {
-                    return prev;
-                }
-
-                const isBuy = String(optimisticOrder.transaction_type || '').toUpperCase() === 'BUY';
-                const investment = toNumber(prev.total_investment);
-                const holdingsValue = toNumber(prev.holdings_value);
-
-                return {
-                    ...prev,
-                    total_investment: isBuy ? investment + notional : Math.max(0, investment - notional),
-                    holdings_value: isBuy ? holdingsValue + notional : Math.max(0, holdingsValue - notional),
-                };
-            });
         };
 
         const handler = (event) => {
@@ -399,6 +395,17 @@ const DashboardPage = () => {
             setHoldings([]);
             setOrders(INITIAL_ORDER_STATE);
             setHasOrdersSnapshot(false);
+            if (typeof window !== 'undefined') {
+                try {
+                    window.localStorage.removeItem(DASHBOARD_PORTFOLIO_CACHE_KEY);
+                    window.localStorage.removeItem(DASHBOARD_ORDERS_CACHE_KEY);
+                    window.localStorage.setItem('te:portfolio-reset:at', String(Date.now()));
+                } catch {
+                }
+            }
+            if (MarketCache && typeof MarketCache.clear === 'function') {
+                MarketCache.clear();
+            }
             fetchPortfolio();
             fetchOrders();
         };
@@ -466,10 +473,7 @@ const DashboardPage = () => {
                             </Card>
                         )}
                         <PortfolioStrip
-                            summary={portfolioSummary}
-                            holdings={holdings}
-                            livePriceMap={livePriceMap}
-                            marketStatus={marketStatus}
+                            summary={canonicalSummary}
                             hasSnapshot={hasPortfolioSnapshot}
                         />
                         
@@ -517,11 +521,11 @@ const DashboardPage = () => {
             </Tabs>
 
             <Dialog open={!!tradeContext} onOpenChange={(open) => !open && closeTradeModal()}>
-                <DialogContent className="w-[95vw] max-w-xl border-none bg-transparent p-0 shadow-none sm:w-full max-h-[90vh] overflow-y-auto" aria-describedby={undefined}>
+                <DialogContent className="w-[95vw] max-w-xl border-none bg-transparent p-0 shadow-none sm:w-full max-h-[90vh] overflow-y-auto">
                     <div className="p-3 sm:p-4">
                         <DialogHeader className="sr-only">
                             <DialogTitle>{tradeContext?.action === "SELL" ? "Sell" : "Buy"} {tradeContext?.stock?.symbol}</DialogTitle>
-                            <DialogDescription id="trade-dialog-description">Place {tradeContext?.action?.toLowerCase()} order for {tradeContext?.stock?.symbol}</DialogDescription>
+                            <DialogDescription>Place {tradeContext?.action?.toLowerCase()} order for {tradeContext?.stock?.symbol}</DialogDescription>
                         </DialogHeader>
                         <TradeForm
                             symbol={tradeContext?.stock?.symbol}
@@ -529,8 +533,8 @@ const DashboardPage = () => {
                             onClose={closeTradeModal}
                             onTradeSuccess={() => {
                                 closeTradeModal();
-                                fetchPortfolio(); // Refresh portfolio after trade
-                                fetchOrders();    // Refresh orders after trade
+                                fetchPortfolio();
+                                fetchOrders();
                             }}
                         />
                     </div>
@@ -540,80 +544,14 @@ const DashboardPage = () => {
     );
 };
 
-const PortfolioStrip = ({ summary, holdings = [], livePriceMap = {}, marketStatus, hasSnapshot = false }) => {
-    const investedFromSummary = Number(summary?.total_investment) || 0;
-    const realizedFromSummary = Number(summary?.realized_pnl) || 0;
-
-    const { investedAmount, currentValue, totalPnl } = useMemo(() => {
-        const list = Array.isArray(holdings) ? holdings : [];
-
-        const investedFromHoldings = list.reduce((sum, holding) => {
-            const investmentValue = Number(holding?.investment_value);
-            if (Number.isFinite(investmentValue)) {
-                return sum + investmentValue;
-            }
-
-            const qty = Number(holding?.quantity) || 0;
-            const avg = Number(holding?.average_price) || 0;
-            return sum + (avg * qty);
-        }, 0);
-
-        const invested = investedFromSummary > 0 ? investedFromSummary : investedFromHoldings;
-
-        const current = list.reduce((sum, holding) => {
-            const qty = Number(holding?.quantity) || 0;
-            if (!holding?.symbol || qty === 0) {
-                return sum;
-            }
-            const live = pickLivePriceForSymbol(livePriceMap, holding.symbol, holding.exchange);
-            const ltp = Number(live?.ltp ?? live?.price ?? holding?.ltp) || 0;
-            return sum + (ltp * qty);
-        }, 0);
-
-        // Preserve any non-holdings unrealized component (e.g., short positions) from the API summary.
-        const summaryHoldingsValue = Number(summary?.holdings_value);
-        const summaryInvestment = Number(summary?.total_investment);
-        const summaryUnrealized = Number(summary?.unrealized_pnl);
-
-        const apiHoldingsUnrealized =
-            Number.isFinite(summaryHoldingsValue) && Number.isFinite(summaryInvestment)
-                ? (summaryHoldingsValue - summaryInvestment)
-                : 0;
-
-        const apiNonHoldingUnrealized =
-            Number.isFinite(summaryUnrealized)
-                ? (summaryUnrealized - apiHoldingsUnrealized)
-                : 0;
-
-        const unrealized = (current - invested) + apiNonHoldingUnrealized;
-        const total = realizedFromSummary + unrealized;
-
-        return { investedAmount: invested, currentValue: current, totalPnl: total };
-    }, [holdings, investedFromSummary, livePriceMap, realizedFromSummary, summary]);
-
+const PortfolioStrip = ({ summary, hasSnapshot = false }) => {
+    const investedAmount = Number(summary?.investedAmount) || 0;
+    const currentValue = Number(summary?.currentValue) || 0;
+    const todaysPnl = Number(summary?.todaysPnl) || 0;
+    const totalPnl = Number(summary?.totalPnl) || 0;
+    const todaysPercent = Number(summary?.todaysPnlPct) || 0;
+    const totalPercent = Number(summary?.totalPnlPct) || 0;
     const currentDelta = currentValue - investedAmount;
-
-    const todaysPnl = useMemo(() => {
-        const isMarketOpen = Boolean(marketStatus?.is_market_open);
-        const isHoliday = Boolean(marketStatus?.is_holiday);
-        if (!isMarketOpen || isHoliday) {
-            return 0;
-        }
-        const list = Array.isArray(holdings) ? holdings : [];
-        return list.reduce((sum, holding) => {
-            const qty = Number(holding?.quantity) || 0;
-            if (!holding?.symbol || qty === 0) {
-                return sum;
-            }
-
-            const live = pickLivePriceForSymbol(livePriceMap, holding.symbol, holding.exchange);
-            const change = Number(live?.change ?? live?.net_change ?? 0) || 0;
-            return sum + (change * qty);
-        }, 0);
-    }, [holdings, livePriceMap, marketStatus]);
-
-    const todaysPercent = investedAmount > 0 ? (todaysPnl / investedAmount) * 100 : 0;
-    const totalPercent = investedAmount > 0 ? (totalPnl / investedAmount) * 100 : 0;
 
     const items = [
         {
@@ -698,6 +636,13 @@ const MarketMoversSection = ({ movers, isLoading, error, onRefresh, onTrade }) =
     const showSkeleton = isLoading;
     const showErrorState = error && stocks.length === 0;
 
+    useEffect(() => {
+        setPageByTab((prev) => ({
+            ...prev,
+            [activeTab]: Math.min(Math.max(prev?.[activeTab] || 1, 1), totalPages),
+        }));
+    }, [activeTab, totalPages]);
+
     return (
         <Card className="h-full rounded-3xl border border-slate-100 shadow-sm">
             <CardHeader className="flex flex-row items-center justify-between pb-1.5">
@@ -733,14 +678,14 @@ const MarketMoversSection = ({ movers, isLoading, error, onRefresh, onTrade }) =
                     </Button>
                 </div>
             </CardHeader>
-            <CardContent className="pt-0 pb-3">
+            <CardContent className="overflow-hidden pt-0 pb-3">
                 {error && stocks.length > 0 && (
                     <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                         {error}. Showing cached data.
                     </div>
                 )}
                 {showSkeleton ? (
-                    <div className="grid gap-1.5 sm:grid-cols-2">
+                    <div className="grid min-h-[304px] gap-1.5 sm:grid-cols-2">
                         {Array.from({ length: MOVERS_SKELETON_COUNT }).map((_, index) => (
                             <div key={`mover-skeleton-${index}`} className="h-[56px] rounded-2xl border border-slate-100 bg-white px-3 py-1.5">
                                 <div className="flex items-center justify-between gap-3">
@@ -763,7 +708,7 @@ const MarketMoversSection = ({ movers, isLoading, error, onRefresh, onTrade }) =
                     </div>
                 ) : stocks.length > 0 ? (
                     <>
-                        <div className="grid gap-1.5 sm:grid-cols-2">
+                        <div className="grid min-h-[304px] gap-1.5 sm:grid-cols-2">
                             {pageStocks.map((stock) => (
                                 <MarketMoverRow key={stock.symbol} stock={stock} onTrade={onTrade} />
                             ))}
@@ -830,7 +775,7 @@ const MarketMoverRow = ({ stock, onTrade }) => {
 
     return (
         <div
-            className="group/mover relative cursor-pointer rounded-2xl border border-slate-100 bg-white px-3 py-1.5 shadow-sm transition hover:shadow-md"
+            className="group/mover relative overflow-hidden cursor-pointer rounded-2xl border border-slate-100 bg-white px-3 py-1.5 shadow-sm transition hover:shadow-md"
             role="button"
             tabIndex={0}
             onClick={goToStock}
@@ -881,15 +826,6 @@ const MarketMoverRow = ({ stock, onTrade }) => {
 const PortfolioHoldings = ({ holdings, hasSnapshot = false }) => {
     const [page, setPage] = useState(1);
 
-    useEffect(() => {
-        setPage(1);
-    }, [holdings]);
-
-    if (!hasSnapshot) {
-        return <Skeleton className="h-full min-h-[390px] w-full rounded-3xl" />;
-    }
-
-    // Sort by value (Quantity * LTP) descending to show most impactful holdings
     const sortedHoldings = [...(holdings || [])].sort((a, b) => {
         const valA = (a.quantity || 0) * (a.ltp || 0);
         const valB = (b.quantity || 0) * (b.ltp || 0);
@@ -897,6 +833,15 @@ const PortfolioHoldings = ({ holdings, hasSnapshot = false }) => {
     });
 
     const totalPages = Math.max(1, Math.ceil(sortedHoldings.length / HOLDINGS_PAGE_SIZE));
+
+    useEffect(() => {
+        setPage((prev) => Math.min(Math.max(prev, 1), totalPages));
+    }, [totalPages]);
+
+    if (!hasSnapshot) {
+        return <Skeleton className="h-full min-h-[390px] w-full rounded-3xl" />;
+    }
+
     const currentPage = Math.min(Math.max(page, 1), totalPages);
     const start = (currentPage - 1) * HOLDINGS_PAGE_SIZE;
     const pageHoldings = sortedHoldings.slice(start, start + HOLDINGS_PAGE_SIZE);

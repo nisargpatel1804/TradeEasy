@@ -7,6 +7,7 @@ from mongoengine.errors import NotUniqueError
 from app.models import User, Stock, Watchlist, Holding, ShortPosition
 from app.socket_manager import MO_WebSocket_Manager
 from app.services.cache import cached_route, cache as app_cache
+from app.services.reset_guard import is_user_reset_in_progress
 # Import the centralized function for symbol formatting
 from .stock import format_symbol
 
@@ -79,8 +80,7 @@ def _is_stock_tracked_elsewhere(stock: Stock) -> bool:
 
 
 def _is_user_resetting(user_id) -> bool:
-    user_doc = User.objects(id=user_id).only('reset_in_progress').first()
-    return bool(getattr(user_doc, 'reset_in_progress', False))
+    return is_user_reset_in_progress(user_id)
 
 
 def _reset_in_progress_response():

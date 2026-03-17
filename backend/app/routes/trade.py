@@ -5,6 +5,7 @@ from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from app.models import Holding, User
 from app.services.trade_executor import TradeExecutor
+from app.services.reset_guard import is_user_reset_in_progress
 from app.services.market_time import validate_order_timing, is_market_open, get_market_status_message, get_market_session, is_market_holiday
 # Import the centralized, cached function for all stock data lookups
 from .stock import get_stock_data_from_api, format_symbol
@@ -19,8 +20,7 @@ MAX_ORDER_VALUE = 10000000  # Maximum order value in rupees (1 crore)
 
 
 def _is_user_resetting(user_id) -> bool:
-    user_doc = User.objects(id=user_id).only('reset_in_progress').first()
-    return bool(getattr(user_doc, 'reset_in_progress', False))
+    return is_user_reset_in_progress(user_id)
 
 
 def _reset_in_progress_response():

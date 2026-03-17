@@ -7,6 +7,7 @@ from flask_login import login_required, current_user
 from mongoengine.errors import NotUniqueError
 from app.models import User, Holding, Transaction, Lot, ShortPosition
 from app.services.cache import cache as app_cache
+from app.services.reset_guard import acquire_reset_lock
 
 # --- Configuration ---
 logger = logging.getLogger(__name__)
@@ -118,18 +119,19 @@ def update_wallet_limit():
         user = User.objects.get(id=current_user.id)
         user_id = user.id
         user_client_id = user.client_id
-        lock_result = User.objects(id=user.id, reset_in_progress__ne=True).update_one(
-            set__reset_in_progress=True,
-            set__reset_started_at=datetime.utcnow()
-        )
-        if lock_result == 0:
+        lock_result, stale_lock_cleared = acquire_reset_lock(user.id)
+        if not lock_result:
             return jsonify({
                 "success": False,
                 "message": "A portfolio reset is already in progress. Please retry in a few seconds."
             }), 409
 
+        if stale_lock_cleared:
+            logger.warning("Recovered stale reset lock while processing reset for user %s", user.client_id)
+
         lock_acquired = True
         user.reload()
+        logger.info("Reset lock acquired for user %s", user.client_id)
 
         # Ensure no in-flight execution mutates state during reset snapshot/delete.
         wait_deadline = time.time() + 5.0
@@ -144,12 +146,14 @@ def update_wallet_limit():
                 unset__reset_started_at=1
             )
             lock_acquired = False
+            logger.info("Reset rejected for user %s due to in-flight transactions", user.client_id)
             return jsonify({
                 "success": False,
                 "message": "Orders are still being processed. Please retry reset in a few seconds."
             }), 409
 
         snapshot = _take_user_reset_snapshot(user)
+        logger.info("Reset snapshot captured for user %s", user.client_id)
 
         reset_timestamp = datetime.utcnow()
 
@@ -167,10 +171,6 @@ def update_wallet_limit():
         user.reserved_balance = 0.0
         user.last_portfolio_reset_at = reset_timestamp
 
-        # Align reset scope with UX copy: keep watchlist containers but clear all symbols.
-        for watchlist in user.watchlists or []:
-            watchlist.stocks = []
-
         user.save()
 
         # Clear data surfaces associated with portfolio state.
@@ -178,6 +178,7 @@ def update_wallet_limit():
         Lot.objects(user=user).delete()
         ShortPosition.objects(user=user).delete()
         Transaction.objects(user=user).delete()
+        logger.info("Reset data clear completed for user %s", user.client_id)
 
         _invalidate_user_route_caches(user.id)
 
@@ -192,7 +193,7 @@ def update_wallet_limit():
         logger.info("User %s reset their account with wallet limit %s", user.client_id, friendly_amount)
 
         profile_payload = _serialize_profile(user)
-        message = f"Wallet reset to {friendly_amount}. Positions, orders, performance, and watchlist symbols were cleared."
+        message = f"Wallet reset to {friendly_amount}. Positions, orders, and performance were cleared. Watchlists were kept unchanged."
 
         return jsonify({
             "success": True,

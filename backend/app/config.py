@@ -26,7 +26,6 @@ class Config:
     BCRYPT_LOG_ROUNDS = int(os.getenv('BCRYPT_LOG_ROUNDS', 12))
 
     # --- Session Management ---
-    # Use 'redis' in production for better performance and scalability
     SESSION_TYPE = os.getenv('SESSION_TYPE', 'filesystem')
     SESSION_FILE_DIR = os.path.join(os.path.abspath(os.path.dirname(__file__)), '..', 'flask_session')
     SESSION_PERMANENT = True
@@ -37,8 +36,6 @@ class Config:
     
     # Session idle timeout (inactive sessions expire after this duration)
     SESSION_IDLE_TIMEOUT = timedelta(minutes=int(os.getenv("SESSION_IDLE_TIMEOUT_MINUTES", 30)))
-    # For Redis sessions, you would uncomment and configure the following:
-    # SESSION_REDIS = redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
 
     # --- Database Configuration ---
     MONGODB_SETTINGS = {

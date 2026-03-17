@@ -8,6 +8,7 @@ from app import create_app
 from app.models import Transaction, Holding, User, Lot, ShortPosition
 from app.services.trade_executor import TradeExecutor
 from app.services.market_time import should_auto_squareoff_mis, get_current_ist_time
+from app.services.reset_guard import is_user_reset_in_progress
 from app.routes.stock import get_stock_data_from_api, format_symbol
 
 # --- Configuration ---
@@ -36,7 +37,7 @@ class OrderProcessor:
 
     def run(self):
         """The main loop for the processor thread."""
-        logger.info("🚀 Starting robust order processor...")
+        logger.debug("Order processor loop started.")
         while not self._stop_event.is_set():
             try:
                 # Lazily create the app if not provided (avoids heavy work on import)
@@ -195,8 +196,7 @@ class OrderProcessor:
             logger.error(f"Failed to trigger execution for order {order.id}: {e}", exc_info=True)
 
     def _is_user_resetting(self, user_id) -> bool:
-        user_doc = User.objects(id=user_id).only('reset_in_progress').first()
-        return bool(getattr(user_doc, 'reset_in_progress', False))
+        return is_user_reset_in_progress(user_id)
 
     def _update_trailing_stops(self):
         """Update trigger prices for trailing stop orders based on market movement."""
@@ -265,7 +265,7 @@ class OrderProcessor:
             # We must cancel pending orders first so they don't trigger while we are squaring off
             pending_mis = Transaction.objects(status="PENDING", product_type="MIS")
             for order in pending_mis:
-                if getattr(order.user, 'reset_in_progress', False):
+                if self._is_user_resetting(order.user.id):
                     logger.info("Skipping MIS pending cancellation for order %s due to portfolio reset lock", order.id)
                     continue
                 logger.info(f"Auto-cancelling pending MIS order {order.id}")
@@ -274,7 +274,7 @@ class OrderProcessor:
             # 2. Square off Holdings (Sell Longs)
             mis_holdings = Holding.objects(product_type='MIS')
             for holding in mis_holdings:
-                if getattr(holding.user, 'reset_in_progress', False):
+                if self._is_user_resetting(holding.user.id):
                     logger.info("Skipping MIS holding square-off for user %s due to portfolio reset lock", holding.user.id)
                     continue
                 # Calculate what is actually available (Quantity - Reserved)
@@ -293,7 +293,7 @@ class OrderProcessor:
             # 3. Cover Short Positions (Buy Shorts)
             short_positions = ShortPosition.objects(is_active=True)
             for short_pos in short_positions:
-                if getattr(short_pos.user, 'reset_in_progress', False):
+                if self._is_user_resetting(short_pos.user.id):
                     logger.info("Skipping short-position square-off for user %s due to portfolio reset lock", short_pos.user.id)
                     continue
                 if short_pos.quantity > 0:

@@ -21,7 +21,6 @@ websocket-client>=1.6  # required for `import websocket`
 pyotp>=2.9
 blinker>=1.7
 Flask-Limiter>=2.8  # Re-enabled to protect expensive endpoints like /api/search
-redis>=4.6  # Recommended storage backend for Flask-Limiter in production (e.g., redis://)
 cachetools>=5.3  # TTL/LRU caches used for search caching
 APScheduler>=3.10  # Background task scheduling for daily scrip updates
 

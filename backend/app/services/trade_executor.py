@@ -8,6 +8,7 @@ from app.models import Transaction, Holding, Lot, User, ShortPosition
 # Avoid importing route modules at top-level to prevent circular imports (import inside functions if needed)
 from app.services.cache import cache as app_cache
 from app.services.retry import retry
+from app.services.reset_guard import is_user_reset_in_progress
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class TradeExecutor:
             user = User.objects(id=user_id).first()
             if not user:
                 return {"success": False, "message": "User not found"}
-            if getattr(user, 'reset_in_progress', False):
+            if is_user_reset_in_progress(user.id):
                 return {"success": False, "message": "Portfolio reset in progress."}
 
             exec_price = Decimal(str(price))
@@ -262,7 +263,7 @@ class TradeExecutor:
             user = User.objects(id=user_id).first()
             if not user:
                 return {"success": False, "message": "User not found"}
-            if getattr(user, 'reset_in_progress', False):
+            if is_user_reset_in_progress(user.id):
                 return {"success": False, "message": "Portfolio reset in progress."}
 
             exec_price = Decimal(str(price))
@@ -437,7 +438,7 @@ class TradeExecutor:
             user = User.objects(id=user_id).first()
             if not user:
                 return {"success": False, "message": "User not found"}
-            if getattr(user, 'reset_in_progress', False):
+            if is_user_reset_in_progress(user.id):
                 return {"success": False, "message": "Portfolio reset in progress."}
 
             price_dec = Decimal(str(price))
@@ -518,7 +519,7 @@ class TradeExecutor:
         try:
             user = User.objects(id=user_id).first()
             if not user: return {"success": False, "message": "User not found"}
-            if getattr(user, 'reset_in_progress', False):
+            if is_user_reset_in_progress(user.id):
                 return {"success": False, "message": "Portfolio reset in progress."}
             
             # 1. Reserve Shares (Atomic)
@@ -581,7 +582,7 @@ class TradeExecutor:
             user = User.objects(id=user_id).only('id', 'reset_in_progress').first()
             if not user:
                 return {"success": False, "message": "User not found"}
-            if getattr(user, 'reset_in_progress', False):
+            if is_user_reset_in_progress(user.id):
                 return {"success": False, "message": "Portfolio reset in progress."}
 
             # 1. Lock Transaction

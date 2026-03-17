@@ -14,11 +14,13 @@ import { mergePriceMapWithVariants, pickLivePriceForSymbol, seedPriceMapFromHold
 import { Button } from "../assets/ui/button.jsx";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../assets/ui/dialog.jsx";
 import ModifyExitPlanForm from "./ModifyExitPlanForm.jsx";
+import usePortfolioSummary from "../hooks/usePortfolioSummary.js";
 
 const PortfolioPage = ({ isEmbedded = false }) => {
   const navigate = useNavigate();
   const [portfolioData, setPortfolioData] = useState(null);
   const [livePrices, setLivePrices] = useState({});
+  const [lastPriceUpdate, setLastPriceUpdate] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
   const [marketStatus, setMarketStatus] = useState(null);
@@ -90,6 +92,7 @@ const PortfolioPage = ({ isEmbedded = false }) => {
 
   useEffect(() => {
     const unsubscribe = priceUpdateService.subscribe(update => {
+      setLastPriceUpdate(update || null);
       setLivePrices(currentPrices => {
         if (update?.type === 'reset') {
           return {};
@@ -195,61 +198,18 @@ const PortfolioPage = ({ isEmbedded = false }) => {
     const holdingsWithLiveData = allHoldings.map(holding => {
       const livePriceData = pickLivePriceForSymbol(livePrices, holding.symbol, holding.exchange);
       const livePrice = livePriceData?.ltp ?? holding.ltp;
-      const change = Number(livePriceData?.change ?? livePriceData?.net_change ?? livePriceData?.change_amount ?? 0) || 0;
       const market_value = livePrice * holding.quantity;
       const unrealized_pnl = market_value - holding.investment_value;
       const unrealized_pnl_pct = (unrealized_pnl / holding.investment_value) * 100;
-
-      const oneDayReturn = change * holding.quantity;
-      const prevClose = Number.isFinite(livePrice) ? (livePrice - change) : null;
-      const prevCloseValue = Number.isFinite(prevClose) ? (prevClose * holding.quantity) : (holding.investment_value || 0);
-      const oneDayReturnPct = prevCloseValue > 0 ? (oneDayReturn / prevCloseValue) * 100 : 0;
       
       return { 
         ...holding, 
         ltp: livePrice, 
         market_value, 
         unrealized_pnl,
-        unrealized_pnl_pct,
-        oneDayReturn,
-        oneDayReturnPct
+        unrealized_pnl_pct
       };
     });
-
-    // Calculate totals (prefer live prices so totals update in real-time)
-    const current_value = holdingsWithLiveData.reduce((sum, h) => sum + h.market_value, 0);
-    const invested_value = holdingsWithLiveData.reduce((sum, h) => sum + h.investment_value, 0);
-
-    const realized_pnl = Number(portfolioData?.summary?.realized_pnl) || 0;
-
-    // Backend summary.unrealized_pnl may include short-position P&L not present in cnc/mis holdings lists.
-    // Keep that component as a constant baseline so total P&L stays consistent while holdings P&L updates live.
-    const summaryHoldingsValue = Number(portfolioData?.summary?.holdings_value);
-    const summaryInvestment = Number(portfolioData?.summary?.total_investment);
-    const summaryUnrealized = Number(portfolioData?.summary?.unrealized_pnl);
-
-    const apiHoldingsUnrealized =
-      Number.isFinite(summaryHoldingsValue) && Number.isFinite(summaryInvestment)
-        ? (summaryHoldingsValue - summaryInvestment)
-        : 0;
-
-    const apiNonHoldingUnrealized =
-      Number.isFinite(summaryUnrealized)
-        ? (summaryUnrealized - apiHoldingsUnrealized)
-        : 0;
-
-    const effectiveUnrealized = (current_value - invested_value) + apiNonHoldingUnrealized;
-    const total_returns = effectiveUnrealized + realized_pnl;
-    const total_returns_pct = invested_value > 0 ? (total_returns / invested_value) * 100 : 0;
-
-    const oneDayReturn = holdingsWithLiveData.reduce((sum, h) => sum + h.oneDayReturn, 0);
-    const prevCloseTotal = holdingsWithLiveData.reduce((sum, h) => {
-      const change = Number(pickLivePriceForSymbol(livePrices, h.symbol, h.exchange)?.change ?? 0) || 0;
-      const prevClose = (Number(h.ltp) || 0) - change;
-      const base = Number.isFinite(prevClose) && prevClose > 0 ? prevClose : (Number(h.ltp) || 0);
-      return sum + (base * (Number(h.quantity) || 0));
-    }, 0);
-    const oneDayReturnPct = prevCloseTotal > 0 ? (oneDayReturn / prevCloseTotal) * 100 : 0;
 
     // Sort holdings
     let sortedHoldings = [...holdingsWithLiveData];
@@ -279,16 +239,20 @@ const PortfolioPage = ({ isEmbedded = false }) => {
 
     return {
       holdings: sortedHoldings,
-      summary: {
-        current_value,
-        invested_value,
-        total_returns,
-        total_returns_pct,
-        oneDayReturn,
-        oneDayReturnPct
-      }
     };
   }, [portfolioData, livePrices, sortBy, sortOrder]);
+
+  const canonicalSummary = usePortfolioSummary({
+    baseSummary: portfolioData?.summary,
+    holdings: [
+      ...(portfolioData?.cnc_holdings || []),
+      ...(portfolioData?.mis_holdings || []),
+    ],
+    shortPositions: portfolioData?.short_positions || [],
+    livePriceMap: livePrices,
+    marketStatus,
+    lastPriceUpdate,
+  });
   
   const formatCurrency = (value) => {
     if (typeof value !== 'number') return '₹0.00';
@@ -350,7 +314,15 @@ const PortfolioPage = ({ isEmbedded = false }) => {
     return <div className={pageShellClasses}><div className="rounded-3xl border border-dashed border-slate-200 p-10 text-center text-slate-500">No holdings data available.</div></div>;
   }
 
-  const { holdings, summary } = processedHoldings;
+  const { holdings } = processedHoldings;
+  const summary = {
+    current_value: Number(canonicalSummary?.currentValue) || 0,
+    invested_value: Number(canonicalSummary?.investedAmount) || 0,
+    total_returns: Number(canonicalSummary?.totalPnl) || 0,
+    total_returns_pct: Number(canonicalSummary?.totalPnlPct) || 0,
+    oneDayReturn: Number(canonicalSummary?.todaysPnl) || 0,
+    oneDayReturnPct: Number(canonicalSummary?.todaysPnlPct) || 0,
+  };
 
   return (
     <>

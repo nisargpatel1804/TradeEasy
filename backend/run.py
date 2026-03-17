@@ -14,12 +14,22 @@ def _env_flag(name: str, default: bool = False) -> bool:
         return default
     return str(value).strip().lower() in {"1", "true", "t", "y", "yes"}
 
+
+def _should_start_order_processor(app) -> bool:
+    if not _env_flag("ENABLE_ORDER_PROCESSOR", default=False):
+        return False
+
+    if app.config.get("DEBUG", False):
+        return True
+
+    return _env_flag("BACKGROUND_SERVICE_OWNER", default=False)
+
 app = create_app()
 
 if __name__ == "__main__":
     # Background worker (Render-safe): do NOT rely on Werkzeug reloader env vars.
     # Set ENABLE_ORDER_PROCESSOR=1 on Render to turn this on.
-    if _env_flag("ENABLE_ORDER_PROCESSOR", default=False):
+    if _should_start_order_processor(app):
         start_order_processor(app=app)
 
     host = os.getenv("HOST", "0.0.0.0")

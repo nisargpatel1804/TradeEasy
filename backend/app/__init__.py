@@ -40,6 +40,27 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _should_start_background_service(app, service_flag: str, default_enabled: bool = True) -> bool:
+    """Gate background services so production can run them on one designated owner process only."""
+    service_enabled = _env_flag(service_flag, default=default_enabled)
+    if not service_enabled:
+        logger.info("%s disabled via %s.", service_flag, service_flag)
+        return False
+
+    if app.config.get('DEBUG', False):
+        return True
+
+    # In production, require a designated owner process to avoid duplicate workers.
+    owner_enabled = _env_flag('BACKGROUND_SERVICE_OWNER', default=False)
+    if not owner_enabled:
+        logger.info(
+            "%s skipped because BACKGROUND_SERVICE_OWNER is not enabled in production.",
+            service_flag,
+        )
+        return False
+    return True
+
+
 # --- Configure Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
@@ -49,6 +70,8 @@ if SUPPRESS_SOCKET_LOGS:
     for logger_name, level in (
         ('app.socket_manager', logging.WARNING),
         ('app.moapi.mo_api', logging.WARNING),
+        ('apscheduler', logging.WARNING),
+        ('apscheduler.scheduler', logging.WARNING),
         ('websocket', logging.WARNING),
         ('engineio', logging.ERROR),
         ('socketio', logging.ERROR),
@@ -72,18 +95,15 @@ def _rate_limit_key():
         pass
     return get_remote_address()
 
-# Configure rate limiter storage backend from environment. Prefer a Redis URI in production.
-_rate_limit_storage = os.getenv('RATELIMIT_STORAGE_URI') or os.getenv('REDIS_URL')
+# Configure rate limiter storage backend from environment.
+_rate_limit_storage = os.getenv('RATELIMIT_STORAGE_URI')
 if _rate_limit_storage:
     limiter = Limiter(key_func=_rate_limit_key, default_limits=None, storage_uri=_rate_limit_storage)
     logger.info(f"Rate limiter storage configured from environment: {_rate_limit_storage}")
 else:
-    # Explicitly use memory backend to avoid flask_limiter warning; however, memory is not suitable for
-    # production as it is not shared between processes. Set RATELIMIT_STORAGE_URI to a Redis URI like
-    # 'redis://localhost:6379/0' in production.
+    # Explicitly use memory backend to avoid flask_limiter warning.
     limiter = Limiter(key_func=_rate_limit_key, default_limits=None, storage_uri='memory://')
-    logger.warning("RATELIMIT_STORAGE_URI not set; using in-memory rate limit storage. "
-                   "Configure RATELIMIT_STORAGE_URI (e.g., 'redis://...') for production use.")
+    logger.debug("RATELIMIT_STORAGE_URI not set; using in-memory rate limit storage.")
 
 SOCKETIO_PING_INTERVAL = _env_int('SOCKETIO_PING_INTERVAL', 25)
 SOCKETIO_PING_TIMEOUT = _env_int('SOCKETIO_PING_TIMEOUT', 90)
@@ -152,23 +172,30 @@ def create_app():
     # --- Singleton WebSocket Manager Initialization ---
     with app.app_context():
         from app.socket_manager import MO_WebSocket_Manager
-        
-        # Instantiate the singleton manager and pass the socketio server to it
-        # This allows the manager's background threads to emit data to clients
-        # Keep force_connect disabled so off-hours do not continuously reconnect/log disconnect noise.
-        socket_manager = MO_WebSocket_Manager(socketio_server=socketio, force_connect=False)
-        socket_manager.start()
+
+        socket_manager = None
+        task_scheduler = None
+
+        # Instantiate/start only on the designated owner process in production.
+        if _should_start_background_service(app, 'ENABLE_SOCKET_MANAGER', default_enabled=True):
+            # This allows manager background threads to emit data to connected clients.
+            # Keep force_connect disabled so off-hours do not continuously reconnect.
+            socket_manager = MO_WebSocket_Manager(socketio_server=socketio, force_connect=False)
+            socket_manager.start()
 
         # --- Initialize Task Scheduler for Background Jobs ---
-        from app.scheduler import init_scheduler
-        task_scheduler = init_scheduler(app)
+        if _should_start_background_service(app, 'ENABLE_SCHEDULER', default_enabled=True):
+            from app.scheduler import init_scheduler
+            task_scheduler = init_scheduler(app)
 
         # --- Graceful Shutdown Hook ---
         # Register the shutdown function to be called when the app exits.
         # This ensures WebSocket connections and scheduled tasks are closed cleanly.
         def cleanup():
-            socket_manager.shutdown()
-            task_scheduler.shutdown()
+            if socket_manager:
+                socket_manager.shutdown()
+            if task_scheduler:
+                task_scheduler.shutdown()
         
         atexit.register(cleanup)
 
@@ -209,7 +236,7 @@ def create_app():
                         if info.get('weights') or any(k[1] == 'text' for k in info.get('key', [])):
                             text_indexes[name] = info.get('weights') or info
                     if text_indexes:
-                        logger.info(
+                        logger.debug(
                             "Found existing text index(es) on AQScrip which differ from desired configuration: %s. "
                             "Skipping creation of conflicting text index. To migrate to the new text index, drop the existing text index(s) and restart the app.",
                             text_indexes

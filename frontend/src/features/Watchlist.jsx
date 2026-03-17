@@ -481,7 +481,6 @@ const Watchlist = () => {
             >
                 <DialogContent
                     className="w-[95vw] max-w-xl border-none bg-transparent p-0 shadow-none sm:w-full max-h-[90vh] overflow-y-auto"
-                    aria-describedby={undefined}
                 >
                     <div className="p-3 sm:p-4">
                         <DialogHeader className="sr-only">

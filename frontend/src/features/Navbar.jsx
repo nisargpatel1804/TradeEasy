@@ -2,7 +2,6 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { useDataContext } from '../context/DataContext.jsx';
-import { useSocket } from '../context/SocketContext.jsx';
 import priceUpdateService from '../services/priceUpdateService.js';
 import * as api from '../services/api.js';
 import { Button } from '../assets/ui/button.jsx';
@@ -16,7 +15,7 @@ import {
   DropdownMenuTrigger,
 } from '../assets/ui/dropdown-menu.jsx';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../assets/ui/dialog.jsx';
-import { LogOut, User, Menu, Bell, Plus, ArrowRight, Loader2 } from 'lucide-react';
+import { LogOut, User, Menu, Plus, ArrowRight, Loader2 } from 'lucide-react';
 import { useToast } from '../assets/ui/use-toast.js';
 
 const TICKER_CONFIG = [
@@ -37,7 +36,6 @@ const TICKER_CONFIG = [
   },
 ];
 
-// helpers that don't depend on React state can live at module scope
 const findIndexMatch = (priceMap = {}, config) => {
   if (!priceMap || !config) {
     return null;
@@ -46,8 +44,6 @@ const findIndexMatch = (priceMap = {}, config) => {
   return config.symbol ? (priceMap[config.symbol] || null) : null;
 };
 
-// normalisation logic is independent of component state; hoist it to avoid
-// re-creating the callback on every render.
 const normaliseIndexPayload = (payload = {}, config) => {
   if (!payload || !config) {
     return null;
@@ -91,7 +87,7 @@ const normaliseIndexPayload = (payload = {}, config) => {
   };
 };
 
-const RESET_NOTE = 'Clears holdings, positions, orders, performance data, and watchlist symbols.';
+const RESET_NOTE = 'Clears holdings, positions, orders, and performance data.';
 const WALLET_LIMIT_OPTIONS = [
   { label: '₹10 Lakh', value: 1_000_000, warning: RESET_NOTE },
   { label: '₹25 Lakh', value: 2_500_000, warning: RESET_NOTE },
@@ -101,8 +97,7 @@ const WALLET_LIMIT_OPTIONS = [
 
 const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
   const { isAuthenticated, logout, user } = useAuth();
-  const { profileData, indicesData, refreshWatchlists, setProfile } = useDataContext();
-  const { isConnected, connectionStatus } = useSocket();
+  const { profileData, indicesData, setProfile } = useDataContext();
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -117,6 +112,10 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
   const [isWalletDialogOpen, setIsWalletDialogOpen] = useState(false);
   const [selectedWalletLimit, setSelectedWalletLimit] = useState(null);
   const [isUpdatingWallet, setIsUpdatingWallet] = useState(false);
+  const allowedWalletLimits = useMemo(
+    () => new Set(WALLET_LIMIT_OPTIONS.map((o) => o.value)),
+    []
+  );
 
 
   const updateHeadlineFromMap = useCallback((priceMap = {}) => {
@@ -198,6 +197,9 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
     }
 
     const unsubscribe = priceUpdateService.subscribe((payload = {}) => {
+      if (isWalletDialogOpen) {
+        return;
+      }
       // changedPrices is {} (empty object) for snapshot/seed events — truthy but
       // meaningless. Prefer allPrices when changedPrices carries no entries.
       const changed = payload.changedPrices;
@@ -212,7 +214,7 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
         unsubscribe();
       }
     };
-  }, [updateHeadlineFromMap, isAuthenticated]);
+  }, [updateHeadlineFromMap, isAuthenticated, isWalletDialogOpen]);
   const profileInitial = profileData?.username?.charAt(0).toUpperCase() || user?.username?.charAt(0).toUpperCase() || 'U';
   const walletBalance = useMemo(() => {
     const amount = profileData?.available_balance ?? profileData?.balance ?? 0;
@@ -233,8 +235,7 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
     }
 
     // Client-side guard: only allow known preset values
-    const allowed = WALLET_LIMIT_OPTIONS.map((o) => o.value);
-    if (!allowed.includes(selectedWalletLimit)) {
+    if (!allowedWalletLimits.has(selectedWalletLimit)) {
       toast({ title: 'Invalid amount', description: 'Please select a valid wallet amount.', variant: 'destructive' });
       return;
     }
@@ -247,14 +248,10 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
       toast({ title: 'Wallet updated', description: message });
 
       // if the API returned the updated profile payload we can avoid an
-      // extra GET request by patching the context directly.  refreshWatchlists
-      // is still needed since watchlists may have been cleared.
+      // extra GET request by patching the context directly.
       if (response?.profile) {
         setProfile(response.profile);
       }
-      await Promise.allSettled([
-        refreshWatchlists(),
-      ]);
 
       priceUpdateService.clearPrices();
       window.dispatchEvent(new CustomEvent('clear-local-search-caches'));
@@ -280,7 +277,7 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
     } finally {
       setIsUpdatingWallet(false);
     }
-  }, [selectedWalletLimit, toast, refreshWatchlists]);
+  }, [selectedWalletLimit, toast, allowedWalletLimits, setProfile]);
 
   useEffect(() => {
     if (!isWalletDialogOpen) {
@@ -357,18 +354,6 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
               <Plus className="h-4 w-4" />
             </Button>
           </div>
-          <div className="flex items-center gap-2 rounded-full border border-slate-200 px-3 py-1 text-xs font-medium text-slate-600">
-            <span className={`h-2 w-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-amber-400'}`} />
-            {connectionStatus === 'reconnecting' ? 'Reconnecting' : isConnected ? 'Live' : 'Offline'}
-          </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Notifications"
-            onClick={() => toast({ title: 'Notifications', description: 'No new notifications.' })}
-          >
-            <Bell className="h-5 w-5 text-slate-600" />
-          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" className="relative h-9 w-9 rounded-full border border-slate-200" aria-label="Open account menu" aria-haspopup="menu">
@@ -414,12 +399,12 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
       </div>
 
       <Dialog open={isWalletDialogOpen} onOpenChange={setIsWalletDialogOpen}>
-        <DialogContent className="max-w-lg rounded-3xl" role="dialog" aria-modal="true" aria-labelledby="reset-wallet-title" aria-describedby="reset-wallet-desc">
+        <DialogContent className="max-w-lg rounded-3xl">
           <DialogHeader>
-            <DialogTitle id="reset-wallet-title">Reset Wallet Limit</DialogTitle>
-            <DialogDescription id="reset-wallet-desc">
+            <DialogTitle>Reset Wallet Limit</DialogTitle>
+            <DialogDescription>
               Pick a preset amount to refresh your simulated balance. Every reset clears holdings, positions,
-              orders, performance data, and watchlist symbols for the selected account.
+              orders, and performance data for the selected account.
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="Wallet reset options">
@@ -433,7 +418,11 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
                   aria-checked={isActive}
                   tabIndex={isActive ? 0 : -1}
                   aria-label={`${option.label}${option.warning ? ' - ' + option.warning : ''}`}
-                  onClick={() => setSelectedWalletLimit(option.value)}
+                  onClick={() => {
+                    if (selectedWalletLimit !== option.value) {
+                      setSelectedWalletLimit(option.value);
+                    }
+                  }}
                   className={`rounded-2xl border px-4 py-3 text-left text-sm font-semibold transition ${
                     isActive ? 'border-amber-500 bg-amber-50 text-amber-900' : 'border-slate-200 bg-white text-slate-700'
                   }`}
@@ -462,7 +451,7 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
 });
 Navbar.displayName = 'Navbar';
 
-const TickerChip = ({ label, price, change, percent, compact = false }) => {
+const TickerChip = React.memo(({ label, price, change, percent, compact = false }) => {
   const hasPrice = typeof price === 'number' && !Number.isNaN(price);
   const hasChange = typeof change === 'number' && !Number.isNaN(change);
   const hasPercent = typeof percent === 'number' && !Number.isNaN(percent);
@@ -507,7 +496,7 @@ const TickerChip = ({ label, price, change, percent, compact = false }) => {
       )}
     </div>
   );
-};
+});
 
 export default Navbar;
 

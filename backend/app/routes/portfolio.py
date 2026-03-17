@@ -1,12 +1,14 @@
 import logging
 import threading
+import time
 from decimal import Decimal
 from collections import defaultdict, deque
 from flask import Blueprint, jsonify
 from flask_login import login_required, current_user
-from app.models import Holding, Transaction, Lot, ShortPosition
+from app.models import Holding, Transaction, ShortPosition
 # Import the centralized, cached function directly from the stock routes file
 from .stock import get_stock_data_from_api, format_symbol
+from app.services.market_time import get_market_session, MarketSession
 
 # --- Configuration ---
 logger = logging.getLogger(__name__)
@@ -14,21 +16,111 @@ portfolio_bp = Blueprint('portfolio', __name__)
 
 # --- Helper Functions ---
 
-def _get_live_price_map(symbols: list) -> dict:
+def _to_decimal(value, default: str = '0') -> Decimal:
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return Decimal(default)
+
+
+def _get_last_known_quote(symbol: str, cleaned_symbol: str) -> dict | None:
+    """Attempts to retrieve a last-known quote from websocket manager caches."""
+    try:
+        from app.socket_manager import MO_WebSocket_Manager
+        manager = MO_WebSocket_Manager()
+        latest = getattr(manager, 'latest_stock_data', {}) or {}
+        if not latest:
+            return None
+
+        candidates = [symbol, cleaned_symbol, f"{cleaned_symbol}.NSE", f"{cleaned_symbol}.BSE"]
+        for candidate in candidates:
+            if candidate and candidate in latest:
+                payload = latest.get(candidate) or {}
+                ltp = _to_decimal(payload.get('ltp', 0))
+                if ltp <= 0:
+                    continue
+
+                prev_close = _to_decimal(payload.get('prev_close', 0))
+                change = _to_decimal(payload.get('change', 0))
+                change_pct = _to_decimal(payload.get('percent_change', payload.get('change_pct', 0)))
+
+                if prev_close > 0 and change == 0:
+                    change = ltp - prev_close
+                if prev_close > 0 and change_pct == 0:
+                    change_pct = (change / prev_close) * Decimal('100')
+
+                return {
+                    'ltp': ltp,
+                    'prev_close': prev_close if prev_close > 0 else ltp,
+                    'change': change,
+                    'change_pct': change_pct,
+                    'is_stale': True,
+                    'price_source': 'last_known_socket',
+                    'last_updated': payload.get('last_updated'),
+                }
+    except Exception as err:
+        logger.debug("Last-known quote lookup failed for %s: %s", symbol, err)
+    return None
+
+
+def _build_quote(cleaned_symbol: str, raw_data: dict | None, fallback_symbol: str) -> dict:
+    """Builds a normalized quote payload with explicit freshness metadata."""
+    if raw_data:
+        ltp = _to_decimal(raw_data.get('ltp', 0))
+        prev_close = _to_decimal(raw_data.get('close', 0))
+        change = _to_decimal(raw_data.get('change', 0))
+        change_pct = _to_decimal(raw_data.get('percent_change', 0))
+        is_stale = bool(raw_data.get('is_stale', False))
+        price_source = raw_data.get('price_source', 'ltp')
+        last_updated = raw_data.get('last_updated')
+
+        if ltp > 0:
+            if prev_close <= 0:
+                prev_close = ltp
+            if prev_close > 0 and change == 0:
+                change = ltp - prev_close
+            if prev_close > 0 and change_pct == 0:
+                change_pct = (change / prev_close) * Decimal('100')
+
+            return {
+                'ltp': ltp,
+                'prev_close': prev_close,
+                'change': change,
+                'change_pct': change_pct,
+                'is_stale': is_stale,
+                'price_source': price_source,
+                'last_updated': last_updated,
+            }
+
+    last_known = _get_last_known_quote(fallback_symbol, cleaned_symbol)
+    if last_known:
+        return last_known
+
+    return {
+        'ltp': Decimal('0'),
+        'prev_close': Decimal('0'),
+        'change': Decimal('0'),
+        'change_pct': Decimal('0'),
+        'is_stale': True,
+        'price_source': 'unavailable',
+        'last_updated': None,
+    }
+
+
+def _get_live_quote_map(symbols: list) -> dict:
     """
-    Builds a map of live prices by directly calling the cached API function.
-    This is highly efficient for fetching prices for all user holdings.
+    Builds a normalized quote map used by portfolio summary and per-holding rows.
     """
-    price_map = {}
+    quote_map = {}
     # Use a set to fetch unique symbols only
     for symbol in set(symbols):
         # This call is fast due to the lru_cache in the get_stock_data_from_api function
         data = get_stock_data_from_api(symbol)
-        if data and data.get('ltp'):
-            # Use the cleaned base symbol as the key for consistency
-            cleaned_symbol = format_symbol(symbol)
-            price_map[cleaned_symbol] = Decimal(str(data['ltp']))
-    return price_map
+        cleaned_symbol = format_symbol(symbol)
+        quote = _build_quote(cleaned_symbol, data, symbol)
+        quote_map[symbol] = quote
+        quote_map.setdefault(cleaned_symbol, quote)
+    return quote_map
 
 def _calculate_realized_pnl(user) -> Decimal:
     """
@@ -200,7 +292,10 @@ def get_portfolio():
                 name="PortfolioRealtimeRegister",
             ).start()
 
-        live_price_map = _get_live_price_map(all_symbols)
+        live_quote_map = _get_live_quote_map(all_symbols)
+        now_ms = int(time.time() * 1000)
+        market_session = get_market_session()
+        is_pre_market = market_session == MarketSession.PRE_MARKET
 
         # --- Initialize Metrics ---
         cnc_holdings_list = []
@@ -208,6 +303,10 @@ def get_portfolio():
         short_positions_list = []
         total_investment = Decimal('0')
         current_holdings_value = Decimal('0')
+        previous_close_exposure = Decimal('0')
+        todays_pnl = Decimal('0')
+        has_stale_prices = False
+        latest_price_asof = 0
 
         # --- Process CNC Holdings ---
         for holding in cnc_holdings:
@@ -216,21 +315,42 @@ def get_portfolio():
             investment_value = avg_price * quantity
 
             cleaned_symbol = format_symbol(holding.symbol)
-            live_price = live_price_map.get(cleaned_symbol, avg_price)
+            quote = live_quote_map.get(holding.symbol) or live_quote_map.get(cleaned_symbol) or _build_quote(cleaned_symbol, None, holding.symbol)
+            live_price = quote['ltp']
             market_value = live_price * quantity
             
             pnl = market_value - investment_value
             
+            prev_close = quote['prev_close']
+            change = quote['change']
+            change_pct = quote['change_pct']
+            day_pnl = (live_price - prev_close) * quantity if prev_close > 0 else Decimal('0')
+
+            if quote['is_stale']:
+                has_stale_prices = True
+            if quote.get('last_updated'):
+                try:
+                    latest_price_asof = max(latest_price_asof, int(quote.get('last_updated') or 0))
+                except Exception:
+                    pass
+
             cnc_holdings_list.append({
                 "symbol": holding.symbol,
                 "quantity": holding.quantity,
-                "reserved_quantity": holding.reserved_quantity if hasattr(holding, 'reserved_quantity') else 0,  # CRITICAL FIX #17
-                "available_quantity": holding.quantity - (holding.reserved_quantity if hasattr(holding, 'reserved_quantity') else 0),  # CRITICAL FIX #17
+                "reserved_quantity": holding.reserved_quantity if hasattr(holding, 'reserved_quantity') else 0,
+                "available_quantity": holding.quantity - (holding.reserved_quantity if hasattr(holding, 'reserved_quantity') else 0),
                 "average_price": float(avg_price),
                 "ltp": float(live_price),
+                "prev_close": float(prev_close),
+                "change": float(change),
+                "change_pct": float(change_pct),
+                "is_stale": bool(quote['is_stale']),
+                "price_source": quote['price_source'],
+                "price_asof": int(quote['last_updated']) if quote.get('last_updated') else None,
                 "investment_value": float(investment_value),
                 "market_value": float(market_value),
                 "unrealized_pnl": float(pnl),
+                "todays_pnl": float(day_pnl),
                 "product_type": "CNC",
                 "exit_plan": {
                     "stop_order_id": exit_plan_map.get((holding.symbol, 'CNC'), {}).get('stop_order_id'),
@@ -241,6 +361,8 @@ def get_portfolio():
             })
             total_investment += investment_value
             current_holdings_value += market_value
+            previous_close_exposure += (prev_close * quantity) if prev_close > 0 else Decimal('0')
+            todays_pnl += day_pnl
 
         # --- Process MIS (Intraday) Holdings ---
         for holding in mis_holdings:
@@ -249,21 +371,42 @@ def get_portfolio():
             investment_value = avg_price * quantity
 
             cleaned_symbol = format_symbol(holding.symbol)
-            live_price = live_price_map.get(cleaned_symbol, avg_price)
+            quote = live_quote_map.get(holding.symbol) or live_quote_map.get(cleaned_symbol) or _build_quote(cleaned_symbol, None, holding.symbol)
+            live_price = quote['ltp']
             market_value = live_price * quantity
             
             pnl = market_value - investment_value
             
+            prev_close = quote['prev_close']
+            change = quote['change']
+            change_pct = quote['change_pct']
+            day_pnl = (live_price - prev_close) * quantity if prev_close > 0 else Decimal('0')
+
+            if quote['is_stale']:
+                has_stale_prices = True
+            if quote.get('last_updated'):
+                try:
+                    latest_price_asof = max(latest_price_asof, int(quote.get('last_updated') or 0))
+                except Exception:
+                    pass
+
             mis_holdings_list.append({
                 "symbol": holding.symbol,
                 "quantity": holding.quantity,
-                "reserved_quantity": holding.reserved_quantity if hasattr(holding, 'reserved_quantity') else 0,  # CRITICAL FIX #17
-                "available_quantity": holding.quantity - (holding.reserved_quantity if hasattr(holding, 'reserved_quantity') else 0),  # CRITICAL FIX #17
+                "reserved_quantity": holding.reserved_quantity if hasattr(holding, 'reserved_quantity') else 0,
+                "available_quantity": holding.quantity - (holding.reserved_quantity if hasattr(holding, 'reserved_quantity') else 0),
                 "average_price": float(avg_price),
                 "ltp": float(live_price),
+                "prev_close": float(prev_close),
+                "change": float(change),
+                "change_pct": float(change_pct),
+                "is_stale": bool(quote['is_stale']),
+                "price_source": quote['price_source'],
+                "price_asof": int(quote['last_updated']) if quote.get('last_updated') else None,
                 "investment_value": float(investment_value),
                 "market_value": float(market_value),
                 "unrealized_pnl": float(pnl),
+                "todays_pnl": float(day_pnl),
                 "product_type": "MIS",
                 "exit_plan": {
                     "stop_order_id": exit_plan_map.get((holding.symbol, 'MIS'), {}).get('stop_order_id'),
@@ -274,6 +417,8 @@ def get_portfolio():
             })
             total_investment += investment_value
             current_holdings_value += market_value
+            previous_close_exposure += (prev_close * quantity) if prev_close > 0 else Decimal('0')
+            todays_pnl += day_pnl
 
         # --- Process Short Positions (MIS only) ---
         for short_pos in short_positions:
@@ -281,20 +426,42 @@ def get_portfolio():
             quantity = Decimal(short_pos.quantity)
             
             cleaned_symbol = format_symbol(short_pos.symbol)
-            live_price = live_price_map.get(cleaned_symbol, short_price)
+            quote = live_quote_map.get(short_pos.symbol) or live_quote_map.get(cleaned_symbol) or _build_quote(cleaned_symbol, None, short_pos.symbol)
+            live_price = quote['ltp']
             
             # For short positions: profit when price goes down
             # P&L = (short_price - current_price) * quantity
             pnl = (short_price - live_price) * quantity
+            prev_close = quote['prev_close']
+            change = quote['change']
+            change_pct = quote['change_pct']
+            day_pnl = (prev_close - live_price) * quantity if prev_close > 0 else Decimal('0')
+
+            if quote['is_stale']:
+                has_stale_prices = True
+            if quote.get('last_updated'):
+                try:
+                    latest_price_asof = max(latest_price_asof, int(quote.get('last_updated') or 0))
+                except Exception:
+                    pass
             
             short_positions_list.append({
                 "symbol": short_pos.symbol,
                 "quantity": short_pos.quantity,
                 "short_price": float(short_price),
                 "ltp": float(live_price),
+                "prev_close": float(prev_close),
+                "change": float(change),
+                "change_pct": float(change_pct),
+                "is_stale": bool(quote['is_stale']),
+                "price_source": quote['price_source'],
+                "price_asof": int(quote['last_updated']) if quote.get('last_updated') else None,
+                "todays_pnl": float(day_pnl),
                 "unrealized_pnl": float(pnl),
                 "product_type": "MIS_SHORT"
             })
+            previous_close_exposure += (prev_close * quantity) if prev_close > 0 else Decimal('0')
+            todays_pnl += day_pnl
 
         # Combine all holdings
         all_holdings = cnc_holdings_list + mis_holdings_list
@@ -308,8 +475,21 @@ def get_portfolio():
         
         realized_pnl = _calculate_realized_pnl(user)
         total_pnl = unrealized_pnl + realized_pnl
+        if is_pre_market:
+            # Product rule: during 9:00-9:15 pre-market window, day change is forced to zero.
+            todays_pnl = Decimal('0')
+
+        todays_pnl_pct = Decimal('0')
+        if previous_close_exposure > 0:
+            todays_pnl_pct = (todays_pnl / previous_close_exposure) * Decimal('100')
+
+        total_pnl_pct = Decimal('0')
+        if total_investment > 0:
+            total_pnl_pct = (total_pnl / total_investment) * Decimal('100')
+
         cash_balance = Decimal(str(user.balance))
         total_portfolio_value = cash_balance + current_holdings_value
+        price_asof = latest_price_asof or now_ms
 
         return jsonify({
             "success": True,
@@ -322,7 +502,32 @@ def get_portfolio():
                 "total_investment": float(total_investment),
                 "unrealized_pnl": float(unrealized_pnl),
                 "realized_pnl": float(realized_pnl),
-                "total_pnl": float(total_pnl)
+                "total_pnl": float(total_pnl),
+                "current_value": float(current_holdings_value),
+                "invested_amount": float(total_investment),
+                "todays_pnl": float(todays_pnl),
+                "todays_pnl_pct": float(todays_pnl_pct),
+                "total_pnl_pct": float(total_pnl_pct),
+                "prev_close_exposure": float(previous_close_exposure),
+                "price_asof": int(price_asof),
+                "has_stale_prices": bool(has_stale_prices),
+                "price_source": "mixed" if has_stale_prices else "live",
+                "market_session": market_session,
+                "calculation_contract": {
+                    "current_value": "sum(long_qty * ltp)",
+                    "invested_amount": "sum(long_qty * avg_price)",
+                    "todays_pnl": "sum((ltp-prev_close)*long_qty) + sum((prev_close-ltp)*short_qty)",
+                    "total_pnl": "realized_pnl + unrealized_pnl",
+                    "percentages": {
+                        "total_pnl_pct": "total_pnl / invested_amount * 100",
+                        "todays_pnl_pct": "todays_pnl / prev_close_exposure * 100"
+                    }
+                },
+                "invariants": {
+                    "total_pnl_equals_realized_plus_unrealized": True,
+                    "unrealized_equals_holdings_minus_invested_plus_short_pnl": True,
+                    "pre_market_todays_pnl_forced_zero": bool(is_pre_market)
+                }
             },
             "holdings": all_holdings,
             "cnc_holdings": cnc_holdings_list,

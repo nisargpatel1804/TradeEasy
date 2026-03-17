@@ -35,7 +35,7 @@ class TaskScheduler:
             daemon=True
         )
         self._initialized = True
-        logger.info("Task Scheduler initialized successfully.")
+        logger.debug("Task Scheduler initialized.")
     
     def start(self):
         """Start the scheduler and register all scheduled jobs."""
@@ -52,9 +52,7 @@ class TaskScheduler:
             )
             
             self.scheduler.start()
-            logger.info("Task Scheduler started. Jobs registered:")
-            for job in self.scheduler.get_jobs():
-                logger.info(f"  - {job.name} (ID: {job.id}) - Next run: {job.next_run_time}")
+            logger.info("Task Scheduler started.")
         else:
             logger.warning("Scheduler is already running.")
     
