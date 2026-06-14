@@ -11,6 +11,6 @@ export const normalizeSearchQuery = (value, maxLength = SEARCH_MAX_QUERY_LENGTH)
   return normalized;
 };
 
-export const buildSearchCacheKey = (query, page = 1, limit = SEARCH_DEFAULT_LIMIT) => (
-  `${normalizeSearchQuery(query)}::${Math.max(1, Number(page) || 1)}::${Math.max(1, Number(limit) || SEARCH_DEFAULT_LIMIT)}`
+export const buildSearchCacheKey = (query, pageToken = "", limit = SEARCH_DEFAULT_LIMIT) => (
+  `${normalizeSearchQuery(query)}::${String(pageToken || "")}::${Math.max(1, Number(limit) || SEARCH_DEFAULT_LIMIT)}`
 );

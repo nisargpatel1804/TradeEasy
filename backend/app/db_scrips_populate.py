@@ -1,5 +1,5 @@
 import logging
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify
 from flask_login import login_required, current_user
 from datetime import datetime
 from mongoengine.errors import NotUniqueError
@@ -49,9 +49,13 @@ def populate_scrips_endpoint():
     to update existing scrips or insert new ones without needing to check first.
     """
     try:
-        data = request.get_json() or {}
         logger.info(f"Scrip population endpoint triggered by user: {current_user.client_id}")
-        exchanges = data.get("exchanges", ["NSE", "BSE", "NSEFO", "NSECD", "MCX"])
+        try:
+            AQScrip.ensure_indexes()
+        except Exception as idx_err:
+            logger.warning(f"AQScrip pre-upsert ensure_indexes failed: {idx_err}")
+
+        exchanges = ["NSE"]
         
         mo_api = get_mo_api_client()
         if not mo_api.login():
@@ -100,6 +104,11 @@ def populate_scrips_endpoint():
             logger.info(f"Completed {exchange}: {len(scrips_list)} processed, {exchange_upserted} upserted.")
 
             # Search cache removed; no invalidation needed.
+
+        try:
+            AQScrip.ensure_indexes()
+        except Exception as idx_err:
+            logger.warning(f"AQScrip post-upsert ensure_indexes failed: {idx_err}")
         
         logger.info(f"Scrip population finished. Final stats: {stats}")
         return jsonify({"status": "success", "message": "Scrip population complete.", "data": stats})
@@ -135,6 +144,10 @@ def populate_scrips_from_scratch():
         logger.info("Clearing existing AQ_scrips collection...")
         count = AQScrip.objects.delete()
         logger.info(f"Deleted {count} existing scrips.")
+        try:
+            AQScrip.ensure_indexes()
+        except Exception as idx_err:
+            logger.warning(f"AQScrip ensure_indexes failed before fresh import: {idx_err}")
         
         mo_api = get_mo_api_client()
         logger.info("Logging into Motilal Oswal API...")
@@ -143,7 +156,7 @@ def populate_scrips_from_scratch():
             return False
         logger.info("API Login successful.")
 
-        exchanges = ["NSE", "BSE", "NSEFO", "NSECD", "MCX"]
+        exchanges = ["NSE"]
         total_inserted = 0
 
         for exchange in exchanges:
@@ -174,6 +187,10 @@ def populate_scrips_from_scratch():
                     print(f"WARNING: Duplicate scrips found for {exchange}. This should not happen on a clean import.")
                 except Exception as e:
                     print(f"ERROR: Bulk insert failed for {exchange}: {e}")
+        try:
+            AQScrip.ensure_indexes()
+        except Exception as idx_err:
+            logger.warning(f"AQScrip ensure_indexes failed after fresh import: {idx_err}")
         logger.info("\n--- Scrip Population Complete ---")
         logger.info(f"Total scrips inserted across all exchanges: {total_inserted}")
         return True

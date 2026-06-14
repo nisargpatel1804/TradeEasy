@@ -378,8 +378,17 @@ class TradeExecutor:
             User.objects(id=user.id).update_one(inc__balance=float(total_proceeds))
 
             # 5. MATCH LOTS
+            realized_pnl_delta = Decimal('0')
             if shares_sold_from_holding > 0:
-                fifo_ok = cls._process_fifo_lots(user, symbol, shares_sold_from_holding, product_type)
+                fifo_result = cls._process_fifo_lots(
+                    user,
+                    symbol,
+                    shares_sold_from_holding,
+                    product_type,
+                    float(exec_price),
+                )
+                fifo_ok = bool(fifo_result.get('complete', False))
+                realized_pnl_delta = Decimal(str(fifo_result.get('realized_pnl', 0.0) or 0.0))
                 if not fifo_ok:
                     logger.error(
                         "FIFO lot synchronization issue for user=%s symbol=%s qty=%s",
@@ -398,6 +407,27 @@ class TradeExecutor:
             transaction.price = float(exec_price)
             transaction.is_processing = False
             transaction.save()
+
+            # Persist realized P&L sync metadata on every SELL so /portfolio can
+            # reliably determine whether persisted values are current.
+            try:
+                executed_sell_count = Transaction.objects(user=user, status='EXECUTED', action='SELL').count()
+                updates = {
+                    'set__realized_pnl_synced_at': datetime.utcnow(),
+                    'set__realized_pnl_sell_count': int(executed_sell_count),
+                }
+                if realized_pnl_delta != Decimal('0'):
+                    updates['inc__realized_pnl'] = float(realized_pnl_delta)
+                User.objects(id=user.id).update_one(**updates)
+            except Exception as pnl_err:
+                logger.error(
+                    "Failed to persist realized P&L sync for user=%s symbol=%s txn=%s: %s",
+                    user.id,
+                    symbol,
+                    transaction.id,
+                    pnl_err,
+                    exc_info=True,
+                )
 
             # 7. Bracket Legs
             if order_type == 'BRACKET':
@@ -723,9 +753,20 @@ class TradeExecutor:
         ShortPosition.objects(user=user, symbol=symbol, is_active=True).update_one(inc__quantity=quantity)
 
     @classmethod
-    def _process_fifo_lots(cls, user, symbol, qty_to_sell, product_type):
-        """Updates Lots based on FIFO logic with atomic, race-safe deductions."""
+    def _process_fifo_lots(cls, user, symbol, qty_to_sell, product_type, sell_price):
+        """Updates Lots based on FIFO logic with atomic, race-safe deductions.
+
+        Returns:
+            dict: {
+                'complete': bool,
+                'matched_qty': int,
+                'realized_pnl': float,
+            }
+        """
         remaining = int(qty_to_sell)
+        matched_qty = 0
+        realized_pnl = Decimal('0')
+        sell_price_dec = Decimal(str(sell_price))
 
         while remaining > 0:
             lot = Lot.objects(
@@ -750,10 +791,18 @@ class TradeExecutor:
                 # Contention: retry with latest lot snapshot.
                 continue
 
+            lot_price = Decimal(str(getattr(lot, 'purchase_price', 0) or 0))
+            realized_pnl += (sell_price_dec - lot_price) * Decimal(deduct)
+            matched_qty += int(deduct)
+
             Lot.objects(id=lot.id, quantity__lte=0).update_one(set__quantity=0, set__is_active=False)
             remaining -= deduct
 
-        return remaining == 0
+        return {
+            'complete': remaining == 0,
+            'matched_qty': matched_qty,
+            'realized_pnl': float(realized_pnl),
+        }
 
     @classmethod
     def create_bracket_legs(cls, user, entry_txn, symbol, quantity, product_type):

@@ -170,6 +170,9 @@ def update_wallet_limit():
         user.balance = amount_value
         user.reserved_balance = 0.0
         user.last_portfolio_reset_at = reset_timestamp
+        user.realized_pnl = 0.0
+        user.realized_pnl_synced_at = reset_timestamp
+        user.realized_pnl_sell_count = 0
 
         user.save()
 

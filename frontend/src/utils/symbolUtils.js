@@ -1,4 +1,4 @@
-const DEFAULT_SUFFIXES = ["", ".NSE", ".NS", ".BSE"];
+const DEFAULT_SUFFIXES = ["", ".NSE"];
 
 export const normalizeSymbol = (symbol = "") => symbol.toUpperCase().trim();
 

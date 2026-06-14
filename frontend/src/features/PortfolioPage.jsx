@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { toast } from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
 import * as api from "../services/api.js";
+import { useDataContext } from "../context/DataContext.jsx";
 import priceUpdateService from "../services/priceUpdateService.js";
 import { Skeleton } from "../assets/ui/skeleton.jsx";
 import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx";
@@ -19,9 +20,8 @@ import usePortfolioSummary from "../hooks/usePortfolioSummary.js";
 const PortfolioPage = ({ isEmbedded = false }) => {
   const navigate = useNavigate();
   const [portfolioData, setPortfolioData] = useState(null);
-  const [livePrices, setLivePrices] = useState({});
-  const [lastPriceUpdate, setLastPriceUpdate] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [marketStatus, setMarketStatus] = useState(null);
   const [sortBy, setSortBy] = useState("symbol"); // symbol, pnl, value, quantity
@@ -31,50 +31,51 @@ const PortfolioPage = ({ isEmbedded = false }) => {
   const [isModifyDialogOpen, setIsModifyDialogOpen] = useState(false);
   const [exitCandidate, setExitCandidate] = useState(null);
   const [isExitDialogOpen, setIsExitDialogOpen] = useState(false);
+  const { getPortfolio, livePrices: sharedLivePrices } = useDataContext();
 
   const isMarketOpen = !!marketStatus?.is_market_open && !marketStatus?.is_holiday;
 
-  const loadPortfolio = useCallback(async ({ showLoader = false } = {}) => {
+  const loadPortfolio = useCallback(async ({ showLoader = false, force = false } = {}) => {
     try {
       if (showLoader) {
         setIsLoading(true);
+      } else {
+        setIsRefreshing(true);
       }
       setError(null);
-      const data = await api.fetchPortfolio();
-      if (data.success) {
+      const result = await getPortfolio(force);
+      const data = result?.data;
+      if (data?.success) {
         setPortfolioData(data);
         const initialPrices = seedPriceMapFromHoldings([
           ...(data.cnc_holdings || []),
           ...(data.mis_holdings || []),
         ]);
-        setLivePrices(initialPrices);
+        priceUpdateService.seedPrices(initialPrices);
       } else {
-        throw new Error(data.message || "Failed to fetch portfolio.");
+        throw new Error(data?.message || "Failed to fetch portfolio.");
       }
     } catch (err) {
       setError(err.message);
       toast.error(`Error: ${err.message}`);
     } finally {
-      if (showLoader) {
-        setIsLoading(false);
-      }
+      setIsLoading(false);
+      setIsRefreshing(false);
     }
-  }, []);
+  }, [getPortfolio]);
 
   useEffect(() => {
-    loadPortfolio({ showLoader: true });
+    loadPortfolio({ showLoader: true, force: false });
   }, [loadPortfolio]);
 
   useEffect(() => {
     const onPortfolioReset = () => {
-      setPortfolioData(null);
-      setLivePrices({});
-      loadPortfolio({ showLoader: true });
+      loadPortfolio({ showLoader: !portfolioData, force: true });
     };
 
     window.addEventListener('te:portfolio-reset', onPortfolioReset);
     return () => window.removeEventListener('te:portfolio-reset', onPortfolioReset);
-  }, [loadPortfolio]);
+  }, [loadPortfolio, portfolioData]);
 
   useEffect(() => {
     const fetchStatus = async () => {
@@ -90,27 +91,16 @@ const PortfolioPage = ({ isEmbedded = false }) => {
     return () => clearInterval(id);
   }, []);
 
-  useEffect(() => {
-    const unsubscribe = priceUpdateService.subscribe(update => {
-      setLastPriceUpdate(update || null);
-      setLivePrices(currentPrices => {
-        if (update?.type === 'reset') {
-          return {};
-        }
+  const basePriceMap = useMemo(() => {
+    return seedPriceMapFromHoldings([
+      ...(portfolioData?.cnc_holdings || []),
+      ...(portfolioData?.mis_holdings || []),
+    ]);
+  }, [portfolioData]);
 
-        if (update?.type === 'snapshot' && update?.allPrices) {
-          return mergePriceMapWithVariants(currentPrices, update.allPrices);
-        }
-
-        if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
-          return mergePriceMapWithVariants(currentPrices, update.changedPrices);
-        }
-
-        return currentPrices;
-      });
-    });
-    return () => unsubscribe();
-  }, []);
+  const effectiveLivePrices = useMemo(() => {
+    return mergePriceMapWithVariants(basePriceMap, sharedLivePrices || {});
+  }, [basePriceMap, sharedLivePrices]);
 
   const openModifyDialog = (holding) => {
     setSelectedHolding(holding);
@@ -196,7 +186,7 @@ const PortfolioPage = ({ isEmbedded = false }) => {
 
     // Update with live prices and calculate metrics
     const holdingsWithLiveData = allHoldings.map(holding => {
-      const livePriceData = pickLivePriceForSymbol(livePrices, holding.symbol, holding.exchange);
+      const livePriceData = pickLivePriceForSymbol(effectiveLivePrices, holding.symbol, holding.exchange);
       const livePrice = livePriceData?.ltp ?? holding.ltp;
       const market_value = livePrice * holding.quantity;
       const unrealized_pnl = market_value - holding.investment_value;
@@ -240,7 +230,7 @@ const PortfolioPage = ({ isEmbedded = false }) => {
     return {
       holdings: sortedHoldings,
     };
-  }, [portfolioData, livePrices, sortBy, sortOrder]);
+  }, [effectiveLivePrices, portfolioData, sortBy, sortOrder]);
 
   const canonicalSummary = usePortfolioSummary({
     baseSummary: portfolioData?.summary,
@@ -249,9 +239,8 @@ const PortfolioPage = ({ isEmbedded = false }) => {
       ...(portfolioData?.mis_holdings || []),
     ],
     shortPositions: portfolioData?.short_positions || [],
-    livePriceMap: livePrices,
+    livePriceMap: effectiveLivePrices,
     marketStatus,
-    lastPriceUpdate,
   });
   
   const formatCurrency = (value) => {
@@ -354,6 +343,11 @@ const PortfolioPage = ({ isEmbedded = false }) => {
             </div>
 
             <div className="flex items-center gap-2">
+              {isRefreshing && (
+                <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-[11px] font-semibold text-amber-700">
+                  Refreshing
+                </span>
+              )}
               <span
                 className={cn(
                   "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold",

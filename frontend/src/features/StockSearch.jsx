@@ -66,6 +66,15 @@ const StockSearch = ({
     clearResults,
   } = useStockSearch({ onError: handleSearchError });
 
+  const nseResults = useMemo(
+    () => (Array.isArray(results) ? results.filter((stock) => {
+      const exchange = String(stock?.exchange || "").toUpperCase();
+      const symbol = String(stock?.symbol || "").toUpperCase();
+      return exchange === "NSE" && symbol.endsWith(".NSE");
+    }) : []),
+    [results]
+  );
+
   const handleDropdownScroll = useCallback((event) => {
     const el = event?.currentTarget;
     if (!el) return;
@@ -120,6 +129,12 @@ const StockSearch = ({
       return;
     }
 
+    const stockExchange = String(stock?.exchange || "").toUpperCase();
+    if (stockExchange !== "NSE") {
+      toast.error("Only NSE stocks can be added.");
+      return;
+    }
+
     const targetWatchlistName = activeWatchlist?.name;
     const defaultWatchlist = !targetWatchlistName ? watchlistsData?.watchlists.find((w) => !w.is_deletable) : null;
     const watchlistName = targetWatchlistName ?? defaultWatchlist?.name;
@@ -140,9 +155,9 @@ const StockSearch = ({
     const toastId = toast.loading(`Adding ${stock.symbol}...`);
     try {
       const res = await addStockToWatchlist(watchlistName, {
-        symbol: stock.symbol,
+        symbol: String(stock.symbol || "").toUpperCase(),
         name: stock.name,
-        exchange: stock.exchange,
+        exchange: 'NSE',
         scripcode: stock.scripcode,
       });
 
@@ -196,7 +211,7 @@ const StockSearch = ({
   };
 
   const inputRef = useRef(null);
-  const showDropdown = isFocused && (query.length > 1 || results.length > 0 || isLoading);
+  const showDropdown = isFocused && (query.length > 1 || nseResults.length > 0 || isLoading);
 
   return (
     <div className={containerClassName} ref={searchRef}>
@@ -228,10 +243,10 @@ const StockSearch = ({
               <div className="p-2 space-y-2">
                 {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-12 w-full" />)}
               </div>
-            ) : results.length > 0 ? (
+            ) : nseResults.length > 0 ? (
               <>
                 <div id="stock-search-list" role="listbox" onScroll={handleDropdownScroll} className="">
-                  {results.map((stock, idx) => {
+                  {nseResults.map((stock, idx) => {
                     const alreadyAdded = isStockInWatchlist(stock);
                     return (
                       <div

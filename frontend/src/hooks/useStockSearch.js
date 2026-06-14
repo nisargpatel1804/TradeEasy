@@ -21,7 +21,7 @@ export const useStockSearch = ({
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
-  const [page, setPage] = useState(1);
+  const [nextPageToken, setNextPageToken] = useState(null);
   const controllerRef = useRef(null);
   const requestIdRef = useRef(0);
   const cacheRef = useRef(new Map());
@@ -30,7 +30,7 @@ export const useStockSearch = ({
   const clearResults = useCallback(() => {
     setResults([]);
     setHasMore(false);
-    setPage(1);
+    setNextPageToken(null);
   }, []);
 
   const clearSearchCache = useCallback(() => {
@@ -51,7 +51,7 @@ export const useStockSearch = ({
     }
   }, []);
 
-  const fetchSearch = useCallback(async (rawQuery, { silent = false, targetPage = 1, append = false } = {}) => {
+  const fetchSearch = useCallback(async (rawQuery, { silent = false, pageToken = null, append = false } = {}) => {
     const q = normalizeSearchQuery(rawQuery, maxQueryLength);
     if (!q || q.length < minLength) {
       if (!silent) {
@@ -60,10 +60,11 @@ export const useStockSearch = ({
         setIsLoadingMore(false);
         isLoadingMoreRef.current = false;
       }
-      return { success: true, results: [], has_next: false, page: 1, limit: pageSize };
+      return { success: true, results: [], has_next: false, limit: pageSize, next_page_token: null };
     }
 
-    const cacheKey = buildSearchCacheKey(q, targetPage, pageSize);
+    const tokenKey = String(pageToken || "");
+    const cacheKey = buildSearchCacheKey(q, tokenKey, pageSize);
     const cached = cacheRef.current.get(cacheKey);
     if (cached) {
       cacheRef.current.delete(cacheKey);
@@ -72,7 +73,7 @@ export const useStockSearch = ({
         const items = Array.isArray(cached?.results) ? cached.results : [];
         setResults((prev) => (append ? [...prev, ...items] : items));
         setHasMore(Boolean(cached?.has_next));
-        setPage(targetPage);
+        setNextPageToken(cached?.next_page_token || null);
         if (append) {
           setIsLoadingMore(false);
           isLoadingMoreRef.current = false;
@@ -106,14 +107,14 @@ export const useStockSearch = ({
       const response = await api.searchStocks(
         q,
         {
-          page: targetPage,
+          pageToken,
           limit: pageSize,
           signal: silent ? undefined : controllerRef.current?.signal,
         }
       );
 
       if (!silent && requestId !== requestIdRef.current) {
-        return { success: true, results: [], has_next: false, page: targetPage, limit: pageSize };
+        return { success: true, results: [], has_next: false, limit: pageSize, next_page_token: null };
       }
 
       const items = Array.isArray(response?.results) ? response.results : [];
@@ -123,14 +124,14 @@ export const useStockSearch = ({
         success: response?.success !== false,
         results: items,
         has_next: nextHasMore,
-        page: targetPage,
         limit: response?.limit || pageSize,
+        next_page_token: response?.next_page_token || null,
       });
 
       if (!silent) {
         setResults((prev) => (append ? [...prev, ...items] : items));
         setHasMore(nextHasMore);
-        setPage(targetPage);
+        setNextPageToken(response?.next_page_token || null);
       }
 
       return response;
@@ -150,7 +151,7 @@ export const useStockSearch = ({
         setIsLoadingMore(false);
         isLoadingMoreRef.current = false;
       }
-      return { success: true, results: [], has_next: false, page: targetPage, limit: pageSize };
+      return { success: true, results: [], has_next: false, limit: pageSize, next_page_token: null };
     } finally {
       if (!silent) {
         if (append) {
@@ -164,7 +165,7 @@ export const useStockSearch = ({
   }, [clearResults, maxQueryLength, minLength, onError, pageSize, setCacheEntry]);
 
   const debouncedSearch = useMemo(() => debounce((value) => {
-    fetchSearch(value, { targetPage: 1, append: false });
+    fetchSearch(value, { pageToken: null, append: false });
   }, 300), [fetchSearch]);
 
   useEffect(() => {
@@ -176,8 +177,8 @@ export const useStockSearch = ({
     if (isLoading || isLoadingMore || isLoadingMoreRef.current || !hasMore) {
       return;
     }
-    fetchSearch(query, { targetPage: page + 1, append: true });
-  }, [fetchSearch, hasMore, isLoading, isLoadingMore, page, query]);
+    fetchSearch(query, { pageToken: nextPageToken, append: true });
+  }, [fetchSearch, hasMore, isLoading, isLoadingMore, nextPageToken, query]);
 
   // Listen for global clear event to reset results when auth or app state changes.
   useEffect(() => {

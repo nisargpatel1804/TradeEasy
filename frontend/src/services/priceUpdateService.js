@@ -9,10 +9,31 @@ class PriceUpdateService {
     this.socket = null;
     this.subscribers = new Set();
     this.latestPrices = {}; // Cache for the most recent price of each symbol
+    this.maxLatestPriceEntries = 4000;
     this._stockUpdateHandler = null;
     this._indexUpdateHandler = null;
     this._initialSnapshotHandler = null;
   this._initialIndicesHandler = null;
+  }
+
+  _deferToNextFrame(callback) {
+    if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(callback);
+      return;
+    }
+    setTimeout(callback, 0);
+  }
+
+  _pruneLatestPrices() {
+    const keys = Object.keys(this.latestPrices);
+    const overflow = keys.length - this.maxLatestPriceEntries;
+    if (overflow <= 0) {
+      return;
+    }
+
+    for (let idx = 0; idx < overflow; idx += 1) {
+      delete this.latestPrices[keys[idx]];
+    }
   }
 
   /**
@@ -67,6 +88,7 @@ class PriceUpdateService {
       };
 
       this.latestPrices[symbol] = mergedPayload;
+      this._pruneLatestPrices();
       this._notifySubscribers({ type: 'stock', symbol });
     };
 
@@ -83,6 +105,7 @@ class PriceUpdateService {
       };
 
       this.latestPrices[symbol] = mergedPayload; // Indices are also identified by a symbol-like key (e.g., 'NSE:26000')
+      this._pruneLatestPrices();
       this._notifySubscribers({ type: 'index', symbol });
     };
 
@@ -111,6 +134,8 @@ class PriceUpdateService {
         this.latestPrices[symbol] = mergedPayload;
         changedSymbols.push(symbol);
       });
+
+      this._pruneLatestPrices();
 
       if (changedSymbols.length > 0) {
         // Notify subscribers with batch update
@@ -146,6 +171,8 @@ class PriceUpdateService {
         this.latestPrices[symbol] = mergedPayload;
         changedSymbols.push(symbol);
       });
+
+      this._pruneLatestPrices();
 
       if (changedSymbols.length > 0) {
         // Notify subscribers with batch update
@@ -190,6 +217,8 @@ class PriceUpdateService {
         this.latestPrices[symbol] = mergedPayload;
         mutated = true;
       });
+
+      this._pruneLatestPrices();
 
       if (mutated) {
         this._notifySubscribers({ type: 'snapshot' });
@@ -300,9 +329,16 @@ class PriceUpdateService {
    * Clears only cached prices and keeps socket listeners attached.
    * Useful after account-level reset flows where stale prices should be dropped.
    */
-  clearPrices() {
+  clearPrices({ defer = false } = {}) {
     this.latestPrices = {};
-    this._notifySubscribers({ type: 'reset' });
+
+    const notifyReset = () => this._notifySubscribers({ type: 'reset' });
+    if (defer) {
+      this._deferToNextFrame(notifyReset);
+      return;
+    }
+
+    notifyReset();
   }
 
   /**
@@ -330,6 +366,17 @@ class PriceUpdateService {
 
   _createBroadcastPayload({ type = 'snapshot', symbol = null, symbols = null } = {}) {
     const isIncremental = type !== 'snapshot' && type !== 'reset';
+
+    if (type === 'reset') {
+      return {
+        type,
+        symbol: null,
+        symbols: null,
+        data: null,
+        changedPrices: {},
+        allPrices: {},
+      };
+    }
 
     if (isIncremental) {
       // Incremental update: only clone the changed entries — avoid copying the full
@@ -409,6 +456,8 @@ class PriceUpdateService {
       this.latestPrices[symbol] = mergedPayload;
       mutated = true;
     });
+
+    this._pruneLatestPrices();
 
     if (mutated) {
       this._notifySubscribers({ type: 'snapshot' });

@@ -1,14 +1,16 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { toast } from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
 import * as api from "../services/api.js";
+import { useDataContext } from "../context/DataContext.jsx";
 import { Card, CardContent } from "../assets/ui/card.jsx";
 import { Button } from "../assets/ui/button.jsx";
 import { Skeleton } from "../assets/ui/skeleton.jsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../assets/ui/Tabs.jsx";
 import { Scroll, History, Ban, TrendingUp, Target, AlertCircle, X, ArrowLeft } from "lucide-react";
 import { cn } from "../utils/cn.js";
+import { pickLivePriceForSymbol } from "../utils/symbolUtils.js";
 
 const STATUS_TABS = [
   { value: "executed", label: "Executed", icon: History },
@@ -41,17 +43,24 @@ const formatStatus = (status = "") => {
 const OrdersPage = () => {
   const [orders, setOrders] = useState(INITIAL_ORDERS_STATE);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState(null);
   const [cancellingOrderId, setCancellingOrderId] = useState(null);
   const [modifyingOrderId, setModifyingOrderId] = useState(null);
   const navigate = useNavigate();
+  const { getOrders, livePrices } = useDataContext();
   const defaultTab = STATUS_TABS[0].value;
 
-  const loadOrders = async () => {
-    setIsLoading(true);
+  const loadOrders = useCallback(async ({ force = false, showLoader = false } = {}) => {
+    if (showLoader) {
+      setIsLoading(true);
+    } else {
+      setIsRefreshing(true);
+    }
     setError(null);
     try {
-      const data = await api.fetchOrders();
+      const result = await getOrders(undefined, 100, force);
+      const data = result?.data;
       if (data.success) {
         const normalizedOrders = STATUS_TABS.reduce((acc, tab) => {
           const bucket = data[tab.value];
@@ -68,30 +77,49 @@ const OrdersPage = () => {
       toast.error(errorMessage);
     } finally {
       setIsLoading(false);
+      setIsRefreshing(false);
     }
-  };
+  }, [getOrders]);
 
   useEffect(() => {
-    loadOrders();
-  }, []);
+    loadOrders({ force: false, showLoader: true });
+  }, [loadOrders]);
 
   useEffect(() => {
-    const handler = () => {
-      loadOrders();
+    const tradeSuccessHandler = (event) => {
+      const optimistic = event?.detail?.optimisticOrder;
+      if (optimistic?.id || optimistic?.symbol) {
+        const normalized = {
+          id: optimistic.id || `${optimistic.symbol}-${Date.now()}`,
+          symbol: optimistic.symbol,
+          action: optimistic.transaction_type || optimistic.action || 'SELL',
+          quantity: optimistic.quantity || 0,
+          price: optimistic.price || 0,
+          status: optimistic.status || 'EXECUTED',
+          status_display: optimistic.status || 'EXECUTED',
+          date: optimistic.date || new Date().toISOString(),
+          order_type: optimistic.order_type || 'MARKET',
+          product_type: optimistic.product_type || 'CNC',
+        };
+        setOrders((prev) => ({
+          ...prev,
+          executed: [normalized, ...(prev.executed || [])].slice(0, 100),
+        }));
+      }
+      loadOrders({ force: true });
     };
 
     const resetHandler = () => {
-      setOrders(INITIAL_ORDERS_STATE);
-      loadOrders();
+      loadOrders({ force: true, showLoader: false });
     };
 
-    window.addEventListener('te:trade-success', handler);
+    window.addEventListener('te:trade-success', tradeSuccessHandler);
     window.addEventListener('te:portfolio-reset', resetHandler);
     return () => {
-      window.removeEventListener('te:trade-success', handler);
+      window.removeEventListener('te:trade-success', tradeSuccessHandler);
       window.removeEventListener('te:portfolio-reset', resetHandler);
     };
-  }, []);
+  }, [loadOrders]);
 
   const handleCancelOrder = async (orderId) => {
     setCancellingOrderId(orderId);
@@ -194,6 +222,11 @@ const OrdersPage = () => {
         </div>
 
         <div className="flex items-center gap-2">
+          {isRefreshing && (
+            <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-[11px] font-semibold text-amber-700">
+              Refreshing
+            </span>
+          )}
           <span className={cn(
             "inline-flex items-center rounded-full border px-3 py-1 text-[11px] font-semibold",
             "border-slate-200 bg-slate-50 text-slate-600"
@@ -230,6 +263,7 @@ const OrdersPage = () => {
                   error={error}
                   statusKey={value}
                   statusLabel={label}
+                  livePrices={livePrices}
                   onCancel={value === 'pending' ? handleCancelOrder : undefined}
                   onModify={value === 'pending' ? handleModifyOrder : undefined}
                   cancellingOrderId={value === 'pending' ? cancellingOrderId : undefined}
@@ -246,7 +280,7 @@ const OrdersPage = () => {
   );
 };
 
-const OrderList = ({ orders, isLoading, error, statusKey, statusLabel, onCancel, onModify, cancellingOrderId, modifyingOrderId, onOrderClick }) => {
+const OrderList = ({ orders, isLoading, error, statusKey, statusLabel, livePrices, onCancel, onModify, cancellingOrderId, modifyingOrderId, onOrderClick }) => {
   if (isLoading) {
     return (
       <div className="space-y-4">
@@ -283,6 +317,7 @@ const OrderList = ({ orders, isLoading, error, statusKey, statusLabel, onCancel,
           onModify={onModify}
           isCancelling={cancellingOrderId === order.id}
           isModifying={modifyingOrderId === order.id}
+          livePrices={livePrices}
           onClick={() => onOrderClick(order)}
         />
       ))}
@@ -290,13 +325,15 @@ const OrderList = ({ orders, isLoading, error, statusKey, statusLabel, onCancel,
   );
 };
 
-const OrderCard = ({ order, index, isPending = false, onCancel, onModify, isCancelling = false, isModifying = false, onClick }) => {
+const OrderCard = ({ order, index, isPending = false, livePrices, onCancel, onModify, isCancelling = false, isModifying = false, onClick }) => {
   const isBuy = order.action === "BUY";
   const statusKey = (order.status || '').toUpperCase();
   const statusClass = STATUS_COLOR_MAP[statusKey] || 'text-gray-600';
   const displayStatus = order.status_display
     ? formatStatus(order.status_display)
     : formatStatus(statusKey);
+  const live = pickLivePriceForSymbol(livePrices || {}, order.symbol);
+  const liveLtp = Number(live?.ltp ?? live?.price);
   const showCancel = isPending && statusKey === 'PENDING' && onCancel;
   const showModify = isPending && statusKey === 'PENDING' && onModify;
   
@@ -345,6 +382,9 @@ const OrderCard = ({ order, index, isPending = false, onCancel, onModify, isCanc
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Price</p>
               <p className="font-semibold text-slate-900">₹{order.price?.toFixed(2) || 'N/A'}</p>
+              {Number.isFinite(liveLtp) && liveLtp > 0 && (
+                <p className="text-[11px] font-semibold text-slate-500">LTP ₹{liveLtp.toFixed(2)}</p>
+              )}
             </div>
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Order Type</p>

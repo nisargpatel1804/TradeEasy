@@ -25,6 +25,7 @@ export const useDataContext = useData;
  */
 export const DataProvider = ({ children }) => {
   const { isAuthenticated } = useAuth();
+  const DATA_CACHE_TTL_MS = 20000;
 
   const [profileData, setProfileData] = useState(null);
   const [watchlistsData, setWatchlistsData] = useState(null);
@@ -34,6 +35,8 @@ export const DataProvider = ({ children }) => {
   const profileRef = useRef(profileData);
   const watchlistsRef = useRef(watchlistsData);
   const indicesRef = useRef(indicesData);
+  const dataCacheRef = useRef(new Map());
+  const inflightDataRequestsRef = useRef(new Map());
 
   const updateProfileData = useCallback((data) => {
     profileRef.current = data;
@@ -85,7 +88,75 @@ export const DataProvider = ({ children }) => {
     setIsLoadingIndices(false);
     setError(null);
     setIndicesError(null);
+    dataCacheRef.current.clear();
+    inflightDataRequestsRef.current.clear();
   }, [updateProfileData, updateWatchlistsData, updateIndicesData]);
+
+  const buildDataCacheKey = useCallback((scope, params = {}) => {
+    const normalized = Object.keys(params)
+      .sort()
+      .reduce((acc, key) => {
+        const value = params[key];
+        if (value !== undefined && value !== null && value !== "") {
+          acc[key] = value;
+        }
+        return acc;
+      }, {});
+    return `${scope}:${JSON.stringify(normalized)}`;
+  }, []);
+
+  const readDataCache = useCallback((key) => {
+    const entry = dataCacheRef.current.get(key);
+    if (!entry) {
+      return { data: null, isCold: true, isStale: true, cacheAgeMs: null };
+    }
+    const cacheAgeMs = Math.max(0, Date.now() - (entry.timestamp || 0));
+    const isStale = cacheAgeMs > DATA_CACHE_TTL_MS;
+    return { data: entry.data, isCold: false, isStale, cacheAgeMs };
+  }, [DATA_CACHE_TTL_MS]);
+
+  const writeDataCache = useCallback((key, data) => {
+    dataCacheRef.current.set(key, { data, timestamp: Date.now() });
+  }, []);
+
+  const refreshDataInBackground = useCallback(async (key, fetcher) => {
+    if (inflightDataRequestsRef.current.has(key)) {
+      return inflightDataRequestsRef.current.get(key);
+    }
+
+    const promise = (async () => {
+      try {
+        const fresh = await fetcher();
+        writeDataCache(key, fresh);
+        return fresh;
+      } finally {
+        inflightDataRequestsRef.current.delete(key);
+      }
+    })();
+
+    inflightDataRequestsRef.current.set(key, promise);
+    return promise;
+  }, [writeDataCache]);
+
+  const getCachedResource = useCallback(async ({ key, fetcher, force = false }) => {
+    const cached = readDataCache(key);
+    if (!force && !cached.isCold && !cached.isStale) {
+      return cached;
+    }
+
+    if (!force && !cached.isCold && cached.isStale) {
+      refreshDataInBackground(key, fetcher).catch(() => {});
+      return cached;
+    }
+
+    if (!force && inflightDataRequestsRef.current.has(key)) {
+      const data = await inflightDataRequestsRef.current.get(key);
+      return { data, isCold: false, isStale: false, cacheAgeMs: 0 };
+    }
+
+    const data = await refreshDataInBackground(key, fetcher);
+    return { data, isCold: cached.isCold, isStale: false, cacheAgeMs: 0 };
+  }, [readDataCache, refreshDataInBackground]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -305,9 +376,10 @@ export const DataProvider = ({ children }) => {
       const profilePromise = (async () => {
         if (window.__initialProfile) {
           // consume the cached blob and avoid a network request
-          updateProfileData(window.__initialProfile);
+          const initialProfile = window.__initialProfile;
+          updateProfileData(initialProfile);
           try { window.__initialProfile = null; } catch {}
-          return updateProfileData;
+          return initialProfile;
         }
         return await getProfile(true);
       })();
@@ -327,6 +399,53 @@ export const DataProvider = ({ children }) => {
   }, [fetchInitialData]);
 
   const setProfile = useCallback((p) => updateProfileData(p), [updateProfileData]);
+
+  const getPortfolio = useCallback(async (force = false) => {
+    if (!isAuthenticated) {
+      return { data: null, isCold: true, isStale: false, cacheAgeMs: null };
+    }
+
+    const key = buildDataCacheKey("portfolio", { include_holdings: true });
+    return getCachedResource({
+      key,
+      force,
+      fetcher: async () => {
+        const response = await api.fetchPortfolio();
+        if (!response?.success) {
+          throw new Error(response?.message || "Failed to fetch portfolio.");
+        }
+        return response;
+      },
+    });
+  }, [isAuthenticated, buildDataCacheKey, getCachedResource]);
+
+  const getOrders = useCallback(async (status, limit, force = false) => {
+    if (!isAuthenticated) {
+      return { data: null, isCold: true, isStale: false, cacheAgeMs: null };
+    }
+
+    const params = {
+      status: status ? String(status).toUpperCase() : undefined,
+      limit: Number.isFinite(Number(limit)) && Number(limit) > 0 ? Number(limit) : undefined,
+    };
+
+    const key = buildDataCacheKey("orders", params);
+    return getCachedResource({
+      key,
+      force,
+      fetcher: async () => {
+        const response = await api.fetchOrders(params);
+        if (!response?.success) {
+          throw new Error(response?.message || "Failed to fetch orders.");
+        }
+        return response;
+      },
+    });
+  }, [isAuthenticated, buildDataCacheKey, getCachedResource]);
+
+  const getExecutedOrders = useCallback(async (limit, force = false) => {
+    return getOrders("EXECUTED", limit, force);
+  }, [getOrders]);
 
   const contextValue = {
     profileData,
@@ -350,6 +469,9 @@ export const DataProvider = ({ children }) => {
     addStockToWatchlist,
     removeStockFromWatchlist,
     getInitialIndices,
+    getPortfolio,
+    getOrders,
+    getExecutedOrders,
     // Backwards compatibility conveniences
     profile: profileData,
     watchlists: watchlistsData?.watchlists ?? [],

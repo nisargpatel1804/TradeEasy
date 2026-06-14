@@ -71,6 +71,9 @@ class User(Document, UserMixin):
     reset_in_progress = BooleanField(default=False, required=True)
     reset_started_at = DateTimeField()
     last_portfolio_reset_at = DateTimeField()
+    realized_pnl = FloatField(default=0.0, required=True)
+    realized_pnl_synced_at = DateTimeField()
+    realized_pnl_sell_count = IntField(default=0, required=True)
     
     # Password reset fields
     # Stores HMAC-SHA256(token) rather than the plaintext token to prevent token leakage
@@ -83,7 +86,9 @@ class User(Document, UserMixin):
             'email',
             'client_id',
             'reset_token',
-            'reset_in_progress'
+            'reset_in_progress',
+            'realized_pnl_synced_at',
+            'realized_pnl_sell_count'
         ]
     }
 
@@ -127,7 +132,6 @@ class Transaction(Document):
     square_off_time = DateTimeField()  # Auto square-off timestamp for MIS orders
     original_price = FloatField()  # Original limit/stop price (before execution price override)
     
-    # Additional fields for backward compatibility with old database records
     is_portfolio_exit = BooleanField()
     metadata = StringField()
 
@@ -257,21 +261,26 @@ class AQScrip(Document):
     meta = {
         'collection': 'AQ_scrips',
         'indexes': [
-            {'fields': ['exchange', 'scripcode'], 'unique': True},
-            'scripcode',
-            'exchange',
-            'exchangename',
-            'instrumentname',
-            'scripshortname',
-            'scripname',
-            'scripfullname',
-            {'fields': ['exchangename', 'scripshortname']},  # helpful for prefix+exchange queries
-            {'fields': ['issuspended', 'isbanscrip']},
+            {'fields': ['exchange', 'scripcode'], 'unique': True, 'name': 'uq_exchange_scripcode'},
+            {'fields': ['scripcode'], 'name': 'idx_scripcode'},
+            {'fields': ['exchange'], 'name': 'idx_exchange'},
+            {'fields': ['exchangename'], 'name': 'idx_exchangename'},
+            {'fields': ['instrumentname'], 'name': 'idx_instrumentname'},
+            {'fields': ['scripshortname'], 'name': 'idx_scripshortname'},
+            {'fields': ['scripname'], 'name': 'idx_scripname'},
+            {'fields': ['scripfullname'], 'name': 'idx_scripfullname'},
+            {'fields': ['exchangename', 'scripshortname'], 'name': 'idx_exchangename_scripshortname'},
+            {'fields': ['optiontype', 'issuspended', 'isbanscrip'], 'name': 'idx_option_status_filters'},
+            {
+                'fields': ['exchangename', 'optiontype', 'issuspended', 'isbanscrip', 'scripshortname', 'scripcode'],
+                'name': 'idx_search_prefix_sort'
+            },
             # Text index to accelerate 'contains' searches; weights favor shortname
             {
                 'fields': ['$scripshortname', '$scripname', '$scripfullname'],
                 'default_language': 'english',
-                'weights': {'scripshortname': 10, 'scripname': 5, 'scripfullname': 2}
+                'weights': {'scripshortname': 10, 'scripname': 5, 'scripfullname': 2},
+                'name': 'idx_text_scrip_search'
             }
         ]
     }

@@ -15,18 +15,9 @@ _stock_data_cache = {}
 STOCK_DATA_CACHE_TTL = 2
 
 
-def _parse_symbol_and_exchange(symbol: str) -> tuple[str, str | None]:
+def _parse_symbol_and_exchange(symbol: str) -> str:
     clean_symbol = format_symbol(symbol)
-    if not isinstance(symbol, str):
-        return clean_symbol, None
-
-    normalized = symbol.strip().upper()
-    parts = normalized.split('.')
-    if len(parts) >= 2:
-        suffix = parts[-1]
-        if suffix in ('NSE', 'BSE'):
-            return clean_symbol, suffix
-    return clean_symbol, None
+    return clean_symbol
 
 def _get_cached_eod_data(mo_api, exchange: str, provider_available: bool = True) -> list:
     cache_key = f"eod_bulk_{exchange}"
@@ -60,7 +51,7 @@ def format_symbol(symbol: str) -> str:
     return clean_symbol
 
 
-def _iter_instrument_candidates(symbol: str, preferred_exchange: str | None = None) -> list[dict]:
+def _iter_instrument_candidates(symbol: str) -> list[dict]:
     candidates: list[dict] = []
     seen: set[tuple[str, int]] = set()
 
@@ -73,26 +64,22 @@ def _iter_instrument_candidates(symbol: str, preferred_exchange: str | None = No
 
     aq_matches = list(
         AQScrip.objects(
-            Q(scripshortname=symbol) & (Q(exchangename='NSE') | Q(exchangename='BSE'))
+            Q(scripshortname=symbol) & Q(exchangename='NSE')
         ).only('exchangename', 'scripcode')
     )
     for aq_doc in aq_matches:
         exch = str(getattr(aq_doc, 'exchangename', '')).upper()
-        if exch in ('NSE', 'BSE') and getattr(aq_doc, 'scripcode', None):
+        if exch == 'NSE' and getattr(aq_doc, 'scripcode', None):
             _add(exch, aq_doc.scripcode, f'AQScrip:{exch}')
 
     for stock_doc in Stock.objects(symbol__istartswith=symbol)[:5]:
-        if stock_doc.exchange and stock_doc.scripcode:
+        if str(stock_doc.exchange or '').upper() == 'NSE' and stock_doc.scripcode:
             _add(stock_doc.exchange, stock_doc.scripcode, f"Stock:{stock_doc.symbol}")
-
-    if preferred_exchange:
-        preferred_exchange = preferred_exchange.upper()
 
     # Deterministic ordering avoids quote-source drift across calls.
     def _sort_key(item: dict):
         exch = str(item.get('exchange', '')).upper()
-        preferred_rank = 0 if preferred_exchange and exch == preferred_exchange else 1
-        return (preferred_rank, exch, int(item.get('scripcode', 0)))
+        return (exch, int(item.get('scripcode', 0)))
 
     candidates.sort(key=_sort_key)
     return candidates
@@ -144,11 +131,11 @@ def extract_price_with_fallback(api_data: dict) -> tuple[float, str]:
     return (0.0, 'unavailable')
 
 def get_stock_data_from_api(symbol: str) -> dict | None:
-    clean_symbol, preferred_exchange = _parse_symbol_and_exchange(symbol)
+    clean_symbol = _parse_symbol_and_exchange(symbol)
     if not clean_symbol:
         return None
 
-    cache_key = f"{clean_symbol}:{preferred_exchange or 'AUTO'}"
+    cache_key = clean_symbol
 
     now = time.time()
     cached = _stock_data_cache.get(cache_key)
@@ -164,7 +151,7 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
         if not provider_available:
             logger.warning("MO API login failed; falling back where possible")
 
-        candidates = _iter_instrument_candidates(clean_symbol, preferred_exchange=preferred_exchange)
+        candidates = _iter_instrument_candidates(clean_symbol)
         if not candidates:
             return None
 

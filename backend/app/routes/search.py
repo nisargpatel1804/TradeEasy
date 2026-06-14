@@ -1,6 +1,9 @@
 import logging
+import base64
+import json
 from flask import Blueprint, request, jsonify
 from flask_login import login_required
+from pymongo.errors import OperationFailure
 from app.models import AQScrip
 from mongoengine.queryset.visitor import Q
 from app import limiter
@@ -11,6 +14,7 @@ search_bp = Blueprint("search", __name__)
 SEARCH_RESULT_LIMIT = 15
 MAX_RESULT_LIMIT = 50
 MAX_QUERY_LENGTH = 64
+SEARCH_INDEX_HINT = "idx_search_prefix_sort"
 
 def _normalize_query(value: str) -> str:
     return " ".join(str(value or "").split()).strip()
@@ -27,10 +31,34 @@ def _format_scrip_result(scrip):
     }
 
 
-def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT, page: int = 1) -> dict:
+def _encode_page_token(last_shortname: str, last_scripcode: int) -> str:
+    payload = {
+        "short": str(last_shortname or ""),
+        "code": int(last_scripcode),
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_page_token(token: str | None):
+    if not token:
+        return None
+    try:
+        data = base64.urlsafe_b64decode(token.encode("ascii"))
+        payload = json.loads(data.decode("utf-8"))
+        short = str(payload.get("short", "")).strip()
+        code = int(payload.get("code"))
+        if not short:
+            return None
+        return short, code
+    except Exception:
+        return None
+
+
+def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT, page_token: str | None = None) -> dict:
     q = _normalize_query(query)
     if len(q) < 2:
-        return {"results": [], "page": page, "limit": max_results, "has_next": False}
+        return {"results": [], "limit": max_results, "has_next": False, "next_page_token": None}
 
     if len(q) > MAX_QUERY_LENGTH:
         q = q[:MAX_QUERY_LENGTH]
@@ -42,10 +70,11 @@ def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT, page: in
     )
 
     results = []
+    cursor_rows = []
     seen = set()
 
     def _append_from_qs(qs):
-        nonlocal results, seen
+        nonlocal results, seen, cursor_rows
         for scrip in qs:
             short = (scrip.scripshortname or "").strip()
             if not short:
@@ -56,7 +85,8 @@ def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT, page: in
                 continue
             seen.add(key)
             results.append(_format_scrip_result(scrip))
-            if len(results) >= max_results:
+            cursor_rows.append((short, int(scrip.scripcode)))
+            if len(results) >= (max_results + 1):
                 break
 
     prefix_query = (
@@ -65,19 +95,59 @@ def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT, page: in
         Q(scripfullname__istartswith=q)
     )
 
-    offset = max(0, (page - 1) * max_results)
-    qs = AQScrip.objects(filters & prefix_query & Q(exchangename="NSE")).skip(offset).limit(max_results + 1)
-    _append_from_qs(qs)
+    qs = (
+        AQScrip.objects(filters & prefix_query & Q(exchangename="NSE"))
+        .only('scripshortname', 'scripname', 'scripfullname', 'exchangename', 'scripcode')
+        .order_by('scripshortname', 'scripcode')
+    )
+
+    cursor = _decode_page_token(page_token)
+    if page_token and cursor is None:
+        raise ValueError("Invalid page_token")
+
+    if cursor is not None:
+        short, code = cursor
+        qs = qs.filter(
+            __raw__={
+                '$or': [
+                    {'scripshortname': {'$gt': short}},
+                    {'scripshortname': short, 'scripcode': {'$gt': code}},
+                ]
+            }
+        )
+
+    hinted_qs = qs
+    try:
+        hinted_qs = qs.hint(SEARCH_INDEX_HINT)
+    except Exception:
+        # If hint cannot be applied during query construction, continue without it.
+        hinted_qs = qs
+
+    hinted_qs = hinted_qs.limit(max_results + 1)
+    try:
+        _append_from_qs(hinted_qs)
+    except OperationFailure as exc:
+        logger.debug("Search index hint failed for query '%s'; retrying without hint. Error: %s", query, exc)
+        _append_from_qs(qs.limit(max_results + 1))
 
     has_next = len(results) > max_results
     if has_next:
         results = results[:max_results]
+        cursor_rows = cursor_rows[:max_results]
+
+    next_page_token = None
+    if has_next and cursor_rows:
+        last_short, last_code = cursor_rows[-1]
+        next_page_token = _encode_page_token(
+            last_short,
+            last_code
+        )
 
     return {
         "results": results,
-        "page": page,
         "limit": max_results,
         "has_next": has_next,
+        "next_page_token": next_page_token,
     }
 
 
@@ -86,13 +156,8 @@ def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT, page: in
 @login_required
 def search_stocks():
     query = _normalize_query(request.args.get("q", ""))
-    raw_page = request.args.get("page", "1")
+    page_token = request.args.get("page_token", "").strip() or None
     raw_limit = request.args.get("limit", str(SEARCH_RESULT_LIMIT))
-
-    try:
-        page = max(1, int(raw_page))
-    except (TypeError, ValueError):
-        return jsonify({"success": False, "message": "Parameter 'page' must be a positive integer."}), 400
 
     try:
         limit = int(raw_limit)
@@ -110,21 +175,23 @@ def search_stocks():
         return jsonify({"success": False, "message": "Query parameter 'q' is required and must be at least 2 characters."}), 400
 
     try:
-        payload = _perform_search(query, max_results=limit, page=page)
+        payload = _perform_search(query, max_results=limit, page_token=page_token)
         results = payload.get("results", [])
 
         logger.info(
-            "Search query '%s' page=%s limit=%s results=%s has_next=%s",
+            "Search query '%s' limit=%s results=%s has_next=%s has_token=%s",
             query,
-            page,
             limit,
             len(results),
             payload.get("has_next", False),
+            bool(payload.get("next_page_token")),
         )
         return jsonify({
             "success": True,
             **payload,
         }), 200
+    except ValueError as err:
+        return jsonify({"success": False, "message": str(err)}), 400
     except Exception:
         logger.exception("Error during stock search for query '%s'", query)
         return jsonify({"success": False, "message": "An internal server error occurred. Please try again later."}), 500

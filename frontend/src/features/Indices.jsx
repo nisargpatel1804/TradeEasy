@@ -5,7 +5,7 @@ import { useSocket } from '../context/SocketContext.jsx';
 import priceUpdateService from '../services/priceUpdateService.js';
 import { Card, CardContent, CardHeader, CardTitle } from '../assets/ui/card.jsx';
 import { Skeleton } from '../assets/ui/skeleton.jsx';
-import { AlertTriangle, RefreshCw, Search as SearchIcon, ArrowLeft } from 'lucide-react';
+import { AlertTriangle, Search as SearchIcon, ArrowLeft } from 'lucide-react';
 import { Button } from '../assets/ui/button.jsx';
 import { Input } from '../assets/ui/input.jsx';
 import { useNavigate } from 'react-router-dom';
@@ -34,7 +34,6 @@ const Indices = () => {
   const navigate = useNavigate();
   const [indices, setIndices] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
-  const [isRefreshing, setIsRefreshing] = useState(false);
 
   useEffect(() => {
     if (initialIndices && initialIndices.length > 0) {
@@ -79,18 +78,6 @@ const Indices = () => {
     return () => unsubscribe();
   }, []);
 
-  const handleRefresh = async () => {
-    setIsRefreshing(true);
-    try {
-      const latest = await getInitialIndices(true);
-      if (Array.isArray(latest) && latest.length > 0) {
-        setIndices(latest);
-      }
-    } finally {
-      setIsRefreshing(false);
-    }
-  };
-
   const filteredIndices = useMemo(() => {
     let data = Array.isArray(indices)
       ? indices.filter((index) => Number.isFinite(Number(index?.price)) && Number(index?.price) > 0)
@@ -122,9 +109,6 @@ const Indices = () => {
           <AlertTriangle className="mx-auto h-12 w-12 text-red-500" />
           <h3 className="mt-4 text-lg font-semibold text-red-700">Could not load market data</h3>
           <p className="text-sm text-red-600">{indicesError}</p>
-          <Button className="mt-6" onClick={() => handleRefresh()} isLoading={isRefreshing}>
-            Retry
-          </Button>
         </div>
       );
     }
@@ -204,16 +188,6 @@ const Indices = () => {
             className="rounded-2xl border-slate-200 bg-white pl-10"
           />
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="rounded-full"
-          onClick={handleRefresh}
-          isLoading={isRefreshing}
-        >
-          <RefreshCw className="h-4 w-4" /> Refresh
-        </Button>
       </div>
 
       {renderState()}

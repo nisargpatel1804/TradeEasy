@@ -1,7 +1,8 @@
 import logging
-from datetime import timezone
-from flask import Blueprint, jsonify
+from datetime import datetime, timezone
+from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
+from mongoengine.queryset.visitor import Q
 from app.models import Transaction
 
 # --- Configuration ---
@@ -9,6 +10,8 @@ logger = logging.getLogger(__name__)
 orders_bp = Blueprint('orders', __name__)
 
 STATUS_KEYS = ("EXECUTED", "PENDING", "CANCELLED")
+MAX_ORDERS_LIMIT = 1000
+DEFAULT_ORDERS_LIMIT = 100
 
 
 def _iso_utc(dt) -> str | None:
@@ -17,6 +20,27 @@ def _iso_utc(dt) -> str | None:
     if getattr(dt, 'tzinfo', None) is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+
+
+def _parse_since(value: str):
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    # Accept unix seconds or milliseconds.
+    if raw.isdigit():
+        as_int = int(raw)
+        if as_int > 10_000_000_000:
+            as_int = as_int / 1000
+        return datetime.fromtimestamp(as_int, tz=timezone.utc)
+
+    normalized = raw.replace('Z', '+00:00')
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 # --- Helper Function ---
 
@@ -58,11 +82,60 @@ def get_orders():
     """
     Fetches the complete order history for the authenticated user, separated into
     executed, pending, and cancelled orders.
+
+    Optional query params:
+      - status: one of EXECUTED|PENDING|CANCELLED (case-insensitive)
+            - limit: positive integer
+            - since: ISO timestamp or unix epoch (seconds/milliseconds)
     """
     try:
-        transactions = Transaction.objects(user=current_user).order_by('-transaction_date')
+        status_filter = str(request.args.get('status', '') or '').strip().upper()
+        raw_limit = str(request.args.get('limit', '') or '').strip()
+        raw_since = str(request.args.get('since', '') or '').strip()
+        limit = DEFAULT_ORDERS_LIMIT
+        since_dt = None
+
+        if raw_limit:
+            try:
+                parsed = int(raw_limit)
+                if parsed > 0:
+                    limit = min(parsed, MAX_ORDERS_LIMIT)
+            except (TypeError, ValueError):
+                limit = DEFAULT_ORDERS_LIMIT
+
+        if raw_since:
+            try:
+                since_dt = _parse_since(raw_since)
+            except Exception:
+                return jsonify({"success": False, "message": "Invalid 'since' timestamp."}), 400
 
         grouped_orders = {key.lower(): [] for key in STATUS_KEYS}
+        base_qs = Transaction.objects(user=current_user)
+        if since_dt:
+            base_qs = base_qs.filter(
+                Q(transaction_date__gte=since_dt) | Q(execution_date__gte=since_dt)
+            )
+
+        if status_filter and status_filter in STATUS_KEYS:
+            qs = base_qs.filter(status=status_filter).order_by('-transaction_date')
+            if limit:
+                qs = qs[:limit]
+
+            grouped_orders[status_filter.lower()] = [_format_order(order) for order in qs]
+            response_payload = {
+                "success": True,
+                **grouped_orders,
+                "meta": {
+                    "status": status_filter,
+                    "limit": limit,
+                    "since": _iso_utc(since_dt),
+                },
+            }
+            return jsonify(response_payload), 200
+
+        transactions = base_qs.order_by('-transaction_date')
+        if limit:
+            transactions = transactions[:limit]
 
         for order in transactions:
             formatted = _format_order(order)
@@ -72,7 +145,15 @@ def get_orders():
                 status_key = "CANCELLED"
             grouped_orders[status_key.lower()].append(formatted)
 
-        response_payload = {"success": True, **grouped_orders}
+        response_payload = {
+            "success": True,
+            **grouped_orders,
+            "meta": {
+                "status": None,
+                "limit": limit,
+                "since": _iso_utc(since_dt),
+            },
+        }
 
         return jsonify(response_payload), 200
 

@@ -1,8 +1,8 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
 import { toast } from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
-import * as api from "../services/api.js";
+import { useDataContext } from "../context/DataContext.jsx";
 import priceUpdateService from "../services/priceUpdateService.js";
 import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx";
 import { Skeleton } from "../assets/ui/skeleton.jsx";
@@ -10,32 +10,46 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { TrendingUp, TrendingDown, Receipt, ArrowLeft } from "lucide-react";
 import { cn } from "../utils/cn.js";
 import { Button } from "../assets/ui/button.jsx";
-import { mergePriceMapWithVariants, pickLivePriceForSymbol, seedPriceMapFromHoldings } from "../utils/symbolUtils.js";
+import { seedPriceMapFromHoldings } from "../utils/symbolUtils.js";
+import usePortfolioSummary from "../hooks/usePortfolioSummary.js";
 
 const PerformancePage = ({ isEmbedded = false }) => {
   const navigate = useNavigate();
   const [portfolioData, setPortfolioData] = useState(null);
   const [orders, setOrders] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  const [livePrices, setLivePrices] = useState({});
+  const intervalRef = useRef(null);
+  const lastTradeRefreshRef = useRef(0);
+  const queuedTradeRefreshRef = useRef(null);
+  const { getPortfolio, getExecutedOrders, livePrices } = useDataContext();
 
-  const loadData = useCallback(async ({ showLoader = false } = {}) => {
+  const loadData = useCallback(async ({ showLoader = false, force = false } = {}) => {
     try {
-      if (showLoader) setIsLoading(true);
+      if (showLoader) {
+        setIsLoading(true);
+      } else {
+        setIsRefreshing(true);
+      }
       setError(null);
 
       const [pResp, oResp] = await Promise.allSettled([
-        api.fetchPortfolio(),
-        api.fetchOrders()
+        getPortfolio(force),
+        getExecutedOrders(200, force),
       ]);
 
       const errors = [];
 
       if (pResp.status === 'fulfilled') {
-        const val = pResp.value;
+        const val = pResp.value?.data;
         if (val?.success) {
           setPortfolioData(val);
+          const seeded = seedPriceMapFromHoldings([
+            ...(val.cnc_holdings || []),
+            ...(val.mis_holdings || []),
+          ]);
+          priceUpdateService.seedPrices(seeded);
         } else {
           errors.push(val?.message || 'Portfolio fetch failed');
         }
@@ -44,7 +58,7 @@ const PerformancePage = ({ isEmbedded = false }) => {
       }
 
       if (oResp.status === 'fulfilled') {
-        const val = oResp.value;
+        const val = oResp.value?.data;
         if (val?.success) {
           setOrders(val.executed || []);
         } else {
@@ -63,54 +77,55 @@ const PerformancePage = ({ isEmbedded = false }) => {
       setError(err.message);
       toast.error(`Error: ${err.message}`);
     } finally {
-      if (showLoader) setIsLoading(false);
+      setIsLoading(false);
+      setIsRefreshing(false);
     }
-  }, []);
+  }, [getExecutedOrders, getPortfolio]);
 
   useEffect(() => {
-    loadData({ showLoader: true });
-    const interval = setInterval(() => loadData(), 30000);
-    return () => clearInterval(interval);
+    loadData({ showLoader: true, force: false });
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+    }
+    intervalRef.current = setInterval(() => loadData({ force: false }), 30000);
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+      }
+      if (queuedTradeRefreshRef.current) {
+        clearTimeout(queuedTradeRefreshRef.current);
+      }
+    };
   }, [loadData]);
 
   useEffect(() => {
     const onPortfolioReset = () => {
-      setPortfolioData(null);
-      setOrders([]);
-      setLivePrices({});
-      loadData({ showLoader: true });
+      loadData({ showLoader: false, force: true });
+    };
+
+    const onTradeSuccess = () => {
+      const now = Date.now();
+      if (now - lastTradeRefreshRef.current > 1500) {
+        lastTradeRefreshRef.current = now;
+        loadData({ force: true });
+        return;
+      }
+      if (!queuedTradeRefreshRef.current) {
+        queuedTradeRefreshRef.current = window.setTimeout(() => {
+          queuedTradeRefreshRef.current = null;
+          lastTradeRefreshRef.current = Date.now();
+          loadData({ force: true });
+        }, 1200);
+      }
     };
 
     window.addEventListener('te:portfolio-reset', onPortfolioReset);
-    return () => window.removeEventListener('te:portfolio-reset', onPortfolioReset);
+    window.addEventListener('te:trade-success', onTradeSuccess);
+    return () => {
+      window.removeEventListener('te:portfolio-reset', onPortfolioReset);
+      window.removeEventListener('te:trade-success', onTradeSuccess);
+    };
   }, [loadData]);
-
-  useEffect(() => {
-    const holdings = Array.isArray(portfolioData?.holdings) ? portfolioData.holdings : [];
-    setLivePrices(seedPriceMapFromHoldings(holdings));
-  }, [portfolioData]);
-
-  useEffect(() => {
-    const unsubscribe = priceUpdateService.subscribe((update) => {
-      setLivePrices((currentPrices) => {
-        if (update?.type === 'reset') {
-          return {};
-        }
-
-        if (update?.type === 'snapshot' && update?.allPrices) {
-          return mergePriceMapWithVariants(currentPrices, update.allPrices);
-        }
-
-        if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
-          return mergePriceMapWithVariants(currentPrices, update.changedPrices);
-        }
-
-        return currentPrices;
-      });
-    });
-
-    return () => unsubscribe();
-  }, []);
 
   const formatCurrency = (value) => {
     if (typeof value !== 'number') return '₹0.00';
@@ -123,53 +138,24 @@ const PerformancePage = ({ isEmbedded = false }) => {
     return 'text-gray-700 dark:text-gray-300';
   };
 
-  // Calculate total stats (prefer live prices so totals update in real-time)
+  // Single source of truth: rely on backend /portfolio summary contract.
   const totalCharges = 0; // As per requirements, charges are 0 for now
-  const realizedPnL = Number(portfolioData?.summary?.realized_pnl) || 0;
+  const canonicalSummary = usePortfolioSummary({
+    baseSummary: portfolioData?.summary,
+    holdings: [
+      ...(portfolioData?.cnc_holdings || []),
+      ...(portfolioData?.mis_holdings || []),
+    ],
+    shortPositions: portfolioData?.short_positions || [],
+    livePriceMap: livePrices,
+    marketStatus: portfolioData?.summary?.market_session
+      ? { session: portfolioData.summary.market_session }
+      : null,
+  });
 
-  const unrealizedPnL = useMemo(() => {
-    const holdings = Array.isArray(portfolioData?.holdings) ? portfolioData.holdings : [];
-
-    const invested = holdings.reduce((sum, holding) => {
-      const qty = Number(holding?.quantity) || 0;
-      const investmentValue = Number(holding?.investment_value);
-      if (Number.isFinite(investmentValue)) {
-        return sum + investmentValue;
-      }
-      const avg = Number(holding?.average_price) || 0;
-      return sum + (avg * qty);
-    }, 0);
-
-    const current = holdings.reduce((sum, holding) => {
-      const qty = Number(holding?.quantity) || 0;
-      if (!holding?.symbol || qty === 0) {
-        return sum;
-      }
-
-      const live = pickLivePriceForSymbol(livePrices, holding.symbol, holding.exchange);
-      const ltp = Number(live?.ltp ?? live?.price ?? holding?.ltp) || 0;
-      return sum + (ltp * qty);
-    }, 0);
-
-    // Keep any API-only unrealized component (e.g., short positions) as a stable baseline.
-    const summaryHoldingsValue = Number(portfolioData?.summary?.holdings_value);
-    const summaryInvestment = Number(portfolioData?.summary?.total_investment);
-    const summaryUnrealized = Number(portfolioData?.summary?.unrealized_pnl);
-
-    const apiHoldingsUnrealized =
-      Number.isFinite(summaryHoldingsValue) && Number.isFinite(summaryInvestment)
-        ? (summaryHoldingsValue - summaryInvestment)
-        : 0;
-
-    const apiNonHoldingUnrealized =
-      Number.isFinite(summaryUnrealized)
-        ? (summaryUnrealized - apiHoldingsUnrealized)
-        : 0;
-
-    return (current - invested) + apiNonHoldingUnrealized;
-  }, [portfolioData, livePrices]);
-
-  const totalPnL = useMemo(() => realizedPnL + unrealizedPnL, [realizedPnL, unrealizedPnL]);
+  const realizedPnL = Number(canonicalSummary?.realizedPnl) || 0;
+  const unrealizedPnL = Number(canonicalSummary?.unrealizedPnl) || 0;
+  const totalPnL = Number(canonicalSummary?.totalPnl) || 0;
 
   const pageShellClasses = cn(
     "mx-auto max-w-7xl space-y-3 pb-4 pt-2",
@@ -228,6 +214,11 @@ const PerformancePage = ({ isEmbedded = false }) => {
                 <p className="text-xs font-medium text-slate-500">Realized, unrealized, and completed trades in one view.</p>
               </div>
             </div>
+            {isRefreshing && (
+              <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-[11px] font-semibold text-amber-700">
+                Refreshing
+              </span>
+            )}
           </div>
         )}
 

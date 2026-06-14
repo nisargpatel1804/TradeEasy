@@ -18,8 +18,6 @@ watchlist_bp = Blueprint('watchlist', __name__)
 # --- Constants ---
 MAX_WATCHLISTS_PER_USER = 10
 MAX_STOCKS_PER_WATCHLIST = 50
-# Allowed exchange codes (whitelist used for validation)
-ALLOWED_EXCHANGES = {"NSE","BSE","NSEFO","BSEFO","MCX","NSECD"}
 
 # --- Helper Functions ---
 
@@ -181,11 +179,10 @@ def add_stock_to_watchlist(watchlist_name):
         return jsonify({"success": False, "message": f"Watchlist limit of {MAX_STOCKS_PER_WATCHLIST} stocks reached."}), 409
 
     try:
-        exchange = (data.get("exchange") or "").strip().upper()
         scripcode = data.get("scripcode")
 
-        if not exchange or scripcode in (None, ""):
-            return jsonify({"success": False, "message": "Exchange and scripcode are required.", "error_code": "MISSING_INSTRUMENT_FIELDS"}), 400
+        if scripcode in (None, ""):
+            return jsonify({"success": False, "message": "Scripcode is required.", "error_code": "MISSING_INSTRUMENT_FIELDS"}), 400
 
         try:
             scripcode = int(scripcode)
@@ -195,8 +192,7 @@ def add_stock_to_watchlist(watchlist_name):
         if scripcode <= 0 or scripcode > 99999999:
             return jsonify({"success": False, "message": "Invalid scripcode range.", "error_code": "INVALID_SCRIPCODE"}), 400
 
-        if exchange not in ALLOWED_EXCHANGES:
-            return jsonify({"success": False, "message": "Invalid exchange.", "error_code": "INVALID_EXCHANGE"}), 400
+        exchange = 'NSE'
 
         clean_symbol = format_symbol(symbol_input)
         resolved_name = (data.get("name") or "").strip() or clean_symbol
@@ -205,9 +201,9 @@ def add_stock_to_watchlist(watchlist_name):
         stock = Stock.objects(scripcode=int(scripcode), exchange=exchange).first()
         if not stock:
             stock = Stock(
-                symbol=f"{clean_symbol}.{exchange}",
+                symbol=f"{clean_symbol}.NSE",
                 name=resolved_name,
-                exchange=exchange,
+                exchange='NSE',
                 scripcode=int(scripcode)
             )
             try:

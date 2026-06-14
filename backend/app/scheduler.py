@@ -80,9 +80,8 @@ class TaskScheduler:
                 logger.error("Failed to authenticate with MO API for daily update.")
                 return
             
-            # Focus on equity exchanges (NSE and BSE) for daily updates
-            # F&O and commodities can be updated less frequently if needed
-            exchanges = ["NSE", "BSE"]
+            # NSE-only universe for simplified symbol handling.
+            exchanges = ["NSE"]
             stats = {"total_processed": 0, "upserted": 0, "updated": 0}
 
             with ThreadPoolExecutor(max_workers=min(4, len(exchanges))) as executor:

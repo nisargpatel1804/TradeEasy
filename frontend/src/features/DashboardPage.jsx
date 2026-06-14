@@ -1,5 +1,5 @@
-import { useEffect, useState, useMemo, useCallback } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "../assets/ui/card.jsx";
 import { Button } from "../assets/ui/button.jsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../assets/ui/Tabs.jsx";
@@ -14,7 +14,7 @@ import MarketCache from "../utils/marketCache.js";
 import TradeForm from "./TradeForm.jsx";
 import PortfolioPage from "./PortfolioPage.jsx";
 import PerformancePage from "./PerformancePage.jsx";
-import { mergePriceMapWithVariants, seedPriceMapFromHoldings } from "../utils/symbolUtils.js";
+import { seedPriceMapFromHoldings } from "../utils/symbolUtils.js";
 import usePortfolioSummary from "../hooks/usePortfolioSummary.js";
 
 const ORDER_TABS = [
@@ -40,7 +40,7 @@ const HOLDINGS_PAGE_SIZE = 5;
 const DASHBOARD_CACHE_VERSION = 1;
 const DASHBOARD_PORTFOLIO_CACHE_KEY = `te:dashboard:portfolio:v${DASHBOARD_CACHE_VERSION}`;
 const DASHBOARD_ORDERS_CACHE_KEY = `te:dashboard:orders:v${DASHBOARD_CACHE_VERSION}`;
-const EMPTY_SHORT_POSITIONS = [];
+const DASHBOARD_TABS = ["home", "portfolio", "performance", "orders"];
 
 const getIstDateKey = () => {
     const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -75,7 +75,9 @@ const getOrderBucketFromStatus = (statusValue) => {
 };
 
 const DashboardPage = () => {
-    const { profileData } = useDataContext();
+    const { profileData, livePrices } = useDataContext();
+    const navigate = useNavigate();
+    const location = useLocation();
 
     const [portfolioSummary, setPortfolioSummary] = useState(null);
     const [hasPortfolioSnapshot, setHasPortfolioSnapshot] = useState(false);
@@ -86,6 +88,8 @@ const DashboardPage = () => {
     const [portfolioError, setPortfolioError] = useState(null);
     const [tradeContext, setTradeContext] = useState(null);
     const [orderRange, setOrderRange] = useState(ORDER_RANGE_FILTERS[0].key);
+    const [activeTab, setActiveTab] = useState("home");
+    const tabHistoryRef = useRef([]);
     
     // Market Mover State
     const [niftyStocks, setNiftyStocks] = useState([]);
@@ -94,9 +98,45 @@ const DashboardPage = () => {
     const [moversError, setMoversError] = useState(null);
     const [isTradeSubmitting, setIsTradeSubmitting] = useState(false);
     const [tradeCloseRequested, setTradeCloseRequested] = useState(false);
-    const [livePriceMap, setLivePriceMap] = useState({});
-    const [lastPriceUpdate, setLastPriceUpdate] = useState(null);
     const [marketStatus, setMarketStatus] = useState(null);
+
+    const resolveTabFromQuery = useCallback(() => {
+        const params = new URLSearchParams(location.search || "");
+        const raw = String(params.get("tab") || "").toLowerCase();
+        return DASHBOARD_TABS.includes(raw) ? raw : "home";
+    }, [location.search]);
+
+    useEffect(() => {
+        const nextTab = resolveTabFromQuery();
+        setActiveTab(nextTab);
+        tabHistoryRef.current = [];
+    }, [resolveTabFromQuery]);
+
+    const handleTabChange = useCallback((nextTab) => {
+        setActiveTab((currentTab) => {
+            if (currentTab !== nextTab) {
+                tabHistoryRef.current = [...tabHistoryRef.current, currentTab].slice(-10);
+            }
+            return nextTab;
+        });
+    }, []);
+
+    const handleDashboardBack = useCallback(() => {
+        const history = tabHistoryRef.current;
+        if (history.length > 0) {
+            const previousTab = history[history.length - 1];
+            tabHistoryRef.current = history.slice(0, -1);
+            setActiveTab(previousTab);
+            return;
+        }
+
+        if (activeTab !== "home") {
+            setActiveTab("home");
+            return;
+        }
+
+        navigate(-1);
+    }, [activeTab, navigate]);
 
     // --- Data Fetching ---
 
@@ -110,7 +150,7 @@ const DashboardPage = () => {
                 const nextHoldings = response?.holdings || [];
                 setHoldings(nextHoldings);
                 const seeded = seedPriceMapFromHoldings(nextHoldings);
-                setLivePriceMap((prev) => mergePriceMapWithVariants(prev, seeded));
+                priceUpdateService.seedPrices(seeded);
                 setHasPortfolioSnapshot(true);
             } else {
                 throw new Error(response?.message || "Failed to fetch portfolio");
@@ -245,7 +285,7 @@ const DashboardPage = () => {
             const cachedHoldings = Array.isArray(portfolioCache.holdings) ? portfolioCache.holdings : [];
             setHoldings(cachedHoldings);
             const seeded = seedPriceMapFromHoldings(cachedHoldings);
-            setLivePriceMap((prev) => mergePriceMapWithVariants(prev, seeded));
+            priceUpdateService.seedPrices(seeded);
             setHasPortfolioSnapshot(true);
         }
 
@@ -303,7 +343,7 @@ const DashboardPage = () => {
         }, 30000);
         
         return () => clearInterval(interval);
-    }, [fetchPortfolio, fetchOrders, fetchNiftyMarket, fetchMarketStatus, marketStatus]);
+    }, [fetchPortfolio, fetchOrders, fetchNiftyMarket, marketStatus]);
 
     useEffect(() => {
         fetchMarketStatus();
@@ -311,36 +351,16 @@ const DashboardPage = () => {
         return () => clearInterval(id);
     }, [fetchMarketStatus]);
 
-    // Real-time Market Updates
+    // Recompute movers on every live tick from the shared DataContext feed.
     useEffect(() => {
-        const unsubscribe = priceUpdateService.subscribe((update) => {
-            setLastPriceUpdate(update || null);
-            setLivePriceMap((prev) => {
-                let next = prev;
-
-                if (update?.type === 'snapshot' && update?.allPrices && Object.keys(update.allPrices).length > 0) {
-                    next = mergePriceMapWithVariants(prev, update.allPrices);
-                } else if (update?.allPrices && Object.keys(update.allPrices).length > 0) {
-                    next = mergePriceMapWithVariants(prev, update.allPrices);
-                } else if (update?.changedPrices && Object.keys(update.changedPrices).length > 0) {
-                    next = mergePriceMapWithVariants(prev, update.changedPrices);
-                }
-
-                setNiftyMovers(computeMovers(niftyStocks, next));
-                return next;
-            });
-        });
-
-        return () => unsubscribe();
-    }, [computeMovers, niftyStocks]);
+        setNiftyMovers(computeMovers(niftyStocks, livePrices || {}));
+    }, [computeMovers, livePrices, niftyStocks]);
 
     const canonicalSummary = usePortfolioSummary({
         baseSummary: portfolioSummary,
         holdings,
-        shortPositions: EMPTY_SHORT_POSITIONS,
-        livePriceMap,
+        livePriceMap: livePrices,
         marketStatus,
-        lastPriceUpdate,
     });
 
     const openTradeModal = (stock, action) => {
@@ -377,11 +397,6 @@ const DashboardPage = () => {
                 [bucket]: [normalizedOrder, ...(prev?.[bucket] || []).filter((item) => String(item?.id || item?.order_id) !== String(optimisticId))],
             }));
             setHasOrdersSnapshot(true);
-
-            const isExecuted = String(optimisticOrder.status || '').toUpperCase() === 'EXECUTED';
-            if (!isExecuted) {
-                return;
-            }
         };
 
         const handler = (event) => {
@@ -419,18 +434,16 @@ const DashboardPage = () => {
 
     return (
         <div className="mx-auto max-w-7xl space-y-1 pb-1 pt-0">
-            <Tabs defaultValue="home" className="gap-1">
+            <Tabs value={activeTab} onValueChange={handleTabChange} className="gap-1">
                 <div className="flex items-center gap-1.5 overflow-x-auto py-0.5">
                     <Button
-                        asChild
                         variant="outline"
                         size="icon"
                         className="h-9 w-9 shrink-0 rounded-full border-slate-200"
                         aria-label="Back to dashboard"
+                        onClick={handleDashboardBack}
                     >
-                        <Link to="/dashboard">
-                            <ArrowLeft className="h-4 w-4" />
-                        </Link>
+                        <ArrowLeft className="h-4 w-4" />
                     </Button>
                     <TabsList className="flex-1 justify-start gap-2 bg-transparent p-0">
                         <TabsTrigger 

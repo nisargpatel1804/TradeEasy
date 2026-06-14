@@ -176,34 +176,33 @@ export const getPortfolio = () => withRetry(
   () => apiClient.get('/portfolio', { timeout: 45000 }).then((res) => res.data),
   2
 );
-export const fetchPortfolio = getPortfolio; // Alias used in DashboardPage
+export const fetchPortfolio = getPortfolio;
 
 // --- Orders ---
-export const getOrders = () => fetchData('/orders');
-export const fetchOrders = getOrders; // Alias used in DashboardPage
+export const getOrders = (params = {}) => fetchData('/orders', { params });
+export const fetchOrders = getOrders;
 export const getOrderDetail = (orderId) => fetchData(`/orders/${orderId}`);
-export const fetchOrderDetail = getOrderDetail; // Alias
+export const fetchOrderDetail = getOrderDetail;
 
 // --- Market Data ---
 
-// Fetches major indices (Nifty 50, Sensex, etc.) - Matches markets.py /indices
+// Fetches major indices from markets.py /indices.
 export const getMarketIndices = () => fetchData('/indices', { timeout: 60000 });
-export const fetchMarketIndices = getMarketIndices; // Alias
+export const fetchMarketIndices = getMarketIndices;
 
 // Fetches static Nifty 50 movers from direct MO LTP data.
 // Kept at 30 s so cold refreshes can complete when the backend has to refetch all 50 quotes.
 export const fetchMarket = () => fetchData('/market', { timeout: 30000 });
-export const getMarket = fetchMarket; // Alias
+export const getMarket = fetchMarket;
 
-// Backwards-compatible alias for older endpoints
 export const fetchMarketStocks = (_marketName) => fetchMarket();
 
 // --- Stock Details ---
 
 export const getStockDetails = (symbol) => fetchData(`/stock/${encodeURIComponent(symbol)}`);
-export const getStockData = getStockDetails; // Alias
-export const fetchStockDetails = getStockDetails; // Alias used in TradeForm/StockPage
-export const fetchStockData = getStockDetails; // Alias
+export const getStockData = getStockDetails;
+export const fetchStockDetails = getStockDetails;
+export const fetchStockData = getStockDetails;
 
 export const batchGetStockData = (symbols) => fetchData('/stocks/batch', { params: { symbols: symbols.join(',') } });
 
@@ -212,13 +211,15 @@ export const searchStocks = async (query, options = {}) => {
     const q = normalizeSearchQuery(query);
     const limit = options?.limit || SEARCH_DEFAULT_LIMIT;
     if (!q || q.length < SEARCH_MIN_QUERY_LENGTH) {
-    return { success: true, results: [], page: 1, limit, has_next: false };
+    return { success: true, results: [], limit, has_next: false, next_page_token: null };
     }
     const params = {
       q,
-      page: options?.page || 1,
       limit,
     };
+    if (options?.pageToken) {
+      params.page_token = options.pageToken;
+    }
 
   let response;
   try {
@@ -242,17 +243,17 @@ export const searchStocks = async (query, options = {}) => {
       return {
         success: true,
         results: data,
-        page: options?.page || 1,
         limit,
         has_next: false,
+        next_page_token: null,
       };
     }
     return {
       success: data?.success !== false,
       results: Array.isArray(data?.results) ? data.results : [],
-      page: data?.page || options?.page || 1,
       limit: data?.limit || limit,
       has_next: Boolean(data?.has_next),
+      next_page_token: data?.next_page_token || null,
     };
 };
 

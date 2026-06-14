@@ -25,9 +25,9 @@ const TICKER_CONFIG = [
     symbol: 'NSE:26000',
   },
   {
-    key: 'sensex',
-    label: 'Sensex',
-    symbol: 'BSE:999901',
+    key: 'nifty500',
+    label: 'Nifty 500',
+    symbol: 'NSE:26003',
   },
   {
     key: 'india_vix',
@@ -35,6 +35,26 @@ const TICKER_CONFIG = [
     symbol: 'NSE:26051',
   },
 ];
+
+const TradeEasyLogo = () => (
+  <svg viewBox="0 0 144 32" aria-hidden="true" className="h-8 w-auto">
+    <defs>
+      <linearGradient id="teLogoGrad" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stopColor="#f59e0b" />
+        <stop offset="100%" stopColor="#f97316" />
+      </linearGradient>
+    </defs>
+    <g>
+      <rect x="1" y="1" width="30" height="30" rx="10" fill="url(#teLogoGrad)" />
+      <path d="M9 18h14M9 12h10M9 24h8" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M17 7l7 4v8l-7 4" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+    </g>
+    <g fill="#0f172a">
+      <text x="40" y="15" fontSize="11" fontWeight="700" fontFamily="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif">TradeEasy</text>
+      <text x="40" y="26" fontSize="8" fontWeight="600" letterSpacing="1" fill="#f59e0b" fontFamily="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif">INVEST SMARTER</text>
+    </g>
+  </svg>
+);
 
 const findIndexMatch = (priceMap = {}, config) => {
   if (!priceMap || !config) {
@@ -253,7 +273,18 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
         setProfile(response.profile);
       }
 
-      priceUpdateService.clearPrices();
+      setIsWalletDialogOpen(false);
+
+      // Yield one frame so loading/close UI can paint before broad reset fan-out.
+      await new Promise((resolve) => {
+        if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+          window.requestAnimationFrame(() => resolve());
+          return;
+        }
+        setTimeout(resolve, 0);
+      });
+
+      priceUpdateService.clearPrices({ defer: true });
       window.dispatchEvent(new CustomEvent('clear-local-search-caches'));
       window.dispatchEvent(new CustomEvent('te:portfolio-reset', {
         detail: {
@@ -262,8 +293,6 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
           at: Date.now(),
         },
       }));
-
-      setIsWalletDialogOpen(false);
     } catch (error) {
       if (error.name === 'CanceledError' || error.name === 'AbortError') {
         // quietly ignore if caller aborted
@@ -315,14 +344,8 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
           >
             <Menu className="h-5 w-5" />
           </Button>
-          <Link to="/dashboard" className="flex items-center gap-3 rounded-full bg-amber-50 px-4 py-2 text-amber-800">
-            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-white text-base font-bold text-amber-700 shadow-inner">
-              TE
-            </span>
-            <div>
-              <p className="text-sm font-semibold leading-tight">TradeEasy</p>
-              <div className="text-[10px] font-semibold uppercase tracking-widest text-amber-500">Invest Smarter</div>
-            </div>
+          <Link to="/dashboard" className="rounded-2xl border border-amber-200 bg-amber-50/70 px-3 py-1.5">
+            <TradeEasyLogo />
           </Link>
         </div>
 
@@ -356,8 +379,8 @@ const Navbar = React.forwardRef(({ onToggleSidebar }, ref) => {
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="relative h-9 w-9 rounded-full border border-slate-200" aria-label="Open account menu" aria-haspopup="menu">
-                <Avatar className="h-9 w-9">
+              <Button variant="ghost" className="relative h-9 w-9 rounded-full p-0" aria-label="Open account menu" aria-haspopup="menu">
+                <Avatar className="h-9 w-9 border-0 shadow-none">
                   <AvatarFallback>{profileInitial}</AvatarFallback>
                 </Avatar>
               </Button>
