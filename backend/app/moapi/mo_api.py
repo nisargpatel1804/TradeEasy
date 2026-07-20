@@ -86,7 +86,6 @@ class MarketHoursManager:
         }
 
     def is_market_open(self) -> bool:
-        """Returns True when the Indian equity markets are trading."""
         now_ist = datetime.now(self.ist_tz)
         if now_ist.weekday() >= 5 or now_ist.date().isoformat() in self.holidays:
             return False
@@ -100,7 +99,6 @@ class MotilalOswalAPI:
     WEBSOCKET_URL = "wss://ws1feed.motilaloswal.com/jwebsocket/jwebsocket"
     WEBSOCKET_VERSION = "VER 2.0"
 
-    # All endpoints updated to versions documented in v7 OpenAPI spec
     REST_ENDPOINTS = {
         "login": "/login/v7/authdirectapi",
         "logout": "/login/v5/logout",
@@ -138,10 +136,13 @@ class MotilalOswalAPI:
 
         self.user_id = self._require_env("USER_ID")
         self.password = self._require_env("PASSWORD")
-        self.api_key = self._require_env("API_KEY")          # App API key (e.g., KJTRuymVfP1ZBQq0)
-        self.api_secret_key = os.getenv("API_SECRET_KEY")    # Secret key from portal
+        self.api_key = self._require_env("API_KEY")
+        self.api_secret_key = os.getenv("API_SECRET_KEY")
         self.two_fa = self._require_env("TWO_FA")
         self.totp_secret = os.getenv("TOTP_SECRET")
+
+        if self.api_secret_key and not self._is_valid_secret_key(self.api_secret_key):
+            logger.warning("API_SECRET_KEY format looks suspicious (expected UUID or 32-char string). Login may fail.")
 
         if not self.api_secret_key:
             logger.warning("API_SECRET_KEY not set. v7 login will fail.")
@@ -165,7 +166,10 @@ class MotilalOswalAPI:
         self.last_login_at: Optional[datetime] = None
         self.auth_ttl_seconds = int(os.getenv("MO_AUTH_TTL_SECONDS", "3300"))
         self._auth_lock = threading.Lock()
-        self._login_in_progress = threading.Event()   # Prevent concurrent login attempts
+        self._access_token_lock = threading.Lock()
+        self._login_in_progress = threading.Event()
+        self._static_price_cache: Dict[str, Dict[str, Any]] = {}  # Fallback cache
+        self._static_cache_lock = threading.Lock()
 
         self._cache_lock = threading.Lock()
         self._response_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
@@ -186,6 +190,20 @@ class MotilalOswalAPI:
 
         self._update_headers()
 
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_valid_secret_key(key: str) -> bool:
+        if not key:
+            return False
+        uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+        if uuid_pattern.match(key):
+            return True
+        if re.match(r'^[A-Z2-7]{32}$', key):
+            return True
+        return False
+
     def _configure_http_pool(self) -> None:
         pool_connections = int(os.getenv("MO_HTTP_POOL_CONNECTIONS", "60"))
         pool_maxsize = int(os.getenv("MO_HTTP_POOL_MAXSIZE", "60"))
@@ -198,9 +216,6 @@ class MotilalOswalAPI:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
-    # ------------------------------------------------------------------
-    # Environment helpers
-    # ------------------------------------------------------------------
     @staticmethod
     def _require_env(key: str) -> str:
         value = os.getenv(key)
@@ -261,16 +276,14 @@ class MotilalOswalAPI:
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": "MOSL/V.1.1.0",
-            "ApiKey": self.api_key,               # App API key
+            "ApiKey": self.api_key,
             "SourceId": self.device_info.source_id,
             "sdkversion": "Python 3.0",
         }
 
-        # Mandatory apisecretkey for v7
         if self.api_secret_key:
             headers["apisecretkey"] = self.api_secret_key
 
-        # Mandatory accesstoken after login (for all calls except login itself)
         if self.access_token:
             headers["accesstoken"] = self.access_token
 
@@ -288,22 +301,27 @@ class MotilalOswalAPI:
         endpoint: str,
         payload: Optional[Dict[str, Any]] = None,
         require_auth: bool = True,
+        retry_on_auth: bool = True,
     ) -> Optional[Dict[str, Any]]:
-        if require_auth and not self._ensure_authenticated():
-            return None
-
-        url = f"{self.base_url}{endpoint}"
         try:
+            if require_auth and not self._ensure_authenticated():
+                return None
+
+            url = f"{self.base_url}{endpoint}"
             response = self.session.request(method, url, json=payload or {}, timeout=self.request_timeout)
             response.raise_for_status()
             data = response.json()
+
             if isinstance(data, dict) and data.get("status") == "FAILURE":
-                logger.warning(
-                    "MO API call failed (%s): %s | %s",
-                    endpoint,
-                    data.get("message"),
-                    data.get("errorcode"),
-                )
+                error_code = data.get("errorcode")
+                if retry_on_auth and (error_code == "MO8002" or response.status_code == 401):
+                    logger.warning("Token expired or invalid. Re-authenticating and retrying.")
+                    self.auth_token = None
+                    self.access_token = None
+                    self.last_login_at = None
+                    if self._ensure_authenticated():
+                        return self._request(method, endpoint, payload, require_auth, retry_on_auth=False)
+                logger.warning("MO API call failed (%s): %s | %s", endpoint, data.get("message"), error_code)
             return data
         except requests.exceptions.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else 0
@@ -331,8 +349,9 @@ class MotilalOswalAPI:
         return age_seconds < self.auth_ttl_seconds
 
     def _build_cache_key(self, endpoint: str, payload: Optional[Dict[str, Any]]) -> str:
-        serialized_payload = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str)
-        return f"{endpoint}:{serialized_payload}"
+        serialized = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str)
+        hash_digest = hashlib.md5(serialized.encode('utf-8')).hexdigest()[:16]
+        return f"{endpoint}:{hash_digest}"
 
     def _cached_request(
         self,
@@ -359,7 +378,11 @@ class MotilalOswalAPI:
         if data and isinstance(data, dict) and data.get("status") == "SUCCESS":
             with self._cache_lock:
                 self._response_cache[cache_key] = (now, data)
-        return data
+            return data
+        else:
+            # Log the failure reason
+            logger.error(f"Failed to fetch data from {endpoint}: {data if data else 'No response'}")
+            return None
 
     def _generate_totp_code(self, time_offset: int = 0) -> Optional[str]:
         if not self.totp_secret:
@@ -371,64 +394,49 @@ class MotilalOswalAPI:
         return current_code
 
     # ------------------------------------------------------------------
-    # Authentication & session APIs (v7 compliant)
+    # Authentication & session APIs
     # ------------------------------------------------------------------
     def get_access_token(self) -> Optional[str]:
-        """Obtain access token using the current auth token.
-        Mandatory for all v7 REST calls.
-        """
         if not self.auth_token:
             logger.warning("Cannot get access token: no auth token available.")
             return None
 
-        # Temporarily ensure we have the necessary headers for the access token endpoint
-        old_headers = self.session.headers.copy()
-        self._update_headers(self.auth_token)   # ensures apisecretkey and Authorization are present
-        try:
-            response = self._request("POST", self.REST_ENDPOINTS["get_access_token"], require_auth=True)
-        finally:
-            self.session.headers.update(old_headers)
+        with self._access_token_lock:
+            if self.access_token:
+                return self.access_token
 
-        if response and response.get("status") == "SUCCESS":
-            token = response.get("accesstoken")
-            if token:
-                self.access_token = token
-                self._update_headers(self.auth_token)   # now includes accesstoken
-                logger.info("Access token obtained successfully.")
-                return token
-        logger.error("Failed to obtain access token: %s", response.get("message") if response else "No response")
-        return None
+            old_headers = self.session.headers.copy()
+            self._update_headers(self.auth_token)
+            try:
+                response = self._request("POST", self.REST_ENDPOINTS["get_access_token"], require_auth=True)
+            finally:
+                self.session.headers.update(old_headers)
+
+            if response and response.get("status") == "SUCCESS":
+                token = response.get("accesstoken")
+                if token:
+                    self.access_token = token
+                    self._update_headers(self.auth_token)
+                    logger.info("Access token obtained successfully.")
+                    return token
+            logger.error("Failed to obtain access token: %s", response.get("message") if response else "No response")
+            return None
 
     def login(self, totp_code: Optional[str] = None, two_fa: Optional[str] = None, retry_count: int = 0) -> Optional[Dict[str, Any]]:
-        """Login to MO API with enhanced TOTP handling and automatic retry with time offsets."""
-        # Fast path: already authenticated
         with self._auth_lock:
             if self._is_auth_valid() and not totp_code and not two_fa and retry_count == 0:
-                return {
-                    "status": "SUCCESS",
-                    "message": "Using existing authenticated session",
-                    "AuthToken": self.auth_token,
-                }
+                return {"status": "SUCCESS", "message": "Using existing authenticated session", "AuthToken": self.auth_token}
 
-        # If another thread is already logging in, wait for it to finish
         if self._login_in_progress.is_set():
             logger.debug("Login already in progress, waiting...")
             self._login_in_progress.wait()
-            # After waiting, return the cached token (if any)
             with self._auth_lock:
                 if self.auth_token:
-                    return {
-                        "status": "SUCCESS",
-                        "message": "Using existing authenticated session",
-                        "AuthToken": self.auth_token,
-                    }
-            # Fall through (should not happen) – try again
+                    return {"status": "SUCCESS", "AuthToken": self.auth_token}
 
         self._login_in_progress.set()
         try:
-            # Hash password according to spec: SHA-256(password + ApiKey)
             hashed_password = hashlib.sha256((self.password + self.api_key).encode("utf-8")).hexdigest()
-            
             payload: Dict[str, Any] = {
                 "userid": self.user_id,
                 "password": hashed_password,
@@ -454,7 +462,6 @@ class MotilalOswalAPI:
                 if response and response.get("status") == "SUCCESS":
                     self.auth_token = response.get("AuthToken")
                     self.last_login_at = datetime.now()
-                    # Immediately obtain access token (mandatory for further calls)
                     self.get_access_token()
                     self._update_headers(self.auth_token)
                     if offset != 0:
@@ -468,8 +475,7 @@ class MotilalOswalAPI:
                     continue
                 else:
                     break
-            
-            # All attempts failed
+
             self.auth_token = None
             if response:
                 error_code = response.get("errorcode")
@@ -486,7 +492,6 @@ class MotilalOswalAPI:
                     logger.error("❌ Login failed: %s | Error Code: %s", error_msg, error_code)
             else:
                 logger.error("❌ Login failed: No response returned from API")
-            
             return response
         finally:
             self._login_in_progress.clear()
@@ -503,11 +508,11 @@ class MotilalOswalAPI:
         return response
 
     def get_profile(self, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        payload: Dict[str, Any] = {"clientcode": clientcode or ""}
+        payload = {"clientcode": clientcode or self.user_id} if clientcode or self.user_id else {}
         return self._request("POST", self.REST_ENDPOINTS["profile"], payload)
 
     # ------------------------------------------------------------------
-    # Market data REST endpoints (v3)
+    # Market data REST endpoints (clientcode is optional – do NOT auto‑add)
     # ------------------------------------------------------------------
     def get_scrips_by_exchange(self, exchangename: str, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
         payload = {"exchangename": exchangename.upper()}
@@ -516,7 +521,7 @@ class MotilalOswalAPI:
         return self._cached_request("POST", self.REST_ENDPOINTS["scrips"], payload)
 
     def get_ltp_data(self, exchange: str, scripcode: int, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        payload: Dict[str, Any] = {
+        payload = {
             "exchange": exchange.upper(),
             "scripcode": int(scripcode),
         }
@@ -528,7 +533,14 @@ class MotilalOswalAPI:
         payload = {"exchangename": exchangename.upper()}
         if clientcode:
             payload["clientcode"] = clientcode
-        return self._cached_request("POST", self.REST_ENDPOINTS["eod"], payload)
+        # Log the request for debugging
+        logger.debug(f"Fetching EOD data for {exchangename} with payload {payload}")
+        result = self._cached_request("POST", self.REST_ENDPOINTS["eod"], payload)
+        if result is None:
+            logger.error(f"EOD request for {exchangename} returned None")
+        elif result.get("status") != "SUCCESS":
+            logger.error(f"EOD API error: {result.get('message')} (code {result.get('errorcode')})")
+        return result
 
     def get_index_data(self, exchangename: str, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
         payload = {"exchangename": exchangename.upper()}
@@ -537,7 +549,7 @@ class MotilalOswalAPI:
         return self._cached_request("POST", self.REST_ENDPOINTS["index_master"], payload)
 
     def get_index_ltp(self, exchange: str, scripcode: int, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        payload: Dict[str, Any] = {
+        payload = {
             "exchangename": exchange.upper(),
             "scripcode": str(scripcode),
         }
@@ -546,7 +558,7 @@ class MotilalOswalAPI:
         return self._cached_request("POST", self.REST_ENDPOINTS["index_ltp"], payload)
 
     # ------------------------------------------------------------------
-    # WebSocket helpers (unchanged)
+    # WebSocket helpers
     # ------------------------------------------------------------------
     def connect_websocket(
         self,
@@ -581,7 +593,7 @@ class MotilalOswalAPI:
         self.ws_thread = threading.Thread(
             target=self.ws.run_forever,
             kwargs={
-                "ping_interval": 20, 
+                "ping_interval": 20,
                 "ping_timeout": 10,
                 "sslopt": sslopt
             },
@@ -715,19 +727,6 @@ class MotilalOswalAPI:
             return True
         except Exception as exc:
             logger.error("Failed to toggle index subscription for %s: %s", exchange, exc)
-            return False
-
-    def send_heartbeat(self) -> bool:
-        if not self._ws_connected():
-            logger.debug("Skipping heartbeat; WebSocket not connected.")
-            return False
-        try:
-            heartbeat_packet = pack("=cH", b"1", 0)
-            self.ws.send(heartbeat_packet, opcode=websocket.ABNF.OPCODE_BINARY)
-            logger.debug("Sent heartbeat packet to Motilal Oswal feed.")
-            return True
-        except Exception as exc:
-            logger.error("Failed to send heartbeat packet: %s", exc)
             return False
 
     def _ws_connected(self) -> bool:

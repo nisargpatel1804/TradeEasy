@@ -4,8 +4,8 @@ import time
 from decimal import Decimal
 from datetime import datetime
 from mongoengine import Q
+from pymongo import UpdateOne, ASCENDING
 from app.models import Transaction, Holding, Lot, User, ShortPosition
-# Avoid importing route modules at top-level to prevent circular imports (import inside functions if needed)
 from app.services.cache import cache as app_cache
 from app.services.retry import retry
 from app.services.reset_guard import is_user_reset_in_progress
@@ -117,22 +117,26 @@ class TradeExecutor:
                             inc__reserved_balance=-float(reserved_amt)
                         )
                     else:
-                        # Require available balance (balance - reserved) to be >= needed_balance
-                        res = User.objects(
-                            id=user.id,
-                            reserved_balance__gte=float(reserved_amt),
-                            __raw={
-                                "$expr": {
-                                    "$gte": [
-                                        {"$subtract": ["$balance", "$reserved_balance"]},
-                                        float(needed_balance)
-                                    ]
-                                }
+                        # Use raw PyMongo update to support $expr
+                        collection = User._get_collection()
+                        filter_cond = {
+                            "_id": user.id,
+                            "reserved_balance": {"$gte": float(reserved_amt)},
+                            "$expr": {
+                                "$gte": [
+                                    {"$subtract": ["$balance", "$reserved_balance"]},
+                                    float(needed_balance)
+                                ]
                             }
-                        ).update_one(
-                            inc__balance=-float(total_cost),
-                            inc__reserved_balance=-float(reserved_amt)
-                        )
+                        }
+                        update_op = {
+                            "$inc": {
+                                "balance": -float(total_cost),
+                                "reserved_balance": -float(reserved_amt)
+                            }
+                        }
+                        result = collection.update_one(filter_cond, update_op)
+                        res = result.modified_count
                 except Exception as e:
                     logger.exception("Error updating user funds for pending execution: %s", e)
                     res = 0
@@ -146,19 +150,24 @@ class TradeExecutor:
                     
             else:
                 # Market Order: Atomic deduction from available balance (balance - reserved).
-                res = User.objects(
-                    id=user.id,
-                    __raw={
-                        "$expr": {
-                            "$gte": [
-                                {"$subtract": ["$balance", "$reserved_balance"]},
-                                float(total_cost)
-                            ]
-                        }
+                # Use raw PyMongo update to support $expr
+                collection = User._get_collection()
+                filter_cond = {
+                    "_id": user.id,
+                    "$expr": {
+                        "$gte": [
+                            {"$subtract": ["$balance", "$reserved_balance"]},
+                            float(total_cost)
+                        ]
                     }
-                ).update_one(
-                    inc__balance=-float(total_cost)
-                )
+                }
+                update_op = {
+                    "$inc": {
+                        "balance": -float(total_cost)
+                    }
+                }
+                result = collection.update_one(filter_cond, update_op)
+                res = result.modified_count
                 fund_update_success = (res > 0)
 
             if not fund_update_success:
@@ -477,18 +486,24 @@ class TradeExecutor:
 
             # 1. RESERVE RESOURCES
             if action == 'BUY':
-                # Atomic reservation based on available balance at write-time.
-                res = User.objects(
-                    id=user.id,
-                    __raw={
-                        "$expr": {
-                            "$gte": [
-                                {"$subtract": ["$balance", "$reserved_balance"]},
-                                float(total_value)
-                            ]
-                        }
+                # Use raw PyMongo update to support $expr
+                collection = User._get_collection()
+                filter_cond = {
+                    "_id": user.id,
+                    "$expr": {
+                        "$gte": [
+                            {"$subtract": ["$balance", "$reserved_balance"]},
+                            float(total_value)
+                        ]
                     }
-                ).update_one(inc__reserved_balance=float(total_value))
+                }
+                update_op = {
+                    "$inc": {
+                        "reserved_balance": float(total_value)
+                    }
+                }
+                result = collection.update_one(filter_cond, update_op)
+                res = result.modified_count
 
                 if res == 0:
                     return {"success": False, "message": "Insufficient available funds"}
@@ -500,18 +515,25 @@ class TradeExecutor:
                         return {"success": False, "message": "MIS short-sell requires immediate MARKET execution."}
                     return {"success": False, "message": "No holdings to sell"}
 
-                # Reserve shares atomically from currently available quantity.
-                res = Holding.objects(
-                    id=holding.id,
-                    __raw={
-                        "$expr": {
-                            "$gte": [
-                                {"$subtract": ["$quantity", "$reserved_quantity"]},
-                                int(quantity),
-                            ]
-                        }
-                    },
-                ).update_one(inc__reserved_quantity=int(quantity))
+                # Use raw PyMongo update to support $expr
+                collection = Holding._get_collection()
+                filter_cond = {
+                    "_id": holding.id,
+                    "$expr": {
+                        "$gte": [
+                            {"$subtract": ["$quantity", "$reserved_quantity"]},
+                            int(quantity)
+                        ]
+                    }
+                }
+                update_op = {
+                    "$inc": {
+                        "reserved_quantity": int(quantity)
+                    }
+                }
+                result = collection.update_one(filter_cond, update_op)
+                res = result.modified_count
+
                 if res == 0:
                     return {"success": False, "message": "Insufficient available shares"}
 
