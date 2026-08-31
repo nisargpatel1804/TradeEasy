@@ -1,0 +1,195 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import debounce from "lodash.debounce";
+import * as api from "../services/api.js";
+
+// --- Merged Search Constants ---
+const SEARCH_MIN_QUERY_LENGTH = 2;
+const SEARCH_MAX_QUERY_LENGTH = 64;
+const SEARCH_DEFAULT_LIMIT = 15;
+const SEARCH_CACHE_MAX_ENTRIES = 120;
+
+const normalizeSearchQuery = (value, maxLength = SEARCH_MAX_QUERY_LENGTH) => {
+  const normalized = String(value || "").trim().replace(/\s+/g, " ");
+  if (normalized.length > maxLength) {
+    return normalized.slice(0, maxLength);
+  }
+  return normalized;
+};
+
+const buildSearchCacheKey = (query, pageToken = "", limit = SEARCH_DEFAULT_LIMIT) => (
+  `${normalizeSearchQuery(query)}::${String(pageToken || "")}::${Math.max(1, Number(limit) || SEARCH_DEFAULT_LIMIT)}`
+);
+// ------------------------------
+
+export const useStockSearch = ({
+  minLength = SEARCH_MIN_QUERY_LENGTH,
+  maxQueryLength = SEARCH_MAX_QUERY_LENGTH,
+  pageSize = SEARCH_DEFAULT_LIMIT,
+  onError,
+} = {}) => {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [nextPageToken, setNextPageToken] = useState(null);
+  const controllerRef = useRef(null);
+  const requestIdRef = useRef(0);
+  const cacheRef = useRef(new Map());
+  const isLoadingMoreRef = useRef(false);
+
+  const clearResults = useCallback(() => {
+    setResults([]);
+    setHasMore(false);
+    setNextPageToken(null);
+  }, []);
+
+  const clearSearchCache = useCallback(() => {
+    cacheRef.current.clear();
+  }, []);
+
+  const setCacheEntry = useCallback((key, value) => {
+    const map = cacheRef.current;
+    if (map.has(key)) {
+      map.delete(key);
+    }
+    map.set(key, value);
+    if (map.size > SEARCH_CACHE_MAX_ENTRIES) {
+      const oldestKey = map.keys().next().value;
+      if (oldestKey) {
+        map.delete(oldestKey);
+      }
+    }
+  }, []);
+
+  const fetchSearch = useCallback(async (rawQuery, { silent = false, pageToken = null, append = false } = {}) => {
+    const q = normalizeSearchQuery(rawQuery, maxQueryLength);
+    if (!q || q.length < minLength) {
+      if (!silent) {
+        clearResults();
+        setIsLoading(false);
+        setIsLoadingMore(false);
+        isLoadingMoreRef.current = false;
+      }
+      return { success: true, results: [], has_next: false, limit: pageSize, next_page_token: null };
+    }
+
+    const tokenKey = String(pageToken || "");
+    const cacheKey = buildSearchCacheKey(q, tokenKey, pageSize);
+    const cached = cacheRef.current.get(cacheKey);
+    
+    if (cached) {
+      cacheRef.current.delete(cacheKey);
+      cacheRef.current.set(cacheKey, cached);
+      if (!silent) {
+        const items = Array.isArray(cached?.results) ? cached.results : [];
+        setResults((prev) => (append ? [...prev, ...items] : items));
+        setHasMore(Boolean(cached?.has_next));
+        setNextPageToken(cached?.next_page_token || null);
+        if (append) {
+          setIsLoadingMore(false);
+          isLoadingMoreRef.current = false;
+        } else {
+          setIsLoading(false);
+        }
+      }
+      return cached;
+    }
+
+    if (!silent) {
+      if (append) {
+        isLoadingMoreRef.current = true;
+        setIsLoadingMore(true);
+      } else {
+        setIsLoading(true);
+      }
+    }
+
+    const requestId = ++requestIdRef.current;
+    if (!silent && !append) {
+      try {
+        controllerRef.current?.abort();
+      } catch (err) {
+        console.debug("Search abort failed", err);
+      }
+      controllerRef.current = new AbortController();
+    }
+
+    try {
+      const response = await api.searchStocks(q, {
+        pageToken,
+        limit: pageSize,
+        signal: silent ? undefined : controllerRef.current?.signal,
+      });
+
+      if (!silent && requestId !== requestIdRef.current) {
+        return { success: true, results: [], has_next: false, limit: pageSize, next_page_token: null };
+      }
+
+      const items = Array.isArray(response?.results) ? response.results : [];
+      const nextHasMore = Boolean(response?.has_next);
+
+      setCacheEntry(cacheKey, {
+        success: response?.success !== false,
+        results: items,
+        has_next: nextHasMore,
+        limit: response?.limit || pageSize,
+        next_page_token: response?.next_page_token || null,
+      });
+
+      if (!silent) {
+        setResults((prev) => (append ? [...prev, ...items] : items));
+        setHasMore(nextHasMore);
+        setNextPageToken(response?.next_page_token || null);
+      }
+
+      return response;
+    } catch (error) {
+      const isAbort = error?.name === "AbortError" || error?.code === "ERR_CANCELED" || error?.name === "CanceledError";
+      if (isAbort) return { results: [] };
+      
+      if (typeof onError === "function") onError(error);
+      if (!silent) {
+        clearResults();
+        setIsLoading(false);
+        setIsLoadingMore(false);
+        isLoadingMoreRef.current = false;
+      }
+      return { success: true, results: [], has_next: false, limit: pageSize, next_page_token: null };
+    } finally {
+      if (!silent) {
+        if (append) {
+          setIsLoadingMore(false);
+          isLoadingMoreRef.current = false;
+        } else {
+          setIsLoading(false);
+        }
+      }
+    }
+  }, [clearResults, maxQueryLength, minLength, onError, pageSize, setCacheEntry]);
+
+  const debouncedSearch = useMemo(() => debounce((value) => {
+    fetchSearch(value, { pageToken: null, append: false });
+  }, 300), [fetchSearch]);
+
+  useEffect(() => {
+    debouncedSearch(query);
+    return () => debouncedSearch.cancel();
+  }, [query, debouncedSearch]);
+
+  const loadMore = useCallback(() => {
+    if (isLoading || isLoadingMore || isLoadingMoreRef.current || !hasMore) return;
+    fetchSearch(query, { pageToken: nextPageToken, append: true });
+  }, [fetchSearch, hasMore, isLoading, isLoadingMore, nextPageToken, query]);
+
+  useEffect(() => {
+    const onClear = () => {
+      clearSearchCache();
+      clearResults();
+    };
+    window.addEventListener('clear-local-search-caches', onClear);
+    return () => window.removeEventListener('clear-local-search-caches', onClear);
+  }, [clearResults, clearSearchCache]);
+
+  return { query, setQuery, results, isLoading, isLoadingMore, hasMore, loadMore, clearResults };
+};

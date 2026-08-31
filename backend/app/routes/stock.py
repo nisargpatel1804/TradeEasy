@@ -3,6 +3,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, jsonify, request
 from mongoengine.queryset.visitor import Q
+
 from app.models import AQScrip, Stock
 from app.socket_manager import MO_WebSocket_Manager
 
@@ -18,6 +19,7 @@ STOCK_DATA_CACHE_TTL = 2
 def _parse_symbol_and_exchange(symbol: str) -> str:
     clean_symbol = format_symbol(symbol)
     return clean_symbol
+
 
 def _get_cached_eod_data(mo_api, exchange: str, provider_available: bool = True) -> list:
     cache_key = f"eod_bulk_{exchange}"
@@ -41,6 +43,7 @@ def _get_cached_eod_data(mo_api, exchange: str, provider_available: bool = True)
         return eod_data
 
     return []
+
 
 def format_symbol(symbol: str) -> str:
     if not isinstance(symbol, str):
@@ -112,6 +115,7 @@ def _fetch_ltp_candidates_parallel(mo_api, candidates: list[dict]) -> dict[tuple
 
     return results
 
+
 def extract_price_with_fallback(api_data: dict) -> tuple[float, str]:
     if not api_data or not isinstance(api_data, dict):
         return (0.0, 'unavailable')
@@ -130,14 +134,21 @@ def extract_price_with_fallback(api_data: dict) -> tuple[float, str]:
     
     return (0.0, 'unavailable')
 
+
 def get_stock_data_from_api(symbol: str) -> dict | None:
+    """
+    Fetches real-time stock data.
+    Prioritizes the WebSocket in-memory cache for zero-latency responses.
+    Falls back to REST API only if the live broadcast misses.
+    """
     clean_symbol = _parse_symbol_and_exchange(symbol)
     if not clean_symbol:
         return None
 
     cache_key = clean_symbol
-
     now = time.time()
+    
+    # 1. Check local short-lived functional cache
     cached = _stock_data_cache.get(cache_key)
     if cached:
         cached_data, cached_at = cached
@@ -146,6 +157,50 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
 
     try:
         socket_manager = MO_WebSocket_Manager()
+        
+        # 2. Check the Live WebSocket Broadcast Memory Cache (Zero REST API overhead)
+        ws_data = socket_manager.get_latest_stock_data([clean_symbol])
+        if ws_data and clean_symbol in ws_data:
+            ws_payload = ws_data[clean_symbol]
+            if ws_payload and ws_payload.get('ltp') and float(ws_payload['ltp']) > 0:
+                # Resolve exchange/scripcode from DB mapping
+                exchange = "NSE"
+                scripcode = 0
+                candidates = _iter_instrument_candidates(clean_symbol)
+                if candidates:
+                    exchange = candidates[0]['exchange']
+                    scripcode = candidates[0]['scripcode']
+                    
+                ltp = float(ws_payload['ltp'])
+                change = float(ws_payload.get('change', 0.0))
+                percent_change = float(ws_payload.get('percent_change', 0.0))
+                
+                prev_close = ltp - change
+                if prev_close <= 0:
+                    prev_close = ltp
+                    
+                result = {
+                    'symbol': clean_symbol,
+                    'exchange': exchange,
+                    'scripcode': scripcode,
+                    'ltp': round(ltp, 2),
+                    'change': round(change, 2),
+                    'percent_change': round(percent_change, 2),
+                    'open': 0.0,   # Not present in simple WS tick
+                    'high': 0.0,
+                    'low': 0.0,
+                    'close': round(prev_close, 2),
+                    'volume': int(ws_payload.get('volume', 0)),
+                    'price_source': 'socket_cache',
+                    'provider_available': True,
+                    'is_stale': False,
+                    'last_updated': int(ws_payload.get('last_updated') or (now * 1000))
+                }
+                _stock_data_cache[cache_key] = (result, now)
+                logger.debug(f"Resolved {clean_symbol} entirely from WebSocket memory cache.")
+                return result
+
+        # 3. Fallback to REST API Fetch
         mo_api = socket_manager.mo_api
         provider_available = bool(mo_api.login())
         if not provider_available:
@@ -245,6 +300,7 @@ def get_stock_data_from_api(symbol: str) -> dict | None:
         _stock_data_cache.pop(cache_key, None)
         return None
 
+
 @stock_bp.route("/stock/<string:symbol>", methods=["GET"])
 def get_stock_details(symbol):
     try:
@@ -265,6 +321,7 @@ def get_stock_details(symbol):
     except Exception:
         logger.error("Error in get_stock_details for %s", symbol, exc_info=True)
         return jsonify({"success": False, "message": "An internal server error occurred."}), 500
+
 
 @stock_bp.route("/stocks/batch", methods=["GET"])
 def batch_stock_data():

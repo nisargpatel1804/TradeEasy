@@ -1,52 +1,75 @@
 """
-Simple in-memory caching utility for Flask routes
+Simple thread-safe in-memory caching utility for Flask routes and service functions.
 """
-import time
+import copy
 import functools
+import hashlib
+import json
 import logging
+import time
 from threading import Lock
 
 logger = logging.getLogger(__name__)
 
 
 class SimpleCache:
-    """Thread-safe in-memory cache with TTL support."""
-    
-    def __init__(self):
+    """Thread-safe in-memory cache with TTL support and bounded capacity."""
+
+    def __init__(self, max_entries: int = 1000):
         self._cache = {}
         self._lock = Lock()
-    
+        self.max_entries = max_entries
+
+    def _evict_expired_or_oldest_locked(self):
+        """Evicts expired items first; if still over capacity, removes the oldest entry."""
+        now = time.time()
+        expired_keys = [k for k, v in self._cache.items() if now > v['expires_at']]
+        for key in expired_keys:
+            del self._cache[key]
+
+        # If still over capacity after clearing expired items, evict the oldest entry
+        while len(self._cache) >= self.max_entries:
+            oldest_key = next(iter(self._cache))
+            del self._cache[oldest_key]
+
     def get(self, key):
-        """Get a value from cache if it exists and hasn't expired."""
+        """Get a deep-copied value from cache if it exists and hasn't expired."""
         with self._lock:
             if key not in self._cache:
                 return None
-            
+
             entry = self._cache[key]
             if time.time() > entry['expires_at']:
                 del self._cache[key]
                 return None
-            
-            return entry['value']
-    
+
+            # Return a deepcopy so caller mutations do not pollute cached memory
+            try:
+                return copy.deepcopy(entry['value'])
+            except Exception:
+                return entry['value']
+
     def set(self, key, value, ttl=300):
         """Set a value in cache with TTL in seconds (default 5 minutes)."""
         with self._lock:
+            if key not in self._cache and len(self._cache) >= self.max_entries:
+                self._evict_expired_or_oldest_locked()
+
             self._cache[key] = {
                 'value': value,
                 'expires_at': time.time() + ttl
             }
-    
+
     def delete(self, key):
         """Delete a key from cache."""
         with self._lock:
             self._cache.pop(key, None)
-    
+
     def clear(self):
         """Clear all cache entries."""
         with self._lock:
             self._cache.clear()
-    
+
     def invalidate_pattern(self, pattern):
         """Invalidate all keys matching a pattern (simple string prefix match)."""
         with self._lock:
@@ -55,18 +78,18 @@ class SimpleCache:
                 del self._cache[key]
 
 
-# Global cache instance
-cache = SimpleCache()
+# Global cache instance with a max limit of 1000 entries
+cache = SimpleCache(max_entries=1000)
 
 
 def cached(ttl=300, key_prefix=''):
     """
     Decorator to cache function results.
-    
+
     Args:
         ttl: Time to live in seconds (default 300 = 5 minutes)
         key_prefix: Prefix for cache keys
-    
+
     Example:
         @cached(ttl=60, key_prefix='user')
         def get_user_data(user_id):
@@ -77,7 +100,6 @@ def cached(ttl=300, key_prefix=''):
         def wrapper(*args, **kwargs):
             # Generate deterministic cache key using JSON serialization + short SHA256 hash
             try:
-                import json, hashlib
                 key_payload = {
                     "args": args,
                     "kwargs": kwargs
@@ -88,7 +110,7 @@ def cached(ttl=300, key_prefix=''):
             except Exception as e:
                 logger.exception("Failed to generate cache key, skipping cache: %s", e)
                 return func(*args, **kwargs)
-            
+
             # Try to get from cache (safe - don't fail caller on cache errors)
             try:
                 cached_value = cache.get(cache_key)
@@ -99,7 +121,7 @@ def cached(ttl=300, key_prefix=''):
             if cached_value is not None:
                 logger.debug(f"Cache HIT for {cache_key}")
                 return cached_value
-            
+
             # Cache miss - call function and cache result
             logger.debug(f"Cache MISS for {cache_key}")
             result = func(*args, **kwargs)
@@ -108,20 +130,20 @@ def cached(ttl=300, key_prefix=''):
             except Exception as e:
                 logger.exception("Cache set failed for %s: %s", cache_key, e)
             return result
-        
+
         return wrapper
     return decorator
 
 
 def cached_route(ttl=300, key_func=None):
     """
-    Decorator to cache Flask route responses.
-    
+    Decorator to cache Flask route responses, dynamically taking request query args
+    into account to prevent parameterized query collisions.
+
     Args:
         ttl: Time to live in seconds
         key_func: Optional function to generate cache key from request
-                  If None, uses current_user.id from flask_login
-    
+
     Example:
         @watchlist_bp.route('/watchlists')
         @login_required
@@ -132,25 +154,26 @@ def cached_route(ttl=300, key_func=None):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            from flask import request
             from flask_login import current_user
-            
+
             # Generate cache key
             try:
                 if key_func:
                     cache_key = key_func()
-                elif current_user and hasattr(current_user, 'id'):
-                    cache_key = f"route:{func.__name__}:user:{current_user.id}"
                 else:
-                    # Fallback: use request path and sorted query params if available
-                    from flask import request
-                    args_items = request.args.items() if request else []
+                    user_id = getattr(current_user, 'id', 'anonymous')
+                    path = request.path if request else func.__name__
+                    args_items = sorted(list(request.args.items())) if request else []
+
                     key_payload = {
-                        "path": request.path if request else func.__name__,
-                        "args": sorted(list(args_items))
+                        "user": str(user_id),
+                        "path": path,
+                        "args": args_items
                     }
-                    import json, hashlib
                     serialized = json.dumps(key_payload, default=str, sort_keys=True, separators=(',', ':'))
-                    cache_key = f"route:{func.__name__}:" + hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:12]
+                    digest = hashlib.sha256(serialized.encode('utf-8')).hexdigest()[:12]
+                    cache_key = f"route:{func.__name__}:{user_id}:{digest}"
             except Exception as e:
                 logger.exception("Failed to build route cache key, skipping cache: %s", e)
                 return func(*args, **kwargs)
@@ -165,7 +188,7 @@ def cached_route(ttl=300, key_func=None):
             if cached_response is not None:
                 logger.debug(f"Route cache HIT for {cache_key}")
                 return cached_response
-            
+
             # Execute route and cache
             logger.debug(f"Route cache MISS for {cache_key}")
             response = func(*args, **kwargs)
@@ -185,6 +208,6 @@ def cached_route(ttl=300, key_func=None):
                 logger.exception("Route cache set failed for %s: %s", cache_key, e)
 
             return response
-        
+
         return wrapper
     return decorator

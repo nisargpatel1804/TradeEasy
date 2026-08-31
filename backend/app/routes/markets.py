@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import time as dt_time
 from flask import Blueprint, jsonify
+
 from app.moapi import get_mo_api_client
 from app.services.market_data import MO_INDEX_CATALOG
 from app.socket_manager import MO_WebSocket_Manager
@@ -101,7 +102,6 @@ def _extract_number(entry, candidate_keys):
         if key in entry:
             value = entry.get(key)
         else:
-            # Support case-insensitive lookups without recreating the mapping each time
             matching_key = next((k for k in entry.keys() if isinstance(k, str) and k.lower() == key.lower()), None)
             value = entry.get(matching_key) if matching_key else None
 
@@ -127,6 +127,7 @@ def _normalize_index_payload(response):
     if isinstance(data, dict):
         return data
     return {}
+
 
 def _split_movers(payload, limit=10):
     """Splits payload into two buckets: gainers (includes unchanged) and losers."""
@@ -215,7 +216,10 @@ def _resolve_constituents() -> list[dict]:
 
 
 def _fetch_ltp_bulk(constituents: list[dict], mo_api, effective_ttl: float = LTP_BULK_CACHE_TTL) -> dict[str, dict]:
-    """Fetch LTP + prev_close in parallel for all Nifty 50 stocks, with a short TTL cache."""
+    """
+    Fetch LTP + prev_close for all Nifty 50 stocks.
+    Prioritizes WebSocket in-memory cache first, falling back to REST for missing symbols.
+    """
     now = time.time()
     cached_data = _ltp_bulk_cache.get("data") or {}
     cached_ts = float(_ltp_bulk_cache.get("ts") or 0.0)
@@ -225,35 +229,6 @@ def _fetch_ltp_bulk(constituents: list[dict], mo_api, effective_ttl: float = LTP
     if not constituents:
         return {}
 
-    def _fetch_one(item):
-        scripcode = int(item.get("scripcode") or 0)
-        if not scripcode:
-            return None
-
-        try:
-            response = mo_api.get_ltp_data("NSE", scripcode)
-            if not response or response.get("status") != "SUCCESS":
-                return None
-
-            data = response.get("data") or {}
-            if isinstance(data, list):
-                data = data[0] if data else {}
-            if not isinstance(data, dict):
-                return None
-
-            prev_close = float(data.get("close") or 0) / 100.0
-            ltp_price = float(data.get("ltp") or data.get("close") or 0) / 100.0
-            if ltp_price <= 0 or prev_close <= 0:
-                return None
-
-            return str(scripcode), {
-                "ltp": round(ltp_price, 2),
-                "prev_close": round(prev_close, 2),
-            }
-        except Exception as exc:
-            logger.debug("Failed bulk LTP fetch for scripcode=%s: %s", scripcode, exc)
-            return None
-
     with _ltp_bulk_cache_lock:
         cached_data = _ltp_bulk_cache.get("data") or {}
         cached_ts = float(_ltp_bulk_cache.get("ts") or 0.0)
@@ -261,29 +236,91 @@ def _fetch_ltp_bulk(constituents: list[dict], mo_api, effective_ttl: float = LTP
             return cached_data
 
         results = {}
-        max_workers = min(MARKET_LTP_MAX_WORKERS, len(constituents))
-        executor = ThreadPoolExecutor(max_workers=max_workers)
-        futures = {executor.submit(_fetch_one, item): item for item in constituents}
-        timed_out = False
+        missing_constituents = []
+
+        # 1. Query WebSocket Manager memory cache first
         try:
-            for future in as_completed(futures, timeout=20):
-                result = future.result()
-                if not result:
+            socket_manager = MO_WebSocket_Manager()
+            symbols = [item["symbol"] for item in constituents if item.get("symbol")]
+            ws_cache = socket_manager.get_latest_stock_data(symbols)
+
+            for item in constituents:
+                symbol = item.get("symbol")
+                scripcode = str(item.get("scripcode") or "")
+                if not scripcode:
                     continue
-                scripcode, payload = result
-                results[scripcode] = payload
-        except FuturesTimeoutError:
-            timed_out = True
-            logger.warning(
-                "Timed out waiting for all Nifty50 LTP responses; returning partial data (%d/%d).",
-                len(results),
-                len(futures),
-            )
-            for future in futures:
-                if not future.done():
-                    future.cancel()
-        finally:
-            executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
+
+                clean_sym = symbol.split('.')[0] if symbol and '.' in symbol else symbol
+                ws_payload = ws_cache.get(symbol) or ws_cache.get(clean_sym)
+
+                if ws_payload and ws_payload.get('ltp'):
+                    ltp_val = float(ws_payload['ltp'])
+                    prev_close_val = float(ws_payload.get('prev_close') or ws_payload.get('close') or ltp_val)
+                    if ltp_val > 0 and prev_close_val > 0:
+                        results[scripcode] = {
+                            "ltp": round(ltp_val, 2),
+                            "prev_close": round(prev_close_val, 2),
+                        }
+                        continue
+
+                missing_constituents.append(item)
+        except Exception as ws_err:
+            logger.debug("Failed querying WS cache for bulk LTP, falling back to REST: %s", ws_err)
+            missing_constituents = constituents
+
+        # 2. Fetch missing symbols via REST ThreadPoolExecutor
+        if missing_constituents:
+            def _fetch_one(item):
+                scripcode = int(item.get("scripcode") or 0)
+                if not scripcode:
+                    return None
+
+                try:
+                    response = mo_api.get_ltp_data("NSE", scripcode)
+                    if not response or response.get("status") != "SUCCESS":
+                        return None
+
+                    data = response.get("data") or {}
+                    if isinstance(data, list):
+                        data = data[0] if data else {}
+                    if not isinstance(data, dict):
+                        return None
+
+                    prev_close = float(data.get("close") or 0) / 100.0
+                    ltp_price = float(data.get("ltp") or data.get("close") or 0) / 100.0
+                    if ltp_price <= 0 or prev_close <= 0:
+                        return None
+
+                    return str(scripcode), {
+                        "ltp": round(ltp_price, 2),
+                        "prev_close": round(prev_close, 2),
+                    }
+                except Exception as exc:
+                    logger.debug("Failed bulk LTP REST fetch for scripcode=%s: %s", scripcode, exc)
+                    return None
+
+            max_workers = min(MARKET_LTP_MAX_WORKERS, len(missing_constituents))
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            futures = {executor.submit(_fetch_one, item): item for item in missing_constituents}
+            timed_out = False
+            try:
+                for future in as_completed(futures, timeout=20):
+                    res = future.result()
+                    if res:
+                        scripcode, payload = res
+                        results[scripcode] = payload
+            except FuturesTimeoutError:
+                timed_out = True
+                logger.warning(
+                    "Timed out waiting for REST LTP responses; returning partial data (%d/%d).",
+                    len(results),
+                    len(futures),
+                )
+                for future in futures:
+                    if not future.done():
+                        future.cancel()
+            finally:
+                executor.shutdown(wait=not timed_out, cancel_futures=timed_out)
 
         _ltp_bulk_cache["data"] = results
         _ltp_bulk_cache["ts"] = time.time()
@@ -331,6 +368,7 @@ def _build_market_payload(constituents, ltp_bulk=None, market_status="CLOSED"):
         "stocks": stocks_payload,
         "last_updated": int(time.time() * 1000),
     }
+
 
 def _build_index_payload(name, exchange, code, ltp_payload=None):
     ltp_payload = ltp_payload or {}

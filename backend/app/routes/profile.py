@@ -1,10 +1,11 @@
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
 from mongoengine.errors import NotUniqueError
+
 from app.models import User, Holding, Transaction, Lot, ShortPosition
 from app.services.cache import cache as app_cache
 from app.services.reset_guard import acquire_reset_lock
@@ -26,7 +27,13 @@ WALLET_LABELS = {
 }
 
 
+def _utcnow() -> datetime:
+    """Returns timezone-aware UTC datetime standard for Python 3.12+."""
+    return datetime.now(timezone.utc)
+
+
 def _invalidate_user_route_caches(user_id):
+    """Invalidates all cached route patterns for the specified user."""
     patterns = [
         f"route:get_profile:user:{user_id}",
         f"route:get_portfolio:user:{user_id}",
@@ -38,6 +45,7 @@ def _invalidate_user_route_caches(user_id):
 
 
 def _take_user_reset_snapshot(user):
+    """Captures a full MongoDB snapshot of user trading state prior to reset."""
     return {
         "user": User.objects(id=user.id).as_pymongo().first(),
         "holdings": list(Holding.objects(user=user).as_pymongo()),
@@ -48,6 +56,7 @@ def _take_user_reset_snapshot(user):
 
 
 def _restore_user_reset_snapshot(user_id, snapshot):
+    """Restores user trading data from a pre-reset snapshot in case of error."""
     user_doc = snapshot.get("user")
     if user_doc:
         User._get_collection().replace_one({"_id": user_doc["_id"]}, user_doc, upsert=True)
@@ -65,6 +74,8 @@ def _restore_user_reset_snapshot(user_id, snapshot):
 
 
 def _serialize_profile(user: User) -> dict:
+    """Serializes a User document into a clean, front-end friendly profile payload."""
+    member_since = user.created_at.strftime("%B %Y") if getattr(user, 'created_at', None) else "N/A"
     return {
         "client_id": user.client_id,
         "username": user.username,
@@ -73,8 +84,9 @@ def _serialize_profile(user: User) -> dict:
         "balance": float(user.balance),
         "reserved_balance": float(user.reserved_balance),
         "available_balance": float(user.balance - user.reserved_balance),
-        "member_since": user.created_at.strftime("%B %Y")
+        "member_since": member_since
     }
+
 
 # --- API Routes ---
 
@@ -83,11 +95,12 @@ def _serialize_profile(user: User) -> dict:
 def get_profile():
     """
     Fetches and returns the profile information for the currently authenticated user.
-    The @login_required decorator ensures that only logged-in users can access this.
     """
     try:
-        # The `current_user` proxy is the secure way to access the logged-in user's data
-        return jsonify({"success": True, "profile": _serialize_profile(current_user)}), 200
+        return jsonify({
+            "success": True, 
+            "profile": _serialize_profile(current_user)
+        }), 200
 
     except Exception as e:
         logger.error(f"Error fetching profile for user {current_user.client_id}: {e}", exc_info=True)
@@ -133,7 +146,7 @@ def update_wallet_limit():
         user.reload()
         logger.info("Reset lock acquired for user %s", user.client_id)
 
-        # Ensure no in-flight execution mutates state during reset snapshot/delete.
+        # Ensure no in-flight execution mutates state during reset snapshot/delete
         wait_deadline = time.time() + 5.0
         inflight = Transaction.objects(user=user, is_processing=True).count()
         while inflight > 0 and time.time() < wait_deadline:
@@ -155,10 +168,9 @@ def update_wallet_limit():
         snapshot = _take_user_reset_snapshot(user)
         logger.info("Reset snapshot captured for user %s", user.client_id)
 
-        reset_timestamp = datetime.utcnow()
+        reset_timestamp = _utcnow()
 
-        # Finalize open/in-flight orders before hard-delete so downstream readers don't
-        # observe partially processed states.
+        # Finalize open/in-flight orders before hard-delete
         Transaction.objects(user=user, status="PENDING").update(
             set__status="CANCELLED",
             set__is_processing=False,
@@ -176,7 +188,7 @@ def update_wallet_limit():
 
         user.save()
 
-        # Clear data surfaces associated with portfolio state.
+        # Clear data surfaces associated with portfolio state
         Holding.objects(user=user).delete()
         Lot.objects(user=user).delete()
         ShortPosition.objects(user=user).delete()
@@ -204,6 +216,7 @@ def update_wallet_limit():
             "profile": profile_payload,
             "reset_performed": True
         }), 200
+
     except Exception as e:
         if snapshot and user_id:
             try:
@@ -228,12 +241,12 @@ def update_wallet_limit():
             "message": "Reset failed and was rolled back. Please try again."
         }), 500
 
+
 @profile_bp.route('/profile', methods=['PUT'])
 @login_required
 def update_profile():
     """
     Updates the profile information for the currently authenticated user.
-    Performs validation on all incoming data before applying changes.
     """
     try:
         data = request.get_json()
@@ -247,7 +260,10 @@ def update_profile():
         if 'username' in data:
             username = str(data['username']).strip()
             if not USERNAME_REGEX.match(username):
-                return jsonify({"success": False, "message": "Username must be 3-20 characters and can only contain letters, numbers, and underscores."}), 400
+                return jsonify({
+                    "success": False, 
+                    "message": "Username must be 3-20 characters and can only contain letters, numbers, and underscores."
+                }), 400
             user.username = username
             updated_fields.append('username')
 
@@ -271,17 +287,22 @@ def update_profile():
             return jsonify({"success": False, "message": "No valid fields provided for update."}), 400
 
         user.save()
+        _invalidate_user_route_caches(user.id)
         logger.info(f"User {user.client_id} updated their profile. Fields: {', '.join(updated_fields)}")
 
         return jsonify({
             "success": True,
             "message": "Profile updated successfully.",
-            "updated_fields": updated_fields
+            "updated_fields": updated_fields,
+            "profile": _serialize_profile(user)
         }), 200
 
     except NotUniqueError:
         logger.warning(f"Profile update failed for user {current_user.client_id} due to duplicate email/mobile.")
-        return jsonify({"success": False, "message": "The email or mobile number you entered is already in use by another account."}), 409
+        return jsonify({
+            "success": False, 
+            "message": "The email or mobile number you entered is already in use by another account."
+        }), 409
     except Exception as e:
         logger.error(f"Error updating profile for user {current_user.client_id}: {e}", exc_info=True)
         return jsonify({"success": False, "message": "An internal server error occurred."}), 500

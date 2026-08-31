@@ -2,23 +2,23 @@ import { Routes, Route, Navigate, useParams } from "react-router-dom";
 import { useAuth } from "./context/AuthContext.jsx";
 
 // Import Page Components
-import LandingPage from './features/LandingPage.jsx';
-import DashboardPage from './features/DashboardPage.jsx';
-import PortfolioPage from './features/PortfolioPage.jsx';
-import Watchlist from './features/Watchlist.jsx';
-import OrdersPage from './features/OrdersPage.jsx';
-import PerformancePage from './features/PerformancePage.jsx';
-import ProfilePage from './features/ProfilePage.jsx';
-import TradeForm from './features/TradeForm.jsx';
-import StockOverview from "./features/StockSections.jsx";
-import MarketPage from "./features/MarketPage.jsx";
-import Indices from "./features/Indices.jsx";
-import OrderDetail from "./features/OrderDetail.jsx";
-import NotFoundPage from './features/NotFoundPage.jsx';
-import DashboardLayout from "./features/DashboardLayout.jsx";
-import { Toaster } from "./assets/ui/toaster.jsx";
+import LandingPage from './pages/LandingPage.jsx';
+import DashboardPage from './pages/DashboardPage.jsx';
+import PortfolioPage from './pages/PortfolioPage.jsx';
+import Watchlist from './pages/Watchlist.jsx';
+import OrdersPage from './pages/OrdersPage.jsx';
+import PerformancePage from './pages/PerformancePage.jsx';
+import ProfilePage from './pages/ProfilePage.jsx';
+import TradeForm from './components/TradeForm.jsx';
+import StockOverview from "./components/StockSections.jsx";
+import MarketPage from "./pages/MarketPage.jsx";
+import Indices from "./pages/Indices.jsx";
+import OrderDetail from "./pages/OrderDetail.jsx";
+import NotFoundPage from './pages/NotFoundPage.jsx';
+import DashboardLayout from "./components/DashboardLayout.jsx";
+import { Toaster } from "./components/ui/toaster.jsx";
 import { Toaster as HotToaster } from "react-hot-toast";
-import { Skeleton } from "./assets/ui/skeleton.jsx";
+import { Skeleton } from "./components/ui/skeleton.jsx";
 
 const StartupLoadingShell = () => (
   <div className="min-h-screen bg-slate-50 text-slate-900">

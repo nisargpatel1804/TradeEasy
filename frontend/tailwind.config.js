@@ -3,11 +3,8 @@ import tailwindcssAnimate from 'tailwindcss-animate';
 /** @type {import('tailwindcss').Config} */
 export default {
   content: [
-    './pages/**/*.{js,jsx,ts,tsx}',
-    './components/**/*.{js,jsx,ts,tsx}',
-    './app/**/*.{js,jsx,ts,tsx}',
+    './index.html',
     './src/**/*.{js,jsx,ts,tsx}',
-    './assets/css/**/*.css',
   ],
   prefix: "",
   theme: {
@@ -19,6 +16,9 @@ export default {
       },
     },
     extend: {
+      fontFamily: {
+        sans: ['Inter', 'sans-serif'],
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
@@ -96,6 +96,12 @@ export default {
           from: { backgroundColor: "rgba(239, 68, 68, 0.2)" },
           to: { backgroundColor: "transparent" },
         },
+        "blob": {
+          "0%": { transform: "translate(0px, 0px) scale(1)" },
+          "33%": { transform: "translate(30px, -50px) scale(1.1)" },
+          "66%": { transform: "translate(-20px, 20px) scale(0.9)" },
+          "100%": { transform: "translate(0px, 0px) scale(1)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
@@ -107,6 +113,7 @@ export default {
         "slide-in": "slide-in 0.2s ease-out",
         "price-flash-up": "price-up 1s ease-out",
         "price-flash-down": "price-down 1s ease-out",
+        blob: "blob 7s infinite",
       },
     },
   },

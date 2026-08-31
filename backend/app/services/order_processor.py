@@ -10,6 +10,7 @@ from app.services.trade_executor import TradeExecutor
 from app.services.market_time import should_auto_squareoff_mis, get_current_ist_time
 from app.services.reset_guard import is_user_reset_in_progress
 from app.routes.stock import get_stock_data_from_api, format_symbol
+from app.socket_manager import MO_WebSocket_Manager
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(threadName)s - %(name)s - %(levelname)s - %(message)s')
@@ -63,36 +64,80 @@ class OrderProcessor:
     def _process_pending_orders(self):
         """
         Fetches all pending orders and checks if they can be executed.
+        Uses atomic batch-locking to prevent concurrent worker collisions.
         """
-        # Fetch only PENDING orders that are NOT currently being processed
-        pending_orders = list(Transaction.objects(status="PENDING", is_processing=False))
-        if not pending_orders:
+        # 1. Fetch only eligible IDs to minimize lock scope
+        raw_orders = Transaction.objects(status="PENDING", is_processing=False).only('id', 'symbol', 'user')
+        if not raw_orders:
             return
 
-        # --- Efficiently fetch prices for all unique symbols ---
-        unique_symbols = {format_symbol(order.symbol) for order in pending_orders}
-        price_map = {}
-        for symbol in unique_symbols:
-            api_data = get_stock_data_from_api(symbol)
-            if api_data and api_data.get('ltp'):
-                price_map[symbol] = Decimal(str(api_data['ltp']))
-
-        if not price_map:
+        pending_ids = [order.id for order in raw_orders]
+        
+        # 2. Atomically lock this batch so other threads ignore them during evaluation
+        locked_count = Transaction.objects(
+            id__in=pending_ids, 
+            status="PENDING", 
+            is_processing=False
+        ).update(set__is_processing=True)
+        
+        if not locked_count:
             return
 
-        # --- Check each order against the fetched prices ---
-        for order in pending_orders:
-            if self._is_user_resetting(order.user.id):
-                logger.info("Skipping pending order %s due to portfolio reset lock on user %s", order.id, order.user.id)
-                continue
+        # Fetch fully loaded locked orders
+        locked_orders = list(Transaction.objects(id__in=pending_ids, status="PENDING", is_processing=True))
+        untriggered_ids = []
 
-            symbol = format_symbol(order.symbol)
-            current_price = price_map.get(symbol)
+        try:
+            # --- Efficiently fetch prices for all unique symbols ---
+            unique_symbols = {format_symbol(order.symbol) for order in locked_orders}
+            price_map = {}
             
-            if current_price:
-                should_exec, exec_price = self._should_execute(order, current_price)
-                if should_exec:
-                    self._trigger_execution(order, exec_price)
+            # Prioritize WebSocket in-memory cache (Zero REST overhead)
+            ws_manager = MO_WebSocket_Manager()
+            ws_cache = ws_manager.get_latest_stock_data(list(unique_symbols))
+            
+            for symbol, payload in ws_cache.items():
+                if payload and payload.get('ltp'):
+                    price_map[symbol] = Decimal(str(payload['ltp']))
+
+            # Fallback to REST API ONLY for missing symbols
+            missing_symbols = unique_symbols - set(price_map.keys())
+            for symbol in missing_symbols:
+                api_data = get_stock_data_from_api(symbol)
+                if api_data and api_data.get('ltp'):
+                    price_map[symbol] = Decimal(str(api_data['ltp']))
+
+            if not price_map:
+                untriggered_ids = [o.id for o in locked_orders]
+                return
+
+            # --- Check each order against the fetched prices ---
+            for order in locked_orders:
+                if self._is_user_resetting(order.user.id):
+                    logger.info("Skipping pending order %s due to portfolio reset lock on user %s", order.id, order.user.id)
+                    untriggered_ids.append(order.id)
+                    continue
+
+                symbol = format_symbol(order.symbol)
+                current_price = price_map.get(symbol)
+                
+                should_exec = False
+                if current_price:
+                    should_exec, exec_price = self._should_execute(order, current_price)
+                    if should_exec:
+                        self._trigger_execution(order, exec_price)
+                
+                if not should_exec:
+                    untriggered_ids.append(order.id)
+
+        finally:
+            # 3. Safely unlock orders that did not execute so they can be evaluated next cycle or cancelled by user
+            if untriggered_ids:
+                Transaction.objects(
+                    id__in=untriggered_ids, 
+                    status="PENDING", 
+                    is_processing=True
+                ).update(set__is_processing=False)
 
     def _should_execute(self, order: Transaction, current_price: Decimal) -> tuple[bool, Decimal]:
         """
@@ -201,14 +246,34 @@ class OrderProcessor:
     def _update_trailing_stops(self):
         """Update trigger prices for trailing stop orders based on market movement."""
         trailing_orders = Transaction.objects(status="PENDING", order_type="TRAILING_STOP", is_processing=False)
+        if not trailing_orders:
+            return
+            
+        unique_symbols = {format_symbol(order.symbol) for order in trailing_orders}
+        price_map = {}
+        
+        # Attempt to pull from WebSocket in-memory cache first
+        ws_manager = MO_WebSocket_Manager()
+        ws_cache = ws_manager.get_latest_stock_data(list(unique_symbols))
+        
+        for symbol, payload in ws_cache.items():
+            if payload and payload.get('ltp'):
+                price_map[symbol] = Decimal(str(payload['ltp']))
+
+        # Fallback to REST
+        missing_symbols = unique_symbols - set(price_map.keys())
+        for symbol in missing_symbols:
+            api_data = get_stock_data_from_api(symbol)
+            if api_data and api_data.get('ltp'):
+                price_map[symbol] = Decimal(str(api_data['ltp']))
         
         for order in trailing_orders:
             try:
-                api_data = get_stock_data_from_api(order.symbol)
-                if not api_data or not api_data.get('ltp'):
+                symbol = format_symbol(order.symbol)
+                if symbol not in price_map:
                     continue
                 
-                current_price = Decimal(str(api_data['ltp']))
+                current_price = price_map[symbol]
                 trail_pct = Decimal(str(order.trailing_stop_pct)) / Decimal('100')
                 updated = False
                 
@@ -314,13 +379,19 @@ class OrderProcessor:
     def _force_square_off(self, user_id, symbol, quantity, action, is_short_position):
         """
         Helper to execute market orders for auto square-off.
+        Prioritizes WebSocket cache for lowest latency possible.
         """
         try:
-            # Fetch current price
-            api_data = get_stock_data_from_api(symbol)
+            ws_manager = MO_WebSocket_Manager()
+            ws_cache = ws_manager.get_latest_stock_data([symbol])
+            
             price = None
-            if api_data and api_data.get('ltp'):
-                price = float(api_data['ltp'])
+            if symbol in ws_cache and ws_cache[symbol].get('ltp'):
+                price = float(ws_cache[symbol]['ltp'])
+            else:
+                api_data = get_stock_data_from_api(symbol)
+                if api_data and api_data.get('ltp'):
+                    price = float(api_data['ltp'])
             
             if not price:
                 logger.error(f"Could not fetch price for auto-squareoff of {symbol}. Skipping.")

@@ -45,13 +45,11 @@ class Config:
     if not MONGODB_SETTINGS['host'] or not MONGODB_SETTINGS['db']:
         raise ValueError("FATAL ERROR: MONGODB_URI or MONGO_DB_NAME is not set in the .env file.")
 
-    # --- API Credentials ---
+    # --- Motilal Oswal API Credentials ---
     # Credentials for the Motilal Oswal API are loaded here but used in mo_api.py
-    # NOTE: For production, consider using encrypted storage or a secrets manager like:
-    # - Azure Key Vault, AWS Secrets Manager, HashiCorp Vault
-    # - Encrypted environment variables with cryptography library
-    # See SECURITY.md for credential encryption setup guide
+    # NOTE: For production, consider using encrypted storage or a secrets manager.
     API_KEY = os.getenv("API_KEY")
+    API_SECRET_KEY = os.getenv("API_SECRET_KEY")
     USER_ID = os.getenv("USER_ID")
     PASSWORD = os.getenv("PASSWORD")
     TWO_FA = os.getenv("TWO_FA")
@@ -60,16 +58,21 @@ class Config:
     # Optional per-app key to HMAC reset tokens. Falls back to SECRET_KEY if not set.
     RESET_TOKEN_HMAC_KEY = os.getenv('RESET_TOKEN_HMAC_KEY')
 
-    if not all([API_KEY, USER_ID, PASSWORD, TWO_FA, TOTP_SECRET]):
-        print("WARNING: Motilal Oswal API credentials are not fully set in the .env file. API functionality will be limited.")
-    elif TOTP_SECRET:
-        # Validate TOTP secret format (should be 32 characters, base32 encoded)
+    # MO API Credential Validation
+    if not all([API_KEY, USER_ID, PASSWORD, TWO_FA]):
+        print("WARNING: Core Motilal Oswal API credentials (API_KEY, USER_ID, PASSWORD, TWO_FA) are missing. API functionality will be limited.")
+    
+    if not API_SECRET_KEY:
+        print("WARNING: API_SECRET_KEY is not set. The dual-token login flow (v1/getaccesstoken) will fail.")
+        
+    if TOTP_SECRET:
+        import re
         if len(TOTP_SECRET) != 32:
             print(f"WARNING: TOTP_SECRET has unusual length ({len(TOTP_SECRET)} chars). Expected 32 characters.")
-        # Check if it's valid base32
-        import re
         if not re.match(r'^[A-Z2-7]+=*$', TOTP_SECRET):
             print("WARNING: TOTP_SECRET doesn't appear to be valid base32 encoding.")
+    else:
+        print("WARNING: TOTP_SECRET is missing. The system will fall back to manual OTP flow, which breaks automated background jobs.")
 
 
 class DevelopmentConfig(Config):

@@ -1,26 +1,38 @@
-"""Simple retry/backoff utility for services.
 """
-import time
-import random
+Simple retry/backoff utility for services.
+"""
 import logging
-from typing import Callable, Iterable, Tuple
+import random
+import time
+from typing import Any, Callable, Tuple, Type
 
 logger = logging.getLogger(__name__)
 
 
-def retry(fn: Callable[[], any], exceptions: Tuple= (Exception,), max_attempts: int = 3, initial_delay: float = 0.05, backoff: float = 2.0, jitter: bool = False):
-    """Call `fn` and retry on specified exceptions using exponential backoff.
+def retry(
+    fn: Callable[[], Any],
+    exceptions: Tuple[Type[BaseException], ...] = (Exception,),
+    max_attempts: int = 3,
+    initial_delay: float = 0.05,
+    backoff: float = 2.0,
+    jitter: bool = False,
+) -> Any:
+    """
+    Call `fn` and retry on specified exceptions using exponential backoff.
 
     Args:
         fn: Callable with no arguments to execute.
-        exceptions: Exception class or tuple to catch and retry on.
+        exceptions: Exception class or tuple of exception classes to catch and retry on.
         max_attempts: Total attempts including first call.
-        initial_delay: Delay before first retry (seconds).
-        backoff: Multiplier for delay each retry.
-        jitter: Add small random jitter to delay when True.
+        initial_delay: Delay before first retry (in seconds).
+        backoff: Multiplier for delay on each retry.
+        jitter: Add small random jitter (up to 10%) to delay when True.
+
+    Returns:
+        The return value of `fn()`.
 
     Raises:
-        The last exception if all attempts fail.
+        The last caught exception if all attempts fail.
     """
     attempt = 0
     while True:
@@ -29,7 +41,7 @@ def retry(fn: Callable[[], any], exceptions: Tuple= (Exception,), max_attempts: 
             return fn()
         except exceptions as e:
             if attempt >= max_attempts:
-                logger.exception("All retry attempts failed (%s): %s", attempt, e)
+                logger.exception("All retry attempts (%s/%s) failed: %s", attempt, max_attempts, e)
                 raise
             delay = initial_delay * (backoff ** (attempt - 1))
             if jitter:

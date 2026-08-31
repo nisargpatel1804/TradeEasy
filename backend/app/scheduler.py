@@ -40,11 +40,12 @@ class TaskScheduler:
     def start(self):
         """Start the scheduler and register all scheduled jobs."""
         if not self.scheduler.running:
-            # Schedule daily scrip update at 6:00 AM IST (before market opens)
-            # Markets typically open at 9:15 AM IST, so this gives buffer time
+            # Schedule daily scrip update at 6:10 AM IST.
+            # MO API tokens strictly expire at 6:00 AM IST due to exchange compliance. 
+            # Running this at 6:10 AM ensures we don't hit race conditions during the token wipe.
             self.scheduler.add_job(
                 func=self._daily_scrip_update,
-                trigger=CronTrigger(hour=6, minute=0),  # 6:00 AM IST daily
+                trigger=CronTrigger(hour=6, minute=10),  # 6:10 AM IST daily
                 id='daily_scrip_update',
                 name='Daily Scrip Master Update',
                 replace_existing=True,
@@ -76,6 +77,15 @@ class TaskScheduler:
             from app.db_scrips_populate import _map_api_to_model_data
             
             mo_api = get_mo_api_client()
+            
+            # FORCE CLEAN RE-AUTH:
+            # Clear existing tokens to ensure a fresh session is generated for the new trading day.
+            # This directly mitigates the MO8002 Token Expired error caused by the 6:00 AM exchange wipe.
+            with mo_api._auth_lock, mo_api._access_token_lock:
+                mo_api.auth_token = None
+                mo_api.access_token = None
+                mo_api.last_login_at = None
+                
             if not mo_api.login():
                 logger.error("Failed to authenticate with MO API for daily update.")
                 return

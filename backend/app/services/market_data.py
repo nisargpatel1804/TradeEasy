@@ -1,6 +1,6 @@
-"""Shared configuration for market index tracking."""
+"""Shared configuration and lookup utilities for market index tracking."""
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 MO_INDEX_CATALOG: Dict[str, List[Dict[str, str]]] = {
     "NSE": [
@@ -48,3 +48,34 @@ MO_INDEX_CATALOG: Dict[str, List[Dict[str, str]]] = {
     ],
 }
 
+def get_index_by_code(exchange: str, code: str) -> Optional[Dict[str, str]]:
+    """
+    Retrieve index details (code and name) by its exchange and numerical code.
+    """
+    if not exchange or not code:
+        return None
+    
+    indices = MO_INDEX_CATALOG.get(exchange.upper(), [])
+    code_str = str(code).strip()
+    
+    for index in indices:
+        if index.get("code") == code_str:
+            return index
+            
+    return None
+
+def get_all_index_codes(exchange: str) -> List[str]:
+    """
+    Retrieve a list of all index codes for a given exchange.
+    """
+    if not exchange:
+        return []
+        
+    indices = MO_INDEX_CATALOG.get(exchange.upper(), [])
+    return [index["code"] for index in indices if "code" in index]
+
+def is_valid_index_code(exchange: str, code: str) -> bool:
+    """
+    Check if a given code is a valid index code for the specified exchange.
+    """
+    return get_index_by_code(exchange, code) is not None

@@ -5,9 +5,10 @@ from copy import deepcopy
 from decimal import Decimal
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, date
+from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request
 from flask_login import login_required, current_user
+
 from app.models import Holding, Transaction, ShortPosition, Lot
 from app.services.cache import cache as app_cache
 from .stock import get_stock_data_from_api, format_symbol
@@ -26,7 +27,7 @@ _portfolio_refresh_inflight = set()
 
 
 # ----------------------------------------------------------------------
-# Helper functions (unchanged)
+# Helper functions
 # ----------------------------------------------------------------------
 
 def _to_decimal(value, default: str = '0') -> Decimal:
@@ -255,7 +256,7 @@ def _calculate_realized_pnl_from_transactions(user) -> Decimal:
     realized_pnl = Decimal('0')
 
     def _txn_dt(txn: Transaction):
-        return txn.execution_date or txn.transaction_date or datetime.utcnow()
+        return txn.execution_date or txn.transaction_date or datetime.now(timezone.utc)
 
     def _apply_fifo(fifo_state: defaultdict, txn: Transaction) -> Decimal:
         symbol = getattr(txn, 'symbol', None)
@@ -327,7 +328,7 @@ def _calculate_realized_pnl_from_transactions(user) -> Decimal:
                 if executed_count == state_count and latest_epoch == state_epoch:
                     return realized_pnl
 
-                last_dt = datetime.fromtimestamp(state_epoch) if state_epoch > 0 else datetime.utcfromtimestamp(0)
+                last_dt = datetime.fromtimestamp(state_epoch, tz=timezone.utc) if state_epoch > 0 else datetime.fromtimestamp(0, tz=timezone.utc)
                 new_txns = list(
                     executed_base_qs.filter(
                         __raw__={
@@ -392,12 +393,11 @@ def _get_realized_pnl(user) -> Decimal:
 
     realized = _calculate_realized_pnl_from_transactions(user)
     try:
-        from datetime import datetime
         User = user.__class__
         sell_count = Transaction.objects(user=user, status="EXECUTED", action="SELL").count()
         User.objects(id=user.id).update_one(
             set__realized_pnl=float(realized),
-            set__realized_pnl_synced_at=datetime.utcnow(),
+            set__realized_pnl_synced_at=datetime.now(timezone.utc),
             set__realized_pnl_sell_count=int(sell_count),
         )
     except Exception as persist_err:
@@ -406,7 +406,7 @@ def _get_realized_pnl(user) -> Decimal:
 
 
 # ----------------------------------------------------------------------
-# Main portfolio computation (FIXED: use lot‑based average price for Today's P&L)
+# Main portfolio computation
 # ----------------------------------------------------------------------
 
 def _compute_portfolio_payload(user, include_holdings: bool = True) -> dict:
@@ -431,7 +431,7 @@ def _compute_portfolio_payload(user, include_holdings: bool = True) -> dict:
             short_dates[short.symbol] = short.short_date.date()
 
     # ----------------------------------------------------------------------
-    # Exit plan map (unchanged)
+    # Exit plan map
     # ----------------------------------------------------------------------
     holding_keys = [(h.symbol, 'CNC') for h in cnc_holdings] + [(h.symbol, 'MIS') for h in mis_holdings]
     symbols_for_plans = list({sym for sym, _pt in holding_keys if sym})
@@ -534,7 +534,6 @@ def _compute_portfolio_payload(user, include_holdings: bool = True) -> dict:
         market_value = live_price * quantity
         pnl = market_value - investment_value
 
-        # ---- FIX: Use lot‑based average price for Today's P&L ----
         key = (holding.symbol, holding.product_type)
         if key in lot_avg_prices:
             total_qty, total_value = lot_avg_prices[key]
@@ -655,9 +654,8 @@ def _compute_portfolio_payload(user, include_holdings: bool = True) -> dict:
         live_price, prev_close, change, change_pct, quote_unusable = _quote_for_position(quote, short_price)
         pnl = (short_price - live_price) * quantity
 
-        # For shorts, we keep the simple date‑based logic (the fix is not critical)
         short_date = short_dates.get(short_pos.symbol)
-        today_utc = datetime.utcnow().date()
+        today_utc = datetime.now(timezone.utc).date()
         if short_date == today_utc:
             base_price_for_today = short_price
         else:

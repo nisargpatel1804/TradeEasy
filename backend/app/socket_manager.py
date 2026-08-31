@@ -63,11 +63,14 @@ def _normalize_index_payload(response):
         return data
     return {}
 
+
 class MO_WebSocket_Manager:
     """
-    Manages a persistent WebSocket connection to the Motilal Oswal API as a singleton.
-    This version is updated for robust connection handling, correct subscription logic,
-    and efficient real-time data processing.
+    Manages a persistent, read-only WebSocket connection to the Motilal Oswal 
+    Market Data Broadcast Feed as a singleton.
+    
+    Exclusively handles ticker/quote updates for paper-trading simulations.
+    Emits data using Socket.IO Room Isolation for scalable frontend consumption.
     """
     _instance = None
     _lock = threading.Lock()
@@ -92,7 +95,7 @@ class MO_WebSocket_Manager:
 
         # State management
         self.is_connected = False
-        self.ws_authed = False # Tracks if the binary login handshake is complete
+        self.ws_authed = False  # Tracks if the binary login handshake is complete
         self.stop_event = threading.Event()
         self.data_lock = threading.Lock()
         
@@ -103,11 +106,11 @@ class MO_WebSocket_Manager:
         self.circuit_threshold = 5  # Open circuit after 5 failures
         self.circuit_timeout = 300  # Try to reconnect after 5 minutes
         
-        # Heartbeat tracking (only for monitoring data receipt)
+        # Heartbeat tracking (only for monitoring market broadcast receipt)
         self.last_heartbeat_received = None
         self.heartbeat_timeout = 90  # Disconnect if no data received in 90 seconds
         
-        # Message batching
+        # Message batching for frontend socket emission
         self.pending_stock_updates = {}
         self.pending_index_updates = {}
         self.batch_interval = 0.5  # Batch updates every 500ms
@@ -123,13 +126,13 @@ class MO_WebSocket_Manager:
         self.latest_indices_data = OrderedDict()
         self.latest_stock_data = OrderedDict()
         self.index_codes_map = {}
-        self.scrip_to_symbol_map = {} # Maps 'EXCHANGE:SCRIPCODE' to a user-friendly symbol string
-        self.scrip_prev_close = {}    # Caches previous day's close for change calculations
+        self.scrip_to_symbol_map = {}  # Maps 'EXCHANGE:SCRIPCODE' -> symbol string
+        self.scrip_prev_close = {}     # Caches previous day close for change calculation
 
-        # Subscription tracking
-        self.registered_scrips = set() # Tracks scrip subscriptions, format: 'EXCHANGE:EXCHANGETYPE:SCRIPCODE'
+        # Subscription tracking (Format: 'EXCHANGE:EXCHANGETYPE:SCRIPCODE')
+        self.registered_scrips = set()
         
-        # track user subscriptions for reconnect
+        # Track user subscriptions for seamless reconnects
         self.user_subscriptions = {}  # Maps user_id -> set of scrip keys
         self.subscription_lock = threading.Lock()
         self._warmup_lock = threading.Lock()
@@ -137,9 +140,8 @@ class MO_WebSocket_Manager:
         self._warmup_executor = ThreadPoolExecutor(max_workers=WARMUP_MAX_WORKERS, thread_name_prefix="WarmLTP")
         
         self.initialized = True
-        logger.info("MO WebSocket Manager initialized.")
+        logger.info("MO Market Data Broadcast WebSocket Manager initialized with Room Isolation.")
         self._load_initial_index_data()
-        # Note: Watchlist scrips are loaded on-demand when users connect, not at startup
 
     def _prune_cache_locked(self, cache, ttl_seconds, max_size):
         """Prunes stale entries first, then evicts oldest entries to enforce a hard max size."""
@@ -170,7 +172,7 @@ class MO_WebSocket_Manager:
         self._prune_cache_locked(self.latest_indices_data, INDEX_CACHE_TTL_SECONDS, INDEX_CACHE_MAX_SIZE)
 
     def _within_socket_window(self, current_dt=None):
-        """Return True when within the websocket trading window (08:45-15:45 IST)."""
+        """Return True when within the market broadcast window (08:45-15:45 IST)."""
         current_dt = current_dt or get_current_ist_time()
         current_time = current_dt.time()
 
@@ -179,7 +181,7 @@ class MO_WebSocket_Manager:
         return current_time >= SOCKET_WINDOW_START or current_time < SOCKET_WINDOW_END
 
     def _is_live_market_window(self):
-        """Returns True only during active market+socket window."""
+        """Returns True only during active market + broadcast window."""
         try:
             return bool(self._within_socket_window() and self.mo_api.market_hours.is_market_open())
         except Exception:
@@ -209,12 +211,12 @@ class MO_WebSocket_Manager:
                 self._upsert_index_cache_locked(payload_copy['symbol'], payload_copy)
 
     def start(self):
-        """Starts the WebSocket connection manager in a background thread."""
+        """Starts the Market Data Broadcast WebSocket manager in a background thread."""
         if self.manager_thread and self.manager_thread.is_alive():
-            logger.warning("WebSocket manager thread is already running.")
+            logger.warning("Market Broadcast WebSocket manager thread is already running.")
             return
 
-        logger.info("Starting MO WebSocket manager...")
+        logger.info("Starting MO Market Data Broadcast WebSocket manager...")
         self.stop_event.clear()
         
         self.manager_thread = threading.Thread(target=self._run, name="WSManagerThread", daemon=True)
@@ -229,13 +231,13 @@ class MO_WebSocket_Manager:
             self.batch_thread.start()
 
     def shutdown(self):
-        """Gracefully shuts down the WebSocket manager and all background threads."""
-        logger.info("🛑 Shutting down MO WebSocket Manager...")
+        """Gracefully shuts down the Broadcast WebSocket manager and all background threads."""
+        logger.info("🛑 Shutting down MO Broadcast WebSocket Manager...")
         self.stop_event.set()
         
         try:
             if self.is_connected and self.ws_authed:
-                logger.info("Unsubscribing from all live feeds...")
+                logger.info("Unsubscribing from all live broadcast feeds...")
                 self.mo_api.unregister_index("NSE")
                 time.sleep(0.1)
                 self.mo_api.unregister_index("BSE")
@@ -258,7 +260,7 @@ class MO_WebSocket_Manager:
             if self._warmup_executor:
                 self._warmup_executor.shutdown(wait=False, cancel_futures=True)
             
-            logger.info("✅ MO WebSocket Manager shutdown complete.")
+            logger.info("✅ MO Broadcast WebSocket Manager shutdown complete.")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}", exc_info=True)
         finally:
@@ -266,7 +268,7 @@ class MO_WebSocket_Manager:
             self.ws_authed = False
 
     def _warm_scrip_initial_data(self, symbol, exchange, scripcode):
-        """Background helper: fetches and caches the initial LTP for a newly registered scrip."""
+        """Background helper: fetches and caches initial LTP for a newly registered scrip."""
         warmup_key = f"{exchange.upper()}:{int(scripcode)}"
         try:
             from app.models import Stock
@@ -280,7 +282,7 @@ class MO_WebSocket_Manager:
                     with self.batch_lock:
                         self.pending_stock_updates[symbol] = payload
 
-                    logger.info(f"Background warm-up cached initial data for {symbol}: LTP={payload.get('ltp')}")
+                    logger.info(f"Background warm-up cached initial price for {symbol}: LTP={payload.get('ltp')}")
                 else:
                     logger.debug("Initial warm-up returned no payload for %s", symbol)
         except Exception as e:
@@ -315,15 +317,15 @@ class MO_WebSocket_Manager:
 
     def register_scrip(self, symbol, exchange, scripcode, exchange_type="CASH", skip_initial_fetch=False):
         """
-        Adds a scrip to the subscription list. If already connected, it subscribes
-        immediately. Otherwise, it will be subscribed upon the next connection.
+        Adds a scrip to the broadcast subscription list. If already connected, it subscribes
+        immediately via binary D-packet. Otherwise, it subscribes upon next connection.
         """
         composite_key = f"{exchange.upper()}:{exchange_type.upper()}:{int(scripcode)}"
         self.scrip_to_symbol_map[f"{exchange.upper()}:{int(scripcode)}"] = symbol
         
         if composite_key not in self.registered_scrips:
             self.registered_scrips.add(composite_key)
-            logger.info(f"Queued subscription for {symbol} ({composite_key}); total_subscriptions={len(self.registered_scrips)}")
+            logger.info(f"Queued market broadcast subscription for {symbol} ({composite_key}); total_subscriptions={len(self.registered_scrips)}")
 
             if not skip_initial_fetch:
                 self._enqueue_warm_scrip_initial_data(symbol, exchange, scripcode)
@@ -337,7 +339,7 @@ class MO_WebSocket_Manager:
                 while attempts < max_attempts:
                     try:
                         self.mo_api.register_scrip(exchange, int(scripcode), exchange_type)
-                        logger.info(f"MO API register_scrip called for {symbol} ({composite_key})")
+                        logger.info(f"MO Broadcast API register_scrip called for {symbol} ({composite_key})")
                         subscription_status = {"success": True, "message": "Subscribed successfully"}
                         break
                     except Exception as e:
@@ -356,7 +358,7 @@ class MO_WebSocket_Manager:
             return {"success": True, "message": "Already subscribed"}
 
     def unregister_scrip(self, exchange, scripcode, exchange_type="CASH"):
-        """Removes a scrip from the subscription list and unsubscribes if connected."""
+        """Removes a scrip from the broadcast subscription list and unsubscribes if connected."""
         composite_key = f"{exchange.upper()}:{exchange_type.upper()}:{int(scripcode)}"
         if composite_key in self.registered_scrips:
             self.registered_scrips.remove(composite_key)
@@ -364,14 +366,14 @@ class MO_WebSocket_Manager:
             try:
                 if self.is_connected and self.ws_authed:
                     self.mo_api.unregister_scrip(exchange, int(scripcode), exchange_type)
-                    logger.info(f"MO API unregister_scrip called for {composite_key}")
+                    logger.info(f"MO Broadcast API unregister_scrip called for {composite_key}")
             except Exception as e:
                 logger.warning(f"MO API unregister_scrip failed for {composite_key}: {e}")
 
         self.scrip_to_symbol_map.pop(f"{exchange.upper()}:{int(scripcode)}", None)
 
     def _run(self):
-        """Main loop that maintains the WebSocket connection with exponential backoff and circuit breaker."""
+        """Main loop maintaining the Broadcast WebSocket connection with exponential backoff & circuit breaker."""
         retry_count = 0
         max_retry_delay = 300
         base_delay = 15
@@ -385,13 +387,13 @@ class MO_WebSocket_Manager:
                         self.stop_event.wait(min(60, self.circuit_timeout - elapsed))
                         continue
                     else:
-                        logger.info("🟡 Circuit breaker entering HALF-OPEN state. Attempting connection...")
+                        logger.info("🟡 Circuit breaker entering HALF-OPEN state. Attempting broadcast connection...")
                         self.circuit_state = 'half_open'
 
                 within_socket_window = self._within_socket_window()
                 if not within_socket_window and not self.force_connect:
                     if self.is_connected or self.ws_authed:
-                        logger.info("⏹️ Trading window closed (08:45 AM - 03:45 PM IST). Disconnecting WebSocket feed.")
+                        logger.info("⏹️ Trading window closed (08:45 AM - 03:45 PM IST). Disconnecting broadcast feed.")
                         try:
                             self.mo_api.disconnect_websocket()
                         except Exception as disconnect_error:
@@ -402,7 +404,7 @@ class MO_WebSocket_Manager:
                     retry_count = 0
                     self.failure_count = 0
                     self.circuit_state = 'closed'
-                    logger.info("🌙 Outside trading window. Rechecking in 300 seconds...")
+                    logger.info("🌙 Outside broadcast window. Rechecking in 300 seconds...")
                     self.stop_event.wait(300)
                     continue
                 
@@ -417,16 +419,16 @@ class MO_WebSocket_Manager:
                     continue
                 
                 if not market_open and self.force_connect:
-                    logger.info("🧪 Testing mode: Connecting despite market being closed (force_connect=True)")
+                    logger.info("🧪 Testing mode: Connecting broadcast feed despite market close (force_connect=True)")
 
+                # Execute dual-token authentication via MO API
                 if not self.mo_api.login():
-                    logger.warning("⚠️ API login failed. Will retry in 60 seconds.")
-                    logger.info("💡 Hint: If TOTP errors persist, check system time sync: w32tm /resync")
+                    logger.warning("⚠️ API dual-token authentication failed. Will retry in 60 seconds.")
                     self._handle_connection_failure()
                     self.stop_event.wait(60)
                     continue
                 
-                status_msg = f"Attempting to establish WebSocket connection... (attempt {retry_count + 1})"
+                status_msg = f"Attempting to establish MO Market Broadcast WebSocket connection... (attempt {retry_count + 1})"
                 if not market_open:
                     status_msg += " [Market Closed - Testing Mode]"
                 logger.info(status_msg)
@@ -444,12 +446,9 @@ class MO_WebSocket_Manager:
                 retry_delay = min(base_delay * (2 ** min(retry_count - 1, 4)), max_retry_delay)
                 
                 within_socket_window = self._within_socket_window()
-                if within_socket_window:
-                    market_status = "" if market_open else " (Expected - Market is closed)"
-                else:
-                    market_status = " (Outside trading window)"
+                market_status = "" if market_open else " (Expected - Market closed)" if within_socket_window else " (Outside window)"
 
-                reconnect_msg = f"🔄 WebSocket connection lost{market_status}. Retry #{retry_count} in {retry_delay}s..."
+                reconnect_msg = f"🔄 MO Broadcast WebSocket connection lost{market_status}. Retry #{retry_count} in {retry_delay}s..."
                 if market_open and within_socket_window:
                     logger.warning(reconnect_msg)
                 else:
@@ -500,14 +499,14 @@ class MO_WebSocket_Manager:
         self.circuit_open_time = None
 
     def _on_open(self, ws):
-        logger.info("✅ MO WebSocket Connection Opened. Authenticating...")
+        logger.info("✅ MO Market Broadcast WebSocket Connection Opened. Authenticating...")
         self.is_connected = True
         self.ws_authed = False
         
         if self.mo_api.send_binary_login():
             time.sleep(1) 
             self.ws_authed = True
-            logger.info("✅ WebSocket authentication successful. Subscribing to feeds...")
+            logger.info("✅ Broadcast WebSocket binary authentication successful. Subscribing to market feeds...")
             self._subscribe_all()
             self._handle_connection_success()
             if self.socketio:
@@ -540,7 +539,7 @@ class MO_WebSocket_Manager:
                     self._process_stock_update(data)
 
         except Exception as e:
-            logger.error(f"Error processing WebSocket message: {e}", exc_info=True)
+            logger.error(f"Error processing Broadcast WebSocket message: {e}", exc_info=True)
 
     def _process_stock_update(self, data):
         exchange = str(data.get('Exchange', '')).upper()
@@ -606,7 +605,7 @@ class MO_WebSocket_Manager:
         with self.batch_lock:
             self.pending_stock_updates[symbol] = payload
         
-        logger.debug(f"Queued STOCK update for {symbol}: {payload}")
+        logger.debug(f"Queued STOCK broadcast update for {symbol}: {payload}")
 
     def _process_index_update(self, data):
         scrip_code_str = str(data.get('Scrip Code'))
@@ -635,8 +634,6 @@ class MO_WebSocket_Manager:
         
         with self.batch_lock:
             self.pending_index_updates[payload['symbol']] = payload
-        
-        logger.debug(f"Queued INDEX update for {payload['name']}: {payload}")
 
     def _compose_stock_payload(self, symbol, ltp, prev_close, volume=0, timestamp=None, price_source='ltp'):
         timestamp = timestamp or int(time.time() * 1000)
@@ -708,6 +705,13 @@ class MO_WebSocket_Manager:
 
             prev_close = float(data.get('close', 0)) / 100.0
             
+            # FIXED: Derive prev_close from Database if API doesn't provide it
+            if prev_close <= 0:
+                db_price = getattr(stock, 'current_price', 0) or 0
+                db_change = getattr(stock, 'change', 0) or 0
+                if db_price > 0 and db_change is not None:
+                    prev_close = db_price - db_change
+
             if price_source in ('close', 'prevClose') and prev_close <= 0:
                 prev_close = ltp
                 logger.debug(f"Using fallback: setting prev_close = ltp for {stock.symbol}")
@@ -715,7 +719,6 @@ class MO_WebSocket_Manager:
             composite_key = f"{exchange.upper()}:{int(scripcode)}"
             if prev_close > 0:
                 self.scrip_prev_close[composite_key] = prev_close
-                logger.debug(f"Stored prev_close for {stock.symbol} ({composite_key}): {prev_close}")
 
             volume = int(data.get('volume', 0))
             payload = self._compose_stock_payload(
@@ -739,9 +742,9 @@ class MO_WebSocket_Manager:
         should_warn = self._is_live_market_window()
         
         if close_status_code:
-            message = f"🔌 MO WebSocket connection closed: Code={close_status_code}, Message='{close_msg}'"
+            message = f"🔌 MO Broadcast WebSocket closed: Code={close_status_code}, Message='{close_msg}'"
         else:
-            message = f"🔌 MO WebSocket connection closed unexpectedly. Message='{close_msg}'"
+            message = f"🔌 MO Broadcast WebSocket closed unexpectedly. Message='{close_msg}'"
 
         if should_warn:
             logger.warning(message)
@@ -760,14 +763,14 @@ class MO_WebSocket_Manager:
         
         if "Connection to remote host was lost" in error_msg or "Remote end closed connection" in error_msg:
             if in_live_window:
-                logger.warning(f"⚠️ MO WebSocket disconnected (Provider closed connection): {error_msg}")
+                logger.warning(f"⚠️ MO Broadcast WebSocket disconnected: {error_msg}")
             else:
-                logger.debug(f"MO WebSocket disconnected off-hours: {error_msg}")
+                logger.debug(f"MO Broadcast WebSocket disconnected off-hours: {error_msg}")
         else:
             if in_live_window:
-                logger.error(f"❌ MO WebSocket error: {error_msg}")
+                logger.error(f"❌ MO Broadcast WebSocket error: {error_msg}")
             else:
-                logger.debug(f"MO WebSocket error off-hours: {error_msg}")
+                logger.debug(f"MO Broadcast WebSocket error off-hours: {error_msg}")
         
         if self.is_connected:
             self.is_connected = False
@@ -779,19 +782,19 @@ class MO_WebSocket_Manager:
 
     def _subscribe_all(self):
         try:
-            logger.info("Subscribing to NSE and BSE index streams...")
+            logger.info("Subscribing to NSE and BSE index market streams...")
             self.mo_api.register_index("NSE")
             self.mo_api.register_index("BSE")
             
             if self.registered_scrips:
-                logger.info(f"Subscribing to {len(self.registered_scrips)} individual scrips...")
+                logger.info(f"Subscribing to {len(self.registered_scrips)} individual scrip broadcast feeds...")
                 for scrip_key in list(self.registered_scrips):
                     exchange, exchange_type, scripcode_str = scrip_key.split(':')
                     self.mo_api.register_scrip(exchange, int(scripcode_str), exchange_type)
             
             with self.subscription_lock:
                 if self.user_subscriptions:
-                    logger.info(f"Re-registering subscriptions for {len(self.user_subscriptions)} active users...")
+                    logger.info(f"Re-registering broadcast subscriptions for {len(self.user_subscriptions)} active users...")
                     for user_id, scrip_keys in self.user_subscriptions.items():
                         for scrip_key in scrip_keys:
                             if scrip_key not in self.registered_scrips:
@@ -799,7 +802,6 @@ class MO_WebSocket_Manager:
                                     exchange, exchange_type, scripcode_str = scrip_key.split(':')
                                     self.mo_api.register_scrip(exchange, int(scripcode_str), exchange_type)
                                     self.registered_scrips.add(scrip_key)
-                                    logger.debug(f"Re-registered {scrip_key} for user {user_id}")
                                 except Exception as e:
                                     logger.warning(f"Failed to re-register {scrip_key}: {e}")
         except Exception as e:
@@ -901,32 +903,31 @@ class MO_WebSocket_Manager:
         logger.info(f"Loaded {len(self.index_codes_map)} tracked indices with {len(self.latest_indices_data)} initial values.")
 
     def _heartbeat_loop(self):
-        """Monitors WebSocket connection health by checking data receipt timeout."""
+        """Monitors WebSocket health by tracking live market data receipt timeout."""
         logger.info("Heartbeat monitor started")
         
         while not self.stop_event.is_set():
             try:
                 if self.is_connected and self.ws_authed:
                     current_time = time.time()
-                    
-                    # Check for heartbeat timeout (no data received)
                     if self.last_heartbeat_received:
                         silence_duration = current_time - self.last_heartbeat_received
                         if silence_duration > self.heartbeat_timeout:
-                            logger.error(f"❌ Heartbeat timeout: No data received for {silence_duration:.0f}s. Forcing reconnect...")
+                            logger.error(f"❌ Heartbeat timeout: No broadcast data received for {silence_duration:.0f}s. Forcing reconnect...")
                             if self.mo_api.ws:
                                 self.mo_api.ws.close()
                             self.is_connected = False
                             self.ws_authed = False
                 
-                self.stop_event.wait(10)  # Check every 10 seconds
+                self.stop_event.wait(10)
                 
             except Exception as e:
                 logger.error(f"Error in heartbeat loop: {e}", exc_info=True)
                 self.stop_event.wait(10)
     
     def _batch_emitter_loop(self):
-        logger.info("Batch emitter started")
+        """Batches live price ticks and broadcasts them to specific frontend rooms via SocketIO."""
+        logger.info("Batch emitter started (Room Isolation Enabled)")
         
         while not self.stop_event.is_set():
             try:
@@ -936,17 +937,24 @@ class MO_WebSocket_Manager:
                     continue
                 
                 with self.batch_lock:
-                    if self.pending_stock_updates:
-                        stock_batch = list(self.pending_stock_updates.values())
-                        self.pending_stock_updates.clear()
-                        self.socketio.emit('stock_updates_batch', {'updates': stock_batch})
-                        logger.debug(f"Emitted batch of {len(stock_batch)} stock updates")
+                    # Safely copy and clear the pending dictionaries quickly
+                    stock_updates = list(self.pending_stock_updates.items())
+                    self.pending_stock_updates.clear()
                     
-                    if self.pending_index_updates:
-                        index_batch = list(self.pending_index_updates.values())
-                        self.pending_index_updates.clear()
-                        self.socketio.emit('index_updates_batch', {'updates': index_batch})
-                        logger.debug(f"Emitted batch of {len(index_batch)} index updates")
+                    index_updates = list(self.pending_index_updates.values())
+                    self.pending_index_updates.clear()
+                
+                # Emit OUTSIDE the batch_lock to prevent network I/O from blocking the WebSocket parser thread
+                if stock_updates:
+                    for symbol, payload in stock_updates:
+                        # Emits only to clients who joined 'stock:SYMBOL' room
+                        self.socketio.emit('stock_update', payload, to=f"stock:{symbol}")
+                    logger.debug(f"Emitted {len(stock_updates)} isolated stock updates")
+                
+                if index_updates:
+                    # Emits index updates to the global 'indices' room
+                    self.socketio.emit('index_updates_batch', {'updates': index_updates}, to='indices')
+                    logger.debug(f"Emitted batch of {len(index_updates)} index updates to 'indices' room")
                 
             except Exception as e:
                 logger.error(f"Error in batch emitter loop: {e}", exc_info=True)
@@ -992,16 +1000,16 @@ class MO_WebSocket_Manager:
                     registered += 1
                 except Exception as e:
                     logger.warning(
-                        "Failed to register symbol %s for realtime: %s",
+                        "Failed to register symbol %s for realtime broadcast: %s",
                         getattr(stock, 'symbol', '?'),
                         e,
                     )
 
             if registered:
-                logger.info("Registered %s new portfolio/adhoc symbol(s) for live updates", registered)
+                logger.info("Registered %s symbol(s) for live market broadcast", registered)
             return registered
         except Exception as e:
-            logger.error("Failed to register symbols for realtime: %s", e, exc_info=True)
+            logger.error("Failed to register symbols for realtime broadcast: %s", e, exc_info=True)
             return 0
 
     def register_user_portfolio_stocks(self, user_id):

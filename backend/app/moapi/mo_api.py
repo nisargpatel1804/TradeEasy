@@ -83,6 +83,8 @@ class MarketHoursManager:
         self.holidays = {
             "2025-01-26", "2025-03-14", "2025-04-14", "2025-05-01",
             "2025-08-15", "2025-10-02", "2025-11-01", "2025-11-15", "2025-12-25",
+            "2026-01-26", "2026-03-03", "2026-03-26", "2026-04-03", "2026-04-14",
+            "2026-05-01", "2026-08-15", "2026-10-02", "2026-10-20", "2026-11-09", "2026-12-25"
         }
 
     def is_market_open(self) -> bool:
@@ -145,7 +147,7 @@ class MotilalOswalAPI:
             logger.warning("API_SECRET_KEY format looks suspicious (expected UUID or 32-char string). Login may fail.")
 
         if not self.api_secret_key:
-            logger.warning("API_SECRET_KEY not set. v7 login will fail.")
+            logger.warning("API_SECRET_KEY not set. Access token generation will fail.")
         if not self.totp_secret:
             logger.warning("TOTP_SECRET not provided. Falling back to OTP flow where applicable.")
 
@@ -168,7 +170,7 @@ class MotilalOswalAPI:
         self._auth_lock = threading.Lock()
         self._access_token_lock = threading.Lock()
         self._login_in_progress = threading.Event()
-        self._static_price_cache: Dict[str, Dict[str, Any]] = {}  # Fallback cache
+        self._static_price_cache: Dict[str, Dict[str, Any]] = {}
         self._static_cache_lock = threading.Lock()
 
         self._cache_lock = threading.Lock()
@@ -269,28 +271,30 @@ class MotilalOswalAPI:
         )
 
     # ------------------------------------------------------------------
-    # HTTP helpers
+    # HTTP helpers & Header Management
     # ------------------------------------------------------------------
-    def _update_headers(self, auth_token: Optional[str] = None) -> None:
+    def _update_headers(self, auth_token: Optional[str] = None, access_token: Optional[str] = None) -> None:
+        auth_val = auth_token or self.auth_token
+        access_val = access_token or self.access_token
+
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": "MOSL/V.1.1.0",
             "ApiKey": self.api_key,
-            "SourceId": self.device_info.source_id,
             "sdkversion": "Python 3.0",
         }
 
         if self.api_secret_key:
             headers["apisecretkey"] = self.api_secret_key
 
-        if self.access_token:
-            headers["accesstoken"] = self.access_token
+        if auth_val:
+            headers["Authorization"] = auth_val
+
+        if access_val:
+            headers["accesstoken"] = access_val
 
         headers.update(self.device_info.to_headers())
-
-        if auth_token:
-            headers["Authorization"] = auth_token
 
         self.session.headers.clear()
         self.session.headers.update(headers)
@@ -312,16 +316,43 @@ class MotilalOswalAPI:
             response.raise_for_status()
             data = response.json()
 
-            if isinstance(data, dict) and data.get("status") == "FAILURE":
+            if isinstance(data, dict):
+                status = data.get("status")
                 error_code = data.get("errorcode")
-                if retry_on_auth and (error_code == "MO8002" or response.status_code == 401):
-                    logger.warning("Token expired or invalid. Re-authenticating and retrying.")
-                    self.auth_token = None
-                    self.access_token = None
-                    self.last_login_at = None
-                    if self._ensure_authenticated():
-                        return self._request(method, endpoint, payload, require_auth, retry_on_auth=False)
-                logger.warning("MO API call failed (%s): %s | %s", endpoint, data.get("message"), error_code)
+                error_msg = data.get("message", "")
+
+                if status in ("FAILURE", "ERROR"):
+                    # Intercept Token Errors (MO8001: Invalid Token, MO8002: Token Expired, MO8003: Token Missing)
+                    if retry_on_auth and (error_code in ("MO8001", "MO8002", "MO8003") or response.status_code == 401):
+                        logger.warning("Token error (%s) encountered. Invalidate tokens and retry re-auth.", error_code)
+                        with self._auth_lock, self._access_token_lock:
+                            self.auth_token = None
+                            self.access_token = None
+                            self.last_login_at = None
+                        if self._ensure_authenticated():
+                            return self._request(method, endpoint, payload, require_auth, retry_on_auth=False)
+
+                    # Intercept TOTP error
+                    elif error_code == "MO1093":
+                        logger.error(
+                            "❌ MO API TOTP Verification Error (MO1093): %s\n"
+                            "  Diagnostic Hints:\n"
+                            "  - Ensure system clock is NTP synced (w32tm /resync)\n"
+                            "  - Verify TOTP_SECRET in .env matches MO portal secret",
+                            error_msg
+                        )
+
+                    # Intercept Method Not Allowed / Endpoint version mismatch
+                    elif error_code == "MO2001":
+                        logger.error("❌ MO API Error MO2001: Method Not Allowed for %s. Verify endpoint path.", endpoint)
+
+                    # Intercept Gateway Connectivity Issues
+                    elif error_code in ("MO5000", "MO5001", "MO5002"):
+                        logger.warning("⚠️ MO Gateway Network Error (%s): %s", error_code, error_msg)
+
+                    else:
+                        logger.warning("MO API call failed (%s): %s | Error Code: %s", endpoint, error_msg, error_code)
+
             return data
         except requests.exceptions.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else 0
@@ -343,7 +374,7 @@ class MotilalOswalAPI:
         return bool(response and response.get("status") == "SUCCESS")
 
     def _is_auth_valid(self) -> bool:
-        if not self.auth_token or not self.last_login_at:
+        if not self.auth_token or not self.access_token or not self.last_login_at:
             return False
         age_seconds = (datetime.now() - self.last_login_at).total_seconds()
         return age_seconds < self.auth_ttl_seconds
@@ -380,7 +411,6 @@ class MotilalOswalAPI:
                 self._response_cache[cache_key] = (now, data)
             return data
         else:
-            # Log the failure reason
             logger.error(f"Failed to fetch data from {endpoint}: {data if data else 'No response'}")
             return None
 
@@ -394,45 +424,53 @@ class MotilalOswalAPI:
         return current_code
 
     # ------------------------------------------------------------------
-    # Authentication & session APIs
+    # Authentication & session APIs (Dual-Token Flow)
     # ------------------------------------------------------------------
     def get_access_token(self) -> Optional[str]:
+        """Requests the Access Token using the Authorization (AuthToken) header."""
         if not self.auth_token:
-            logger.warning("Cannot get access token: no auth token available.")
+            logger.warning("Cannot get access token: no auth_token available.")
             return None
 
         with self._access_token_lock:
             if self.access_token:
                 return self.access_token
 
-            old_headers = self.session.headers.copy()
-            self._update_headers(self.auth_token)
-            try:
-                response = self._request("POST", self.REST_ENDPOINTS["get_access_token"], require_auth=True)
-            finally:
-                self.session.headers.update(old_headers)
+            # Update headers with current auth_token before calling access token endpoint
+            self._update_headers(auth_token=self.auth_token)
+            response = self._request("POST", self.REST_ENDPOINTS["get_access_token"], require_auth=False, retry_on_auth=False)
 
             if response and response.get("status") == "SUCCESS":
                 token = response.get("accesstoken")
                 if token:
                     self.access_token = token
-                    self._update_headers(self.auth_token)
-                    logger.info("Access token obtained successfully.")
+                    self._update_headers(auth_token=self.auth_token, access_token=self.access_token)
+                    logger.info("✅ Access token obtained successfully.")
                     return token
             logger.error("Failed to obtain access token: %s", response.get("message") if response else "No response")
             return None
 
     def login(self, totp_code: Optional[str] = None, two_fa: Optional[str] = None, retry_count: int = 0) -> Optional[Dict[str, Any]]:
+        """Performs atomic dual-token login pipeline (authdirectapi -> AuthToken -> getaccesstoken -> AccessToken)."""
         with self._auth_lock:
             if self._is_auth_valid() and not totp_code and not two_fa and retry_count == 0:
-                return {"status": "SUCCESS", "message": "Using existing authenticated session", "AuthToken": self.auth_token}
+                return {
+                    "status": "SUCCESS",
+                    "message": "Using existing authenticated dual-token session",
+                    "AuthToken": self.auth_token,
+                    "accesstoken": self.access_token
+                }
 
         if self._login_in_progress.is_set():
             logger.debug("Login already in progress, waiting...")
             self._login_in_progress.wait()
             with self._auth_lock:
-                if self.auth_token:
-                    return {"status": "SUCCESS", "AuthToken": self.auth_token}
+                if self.auth_token and self.access_token:
+                    return {
+                        "status": "SUCCESS",
+                        "AuthToken": self.auth_token,
+                        "accesstoken": self.access_token
+                    }
 
         self._login_in_progress.set()
         try:
@@ -457,17 +495,26 @@ class MotilalOswalAPI:
                 else:
                     logger.warning("No TOTP code available - login may require OTP verification")
 
-                response = self._request("POST", self.REST_ENDPOINTS["login"], payload, require_auth=False)
+                response = self._request("POST", self.REST_ENDPOINTS["login"], payload, require_auth=False, retry_on_auth=False)
 
                 if response and response.get("status") == "SUCCESS":
                     self.auth_token = response.get("AuthToken")
                     self.last_login_at = datetime.now()
-                    self.get_access_token()
-                    self._update_headers(self.auth_token)
+                    self._update_headers(auth_token=self.auth_token)
+
+                    # Step 2: Immediately acquire Access Token in the pipeline
+                    access_tok = self.get_access_token()
+                    if not access_tok:
+                        logger.error("❌ Dual-token handshake incomplete: AuthToken acquired but AccessToken generation failed.")
+                        self.auth_token = None
+                        self.last_login_at = None
+                        return {"status": "FAILURE", "errorcode": "MO8001", "message": "Failed to acquire access token"}
+
+                    self._update_headers()
                     if offset != 0:
-                        logger.info(f"✅ Authenticated successfully with {offset:+d}s time offset")
+                        logger.info(f"✅ Authenticated successfully with dual tokens (TOTP {offset:+d}s time offset)")
                     else:
-                        logger.info("✅ Authenticated with Motilal Oswal OpenAPI successfully")
+                        logger.info("✅ Authenticated with Motilal Oswal OpenAPI successfully (dual tokens acquired)")
                     return response
                 elif response and response.get("errorcode") == "MO1093" and offset != time_offsets[-1]:
                     logger.debug(f"TOTP failed with {offset:+d}s offset, trying next...")
@@ -477,16 +524,18 @@ class MotilalOswalAPI:
                     break
 
             self.auth_token = None
+            self.access_token = None
+            self.last_login_at = None
             if response:
                 error_code = response.get("errorcode")
                 error_msg = response.get("message")
                 if error_code == "MO1093":
                     logger.error(
-                        "❌ Login failed - INVALID TOTP: %s | Error: %s\n"
-                        "  1. Verify system time is synchronized\n"
+                        "❌ Login failed - INVALID TOTP (MO1093): %s\n"
+                        "  1. Verify system time is synchronized (w32tm /resync)\n"
                         "  2. Confirm TOTP_SECRET in .env matches your MO profile\n"
-                        "  3. Try regenerating TOTP_SECRET",
-                        error_msg, error_code
+                        "  3. Try regenerating TOTP_SECRET in MO portal",
+                        error_msg
                     )
                 else:
                     logger.error("❌ Login failed: %s | Error Code: %s", error_msg, error_code)
@@ -499,9 +548,10 @@ class MotilalOswalAPI:
     def logout(self) -> Optional[Dict[str, Any]]:
         response = self._request("POST", self.REST_ENDPOINTS["logout"], {"userid": self.user_id})
         if response and response.get("status") == "SUCCESS":
-            self.auth_token = None
-            self.access_token = None
-            self.last_login_at = None
+            with self._auth_lock, self._access_token_lock:
+                self.auth_token = None
+                self.access_token = None
+                self.last_login_at = None
             with self._cache_lock:
                 self._response_cache.clear()
             self._update_headers()
@@ -512,7 +562,7 @@ class MotilalOswalAPI:
         return self._request("POST", self.REST_ENDPOINTS["profile"], payload)
 
     # ------------------------------------------------------------------
-    # Market data REST endpoints (clientcode is optional – do NOT auto‑add)
+    # Market data REST endpoints (Read-Only Data)
     # ------------------------------------------------------------------
     def get_scrips_by_exchange(self, exchangename: str, clientcode: Optional[str] = None) -> Optional[Dict[str, Any]]:
         payload = {"exchangename": exchangename.upper()}
@@ -533,7 +583,6 @@ class MotilalOswalAPI:
         payload = {"exchangename": exchangename.upper()}
         if clientcode:
             payload["clientcode"] = clientcode
-        # Log the request for debugging
         logger.debug(f"Fetching EOD data for {exchangename} with payload {payload}")
         result = self._cached_request("POST", self.REST_ENDPOINTS["eod"], payload)
         if result is None:
@@ -558,7 +607,24 @@ class MotilalOswalAPI:
         return self._cached_request("POST", self.REST_ENDPOINTS["index_ltp"], payload)
 
     # ------------------------------------------------------------------
-    # WebSocket helpers
+    # Paper Trading Safety Guards
+    # Explicitly block any live order placement, modification, cancellation,
+    # or live trade websocket connections.
+    # ------------------------------------------------------------------
+    def place_order(self, *args, **kwargs):
+        raise RuntimeError("Live order execution is strictly disabled in TradeEasy paper trading mode.")
+
+    def modify_order(self, *args, **kwargs):
+        raise RuntimeError("Live order modification is strictly disabled in TradeEasy paper trading mode.")
+
+    def cancel_order(self, *args, **kwargs):
+        raise RuntimeError("Live order cancellation is strictly disabled in TradeEasy paper trading mode.")
+
+    def connect_trade_websocket(self, *args, **kwargs):
+        raise RuntimeError("MO Trade WebSocket connection is strictly disabled in TradeEasy paper trading mode.")
+
+    # ------------------------------------------------------------------
+    # Market Data Broadcast WebSocket helpers
     # ------------------------------------------------------------------
     def connect_websocket(
         self,
@@ -568,7 +634,7 @@ class MotilalOswalAPI:
         on_error: Callable[[websocket.WebSocketApp, Exception], None],
     ) -> None:
         if not self._ensure_authenticated():
-            logger.error("Authenticate before opening the Motilal Oswal WebSocket feed.")
+            logger.error("Authenticate before opening the Motilal Oswal WebSocket broadcast feed.")
             return
 
         if self.ws and self.ws.sock and self.ws.sock.connected:
@@ -601,7 +667,7 @@ class MotilalOswalAPI:
             name="MO-WebSocketThread",
         )
         self.ws_thread.start()
-        logger.info("Started Motilal Oswal WebSocket thread -> %s", self.WEBSOCKET_URL)
+        logger.info("Started Motilal Oswal Market Data Broadcast WebSocket thread -> %s", self.WEBSOCKET_URL)
 
     def disconnect_websocket(self) -> None:
         if self.ws:
@@ -650,7 +716,7 @@ class MotilalOswalAPI:
             )
 
             self.ws.send(login_packet, opcode=websocket.ABNF.OPCODE_BINARY)
-            logger.info("Sent binary login handshake to MO WebSocket.")
+            logger.info("Sent binary login handshake to MO Broadcast WebSocket.")
             return True
         except Exception as exc:
             logger.error("Failed to send binary login packet: %s", exc)
@@ -684,10 +750,10 @@ class MotilalOswalAPI:
 
             if subscribe:
                 self.registered_scrips.add(key)
-                logger.info("Subscribed to %s via MO WebSocket.", key)
+                logger.info("Subscribed to %s via MO Broadcast WebSocket.", key)
             else:
                 self.registered_scrips.discard(key)
-                logger.info("Unsubscribed from %s via MO WebSocket.", key)
+                logger.info("Unsubscribed from %s via MO Broadcast WebSocket.", key)
             return True
         except Exception as exc:
             logger.error("Failed to toggle subscription for %s: %s", key, exc)
@@ -720,10 +786,10 @@ class MotilalOswalAPI:
 
             if subscribe:
                 self.registered_indices.add(key)
-                logger.info("Subscribed to %s index feed via MO WebSocket.", key)
+                logger.info("Subscribed to %s index feed via MO Broadcast WebSocket.", key)
             else:
                 self.registered_indices.discard(key)
-                logger.info("Unsubscribed from %s index feed via MO WebSocket.", key)
+                logger.info("Unsubscribed from %s index feed via MO Broadcast WebSocket.", key)
             return True
         except Exception as exc:
             logger.error("Failed to toggle index subscription for %s: %s", exchange, exc)

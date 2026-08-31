@@ -63,10 +63,9 @@ export const SocketProvider = ({ children }) => {
       reconnectionDelay: 2000,
       reconnectionDelayMax: 8000,
       timeout: 60000,
-      // Use polling-only to prevent "Invalid frame header" errors
-      // until the backend is configured with eventlet/gevent for native WebSocket support
-      transports: ['polling'],
-      upgrade: false,
+      // Attempt true WebSockets first, fallback to polling if blocked by proxies/firewalls
+      transports: ['websocket', 'polling'],
+      upgrade: true,
     });
 
     let isShuttingDown = false;
@@ -187,13 +186,12 @@ export const SocketProvider = ({ children }) => {
     newSocket.io.on('reconnect_error', handleConnectError);
     newSocket.io.on('reconnect_failed', handleReconnectFailed);
 
-
     return () => {
       isShuttingDown = true;
       newSocket.off('connect', handleConnect);
       newSocket.off('disconnect', handleDisconnect);
       newSocket.off('connect_error', handleConnectError);
-      // socket events removed below
+      
       newSocket.io.off('reconnect_attempt', handleReconnectAttempt);
       newSocket.io.off('reconnect_error', handleConnectError);
       newSocket.io.off('reconnect_failed', handleReconnectFailed);
@@ -220,4 +218,3 @@ export const SocketProvider = ({ children }) => {
     </SocketContext.Provider>
   );
 };
-

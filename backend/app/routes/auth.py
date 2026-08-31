@@ -8,8 +8,9 @@ from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify, session, current_app
 from flask_login import login_user, logout_user, login_required, current_user
 from mongoengine.errors import NotUniqueError
+
 from app.models import User, Watchlist
-from app import bcrypt  # Imported from the app factory in __init__.py
+from app import bcrypt, limiter
 
 # --- Configuration ---
 logger = logging.getLogger(__name__)
@@ -19,9 +20,18 @@ auth_bp = Blueprint('auth', __name__)
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 MOBILE_REGEX = re.compile(r"^\+91\d{10}$")  # +91 followed by any 10 digits
 PASSWORD_MIN_LENGTH = 8
-LOGIN_ATTEMPT_WINDOW_SECONDS = 300  # 5 minutes
-LOGIN_ATTEMPT_THRESHOLD = 5
-LOGIN_RETRY_AFTER_SECONDS = 300
+
+
+@auth_bp.errorhandler(429)
+def ratelimit_handler(e):
+    """
+    Ensures that rate limit errors return a JSON payload 
+    instead of Flask's default HTML error page.
+    """
+    return jsonify({
+        "success": False,
+        "message": f"Rate limit exceeded. {e.description}"
+    }), 429
 
 
 def _hash_reset_token(token: str) -> str:
@@ -93,18 +103,12 @@ def signup():
         return jsonify({"success": False, "message": "An internal server error occurred."}), 500
 
 @auth_bp.route('/login', methods=['POST'])
+@limiter.limit("5 per 5 minute")  # True IP-based brute-force protection
 def login():
     """
     Handles user login with credential verification and brute-force protection.
     """
     try:
-        now = time.time()
-        attempts = [ts for ts in session.get('login_attempts', []) if now - ts < LOGIN_ATTEMPT_WINDOW_SECONDS]
-
-        if len(attempts) >= LOGIN_ATTEMPT_THRESHOLD:
-            logger.warning(f"Login rate limit hit for IP: {request.remote_addr}")
-            return jsonify({"success": False, "message": "Too many login attempts. Please try again later."}), 429
-
         data = request.get_json()
         if not data or not data.get('client_id') or not data.get('password'):
             return jsonify({"success": False, "message": "Client ID and password are required."}), 400
@@ -123,8 +127,8 @@ def login():
             session.clear()
             session['last_activity'] = time.time()
             login_user(user, remember=remember)
-            session.pop('login_attempts', None)  # Clear attempts on successful login
             session.modified = True
+            
             logger.info(f"User {user.client_id} logged in successfully (remember={remember}, ip={request.remote_addr}).")
             # Audit log (no secrets): successful login
             logger.info(f'AUDIT: login_success client_id={user.client_id} ip={request.remote_addr} user_agent={request.headers.get("User-Agent")}')
@@ -134,9 +138,6 @@ def login():
                 "user": {"client_id": user.client_id, "username": user.username}
             }), 200
         else:
-            attempts.append(now)
-            # keep the list trimmed to the window length to avoid ever-growing
-            session['login_attempts'] = [ts for ts in attempts if now - ts < LOGIN_ATTEMPT_WINDOW_SECONDS]
             logger.warning(f"Failed login attempt for Client ID: {client_id} from IP: {request.remote_addr}")
             # Audit log (no secrets): failed login
             logger.info(f'AUDIT: login_failed client_id={client_id} ip={request.remote_addr} user_agent={request.headers.get("User-Agent")}')
@@ -202,6 +203,7 @@ def check_auth():
     }), 200
 
 @auth_bp.route('/forgot-password', methods=['POST'])
+@limiter.limit("3 per hour")  # Prevent email enumeration and spam
 def forgot_password():
     """
     Initiates password reset process by generating a secure token.
@@ -243,6 +245,7 @@ def forgot_password():
         return jsonify({"success": False, "message": "An internal server error occurred."}), 500
 
 @auth_bp.route('/reset-password', methods=['POST'])
+@limiter.limit("5 per 15 minute")  # Prevent token brute-forcing
 def reset_password():
     """
     Resets user password using a valid reset token.

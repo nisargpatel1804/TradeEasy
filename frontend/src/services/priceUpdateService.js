@@ -1,19 +1,23 @@
 /**
  * Price Update Service (Singleton)
- * * Manages real-time price updates by listening to a Socket.IO client. This service
- * centralizes all incoming price data from the backend WebSocket and efficiently
- * distributes it to any subscribed React components.
+ * Manages real-time price updates by listening to a Socket.IO client.
+ * Implements Socket.IO Room Isolation to drastically reduce bandwidth and CPU usage.
  */
 class PriceUpdateService {
   constructor() {
     this.socket = null;
     this.subscribers = new Set();
-    this.latestPrices = {}; // Cache for the most recent price of each symbol
+    this.latestPrices = {}; 
     this.maxLatestPriceEntries = 4000;
+    
+    // Tracks active rooms so we can re-join them on reconnect
+    this.activeRooms = new Set(['indices']); // Always subscribe to global indices
+
     this._stockUpdateHandler = null;
     this._indexUpdateHandler = null;
     this._initialSnapshotHandler = null;
-  this._initialIndicesHandler = null;
+    this._initialIndicesHandler = null;
+    this._connectHandler = null;
   }
 
   _deferToNextFrame(callback) {
@@ -36,17 +40,8 @@ class PriceUpdateService {
     }
   }
 
-  /**
-   * Initializes the service with the application's Socket.IO client instance.
-   * This should only be called once, typically from a central context provider.
-   * @param {object} socketInstance - The connected socket.io-client instance.
-   */
   initialize(socketInstance) {
-    if (!socketInstance) {
-      return;
-    }
-
-    if (this.socket === socketInstance) {
+    if (!socketInstance || this.socket === socketInstance) {
       return;
     }
 
@@ -58,27 +53,56 @@ class PriceUpdateService {
     this._attachSocketListeners();
   }
 
-  /**
-   * Backwards-compatible alias for initialize.
-   * @param {object} socketInstance - The connected socket.io-client instance.
-   */
   init(socketInstance) {
     this.initialize(socketInstance);
   }
 
+  // --- Room Isolation Management ---
+
   /**
-   * Attaches listeners to the core socket events emitted by the backend.
+   * Tells the backend to send live ticks for specific symbols.
    */
+  watchSymbols(symbols) {
+    if (!Array.isArray(symbols)) return;
+    symbols.forEach(sym => {
+      if (!sym) return;
+      const room = `stock:${sym}`;
+      this.activeRooms.add(room);
+      if (this.socket && this.socket.connected) {
+        this.socket.emit('join_room', { room });
+      }
+    });
+  }
+
+  /**
+   * Tells the backend to stop sending live ticks for specific symbols.
+   */
+  unwatchSymbols(symbols) {
+    if (!Array.isArray(symbols)) return;
+    symbols.forEach(sym => {
+      if (!sym) return;
+      const room = `stock:${sym}`;
+      this.activeRooms.delete(room);
+      if (this.socket && this.socket.connected) {
+        this.socket.emit('leave_room', { room });
+      }
+    });
+  }
+
   _attachSocketListeners() {
-    if (!this.socket) {
-      return;
-    }
+    if (!this.socket) return;
+
+    // Automatically rejoin all active rooms when socket connects/reconnects
+    this._connectHandler = () => {
+      this.activeRooms.forEach(room => {
+        this.socket.emit('join_room', { room });
+      });
+    };
+    this.socket.on('connect', this._connectHandler);
 
     this._stockUpdateHandler = (data = {}) => {
       const symbol = data.symbol;
-      if (!symbol) {
-        return;
-      }
+      if (!symbol) return;
 
       const mergedPayload = {
         ...(this.latestPrices[symbol] || {}),
@@ -94,9 +118,7 @@ class PriceUpdateService {
 
     this._indexUpdateHandler = (data = {}) => {
       const symbol = data.symbol;
-      if (!symbol) {
-        return;
-      }
+      if (!symbol) return;
 
       const mergedPayload = {
         ...(this.latestPrices[symbol] || {}),
@@ -104,25 +126,20 @@ class PriceUpdateService {
         entityType: 'index',
       };
 
-      this.latestPrices[symbol] = mergedPayload; // Indices are also identified by a symbol-like key (e.g., 'NSE:26000')
+      this.latestPrices[symbol] = mergedPayload; // Indices are also identified by a symbol-like key
       this._pruneLatestPrices();
       this._notifySubscribers({ type: 'index', symbol });
     };
 
     // Batch update handlers for improved performance
     this._stockBatchUpdateHandler = (payload = {}) => {
-      // Backend sends { updates: [...] }
       const dataArray = payload.updates || [];
-      if (!Array.isArray(dataArray) || dataArray.length === 0) {
-        return;
-      }
+      if (!Array.isArray(dataArray) || dataArray.length === 0) return;
 
       const changedSymbols = [];
       dataArray.forEach((data = {}) => {
         const symbol = data.symbol;
-        if (!symbol) {
-          return;
-        }
+        if (!symbol) return;
 
         const mergedPayload = {
           ...(this.latestPrices[symbol] || {}),
@@ -138,7 +155,6 @@ class PriceUpdateService {
       this._pruneLatestPrices();
 
       if (changedSymbols.length > 0) {
-        // Notify subscribers with batch update
         this._notifySubscribers({ 
           type: 'stock_batch', 
           symbols: changedSymbols,
@@ -148,18 +164,13 @@ class PriceUpdateService {
     };
 
     this._indexBatchUpdateHandler = (payload = {}) => {
-      // Backend sends { updates: [...] }
       const dataArray = payload.updates || [];
-      if (!Array.isArray(dataArray) || dataArray.length === 0) {
-        return;
-      }
+      if (!Array.isArray(dataArray) || dataArray.length === 0) return;
 
       const changedSymbols = [];
       dataArray.forEach((data = {}) => {
         const symbol = data.symbol;
-        if (!symbol) {
-          return;
-        }
+        if (!symbol) return;
 
         const mergedPayload = {
           ...(this.latestPrices[symbol] || {}),
@@ -175,7 +186,6 @@ class PriceUpdateService {
       this._pruneLatestPrices();
 
       if (changedSymbols.length > 0) {
-        // Notify subscribers with batch update
         this._notifySubscribers({ 
           type: 'index_batch', 
           symbols: changedSymbols,
@@ -184,28 +194,17 @@ class PriceUpdateService {
       }
     };
 
-    // Listener for individual stock price ticks
     this.socket.on('stock_update', this._stockUpdateHandler);
-
-    // Listener for index price ticks
     this.socket.on('index_update', this._indexUpdateHandler);
-
-    // Listener for batched stock updates (performance optimization)
     this.socket.on('stock_updates_batch', this._stockBatchUpdateHandler);
-
-    // Listener for batched index updates (performance optimization)
     this.socket.on('index_updates_batch', this._indexBatchUpdateHandler);
 
     this._initialSnapshotHandler = (data = {}) => {
-      if (!data || typeof data !== 'object') {
-        return;
-      }
+      if (!data || typeof data !== 'object') return;
 
       let mutated = false;
       Object.entries(data).forEach(([symbol, payload]) => {
-        if (!symbol || typeof payload !== 'object') {
-          return;
-        }
+        if (!symbol || typeof payload !== 'object') return;
 
         const mergedPayload = {
           ...(this.latestPrices[symbol] || {}),
@@ -228,16 +227,12 @@ class PriceUpdateService {
     this.socket.on('initial_stock_prices', this._initialSnapshotHandler);
 
     this._initialIndicesHandler = (data = []) => {
-      if (!Array.isArray(data)) {
-        return;
-      }
+      if (!Array.isArray(data)) return;
 
       const priceMap = {};
       data.forEach((payload = {}) => {
         const symbol = payload.symbol;
-        if (!symbol) {
-          return;
-        }
+        if (!symbol) return;
 
         priceMap[symbol] = {
           ...(payload || {}),
@@ -255,34 +250,17 @@ class PriceUpdateService {
   }
 
   _detachSocketListeners() {
-    if (!this.socket) {
-      return;
-    }
+    if (!this.socket) return;
 
-    if (this._stockUpdateHandler) {
-      this.socket.off('stock_update', this._stockUpdateHandler);
-    }
+    if (this._connectHandler) this.socket.off('connect', this._connectHandler);
+    if (this._stockUpdateHandler) this.socket.off('stock_update', this._stockUpdateHandler);
+    if (this._indexUpdateHandler) this.socket.off('index_update', this._indexUpdateHandler);
+    if (this._stockBatchUpdateHandler) this.socket.off('stock_updates_batch', this._stockBatchUpdateHandler);
+    if (this._indexBatchUpdateHandler) this.socket.off('index_updates_batch', this._indexBatchUpdateHandler);
+    if (this._initialSnapshotHandler) this.socket.off('initial_stock_prices', this._initialSnapshotHandler);
+    if (this._initialIndicesHandler) this.socket.off('initial_indices', this._initialIndicesHandler);
 
-    if (this._indexUpdateHandler) {
-      this.socket.off('index_update', this._indexUpdateHandler);
-    }
-
-    if (this._stockBatchUpdateHandler) {
-      this.socket.off('stock_updates_batch', this._stockBatchUpdateHandler);
-    }
-
-    if (this._indexBatchUpdateHandler) {
-      this.socket.off('index_updates_batch', this._indexBatchUpdateHandler);
-    }
-
-    if (this._initialSnapshotHandler) {
-      this.socket.off('initial_stock_prices', this._initialSnapshotHandler);
-    }
-
-    if (this._initialIndicesHandler) {
-      this.socket.off('initial_indices', this._initialIndicesHandler);
-    }
-
+    this._connectHandler = null;
     this._stockUpdateHandler = null;
     this._indexUpdateHandler = null;
     this._stockBatchUpdateHandler = null;
@@ -291,15 +269,8 @@ class PriceUpdateService {
     this._initialIndicesHandler = null;
   }
 
-  /**
-   * Subscribes a callback function to receive real-time updates.
-   * @param {function} callback - The function to be called with new price data.
-   * @returns {function} A function to unsubscribe the callback.
-   */
   subscribe(callback) {
-    if (typeof callback !== 'function') {
-      return () => {};
-    }
+    if (typeof callback !== 'function') return () => {};
 
     this.subscribers.add(callback);
 
@@ -309,26 +280,19 @@ class PriceUpdateService {
       console.error('Error delivering initial price snapshot to subscriber:', error);
     }
 
-    // Return an unsubscribe function for cleanup
     return () => this.subscribers.delete(callback);
   }
 
-  /**
-   * Clears socket listeners and cached data, allowing a fresh re-initialization later.
-   */
   reset() {
     if (this.socket) {
       this._detachSocketListeners();
     }
     this.socket = null;
     this.latestPrices = {};
+    this.activeRooms = new Set(['indices']); // Reset rooms
     this._notifySubscribers({ type: 'reset' });
   }
 
-  /**
-   * Clears only cached prices and keeps socket listeners attached.
-   * Useful after account-level reset flows where stale prices should be dropped.
-   */
   clearPrices({ defer = false } = {}) {
     this.latestPrices = {};
 
@@ -341,10 +305,6 @@ class PriceUpdateService {
     notifyReset();
   }
 
-  /**
-   * Notifies all active subscribers with the new data.
-   * @param {object} data - The price data received from the WebSocket.
-   */
   _notifySubscribers(payload = {}) {
     const broadcast = this._createBroadcastPayload(payload);
     this.subscribers.forEach(callback => {
@@ -379,8 +339,6 @@ class PriceUpdateService {
     }
 
     if (isIncremental) {
-      // Incremental update: only clone the changed entries — avoid copying the full
-      // latestPrices map on every tick.
       let changedPrices = {};
       if (symbol) {
         const entry = this.latestPrices[symbol];
@@ -401,7 +359,6 @@ class PriceUpdateService {
       };
     }
 
-    // Full snapshot (initial subscribe, reset, or seed): clone everything
     const allPrices = this._cloneLatestPrices();
     let changedPrices = {};
     if (symbols?.length) {
@@ -421,30 +378,21 @@ class PriceUpdateService {
     };
   }
 
-  /**
-   * Retrieves the most recent cached price for a given symbol.
-   * @param {string} symbol - The stock or index symbol.
-   * @returns {object|null} The latest price data or null if not available.
-   */
   getLatestPrice(symbol) {
     return this.latestPrices[symbol] || null;
   }
 
   /**
-   * Seeds the cache with pre-fetched prices and notifies subscribers.
-   * Useful for priming the UI with REST-fetched data before live ticks arrive.
-   * @param {Object<string, object>} priceMap - Map of symbol to price payloads.
+   * Seeds the cache and automatically joins Socket.IO rooms for the requested symbols.
    */
   seedPrices(priceMap = {}) {
-    if (!priceMap || typeof priceMap !== 'object') {
-      return;
-    }
+    if (!priceMap || typeof priceMap !== 'object') return;
 
     let mutated = false;
+    const symbolsToWatch = [];
+
     Object.entries(priceMap).forEach(([symbol, payload]) => {
-      if (!symbol || typeof payload !== 'object') {
-        return;
-      }
+      if (!symbol || typeof payload !== 'object') return;
 
       const mergedPayload = {
         ...(this.latestPrices[symbol] || {}),
@@ -454,10 +402,16 @@ class PriceUpdateService {
       };
 
       this.latestPrices[symbol] = mergedPayload;
+      symbolsToWatch.push(symbol);
       mutated = true;
     });
 
     this._pruneLatestPrices();
+
+    // Automatically instruct the backend to route these ticks to us
+    if (symbolsToWatch.length > 0) {
+      this.watchSymbols(symbolsToWatch);
+    }
 
     if (mutated) {
       this._notifySubscribers({ type: 'snapshot' });

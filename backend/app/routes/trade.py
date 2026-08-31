@@ -3,11 +3,17 @@ import secrets
 from decimal import Decimal
 from flask import Blueprint, request, jsonify
 from flask_login import login_required, current_user
+
 from app.models import Holding, User
 from app.services.trade_executor import TradeExecutor
 from app.services.reset_guard import is_user_reset_in_progress
-from app.services.market_time import validate_order_timing, is_market_open, get_market_status_message, get_market_session, is_market_holiday
-# Import the centralized, cached function for all stock data lookups
+from app.services.market_time import (
+    validate_order_timing, 
+    is_market_open, 
+    get_market_status_message, 
+    get_market_session, 
+    is_market_holiday
+)
 from .stock import get_stock_data_from_api, format_symbol
 
 # --- Configuration ---
@@ -16,14 +22,16 @@ trade_bp = Blueprint('trade', __name__)
 
 # Maximum order constraints
 MAX_ORDER_QUANTITY = 100000  # Maximum shares per order
-MAX_ORDER_VALUE = 10000000  # Maximum order value in rupees (1 crore)
+MAX_ORDER_VALUE = 10000000   # Maximum order value in rupees (1 crore)
 
 
 def _is_user_resetting(user_id) -> bool:
+    """Checks if the user is currently undergoing a portfolio reset."""
     return is_user_reset_in_progress(user_id)
 
 
 def _reset_in_progress_response():
+    """Standardized response when trading is blocked by a reset."""
     return jsonify({
         "success": False,
         "message": "Portfolio reset in progress. Trading actions are temporarily blocked."
@@ -31,6 +39,7 @@ def _reset_in_progress_response():
 
 
 def _response_status_from_executor_error(message: str) -> int:
+    """Maps internal executor error messages to appropriate HTTP status codes."""
     text = (message or '').lower()
     if 'portfolio reset in progress' in text:
         return 423
@@ -42,9 +51,10 @@ def _response_status_from_executor_error(message: str) -> int:
 
 # --- Helper Functions ---
 
-def _generate_idempotency_key():
+def _generate_idempotency_key() -> str:
     """Generate a unique idempotency key for order deduplication."""
     return secrets.token_urlsafe(32)
+
 
 def _resolve_idempotency_key(data: dict | None) -> str:
     """Prefer a client-supplied idempotency key when available."""
@@ -54,35 +64,37 @@ def _resolve_idempotency_key(data: dict | None) -> str:
             return str(provided_key)
     return _generate_idempotency_key()
 
+
 def _validate_advanced_order_params(order_type: str, data: dict) -> tuple[bool, str]:
     """Validate parameters specific to advanced order types."""
     if order_type == 'STOP_LOSS':
         stop_loss_price = data.get('stop_loss_price')
         if not stop_loss_price or float(stop_loss_price) <= 0:
-            return False, "Stop-loss price is required and must be positive"
+            return False, "Stop-loss price is required and must be positive."
     
     elif order_type == 'STOP_LIMIT':
         stop_loss_price = data.get('stop_loss_price')
         limit_price = data.get('price')
         if not stop_loss_price or float(stop_loss_price) <= 0:
-            return False, "Trigger price is required for stop-limit orders"
+            return False, "Trigger price is required for stop-limit orders."
         if not limit_price or float(limit_price) <= 0:
-            return False, "Limit price is required for stop-limit orders"
+            return False, "Limit price is required for stop-limit orders."
     
     elif order_type == 'TRAILING_STOP':
         trailing_pct = data.get('trailing_stop_pct')
         if not trailing_pct or float(trailing_pct) <= 0 or float(trailing_pct) > 50:
-            return False, "Trailing stop percentage must be between 0 and 50"
+            return False, "Trailing stop percentage must be between 0 and 50."
     
     elif order_type == 'BRACKET':
         stop_loss_price = data.get('stop_loss_price')
         target_price = data.get('target_price')
         if not stop_loss_price or float(stop_loss_price) <= 0:
-            return False, "Stop-loss price is required for bracket orders"
+            return False, "Stop-loss price is required for bracket orders."
         if not target_price or float(target_price) <= 0:
-            return False, "Target price is required for bracket orders"
+            return False, "Target price is required for bracket orders."
     
     return True, ""
+
 
 def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, int]:
     """
@@ -108,21 +120,19 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
     if order_type not in valid_order_types:
         return {"success": False, "message": f"Invalid order type. Must be one of: {', '.join(valid_order_types)}."}, 400
     
-    # 2. Circuit Breaker check and further price-dependent validations will happen after fetching live data.
-
-    # 3. Advanced Params
+    # 2. Advanced Params
     is_valid, error_msg = _validate_advanced_order_params(order_type, data)
     if not is_valid:
         return {"success": False, "message": error_msg}, 400
 
-    # 4. Market Hours
+    # 3. Market Hours
     is_timing_valid, timing_message = validate_order_timing(order_type, product_type)
     if not is_timing_valid:
         return {"success": False, "message": timing_message}, 400
 
     quantity = int(quantity_input)
 
-    # 4.5. Live Data (fetch once for reuse)
+    # 4. Live Data (fetches instantly from WebSocket memory cache if available)
     api_data = get_stock_data_from_api(symbol_input)
     if not api_data:
         return {"success": False, "message": f"Instrument '{format_symbol(symbol_input)}' is not available."}, 404
@@ -131,10 +141,9 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
     if current_ltp <= 0:
         return {"success": False, "message": "Could not fetch valid market price."}, 502
 
-    # 2 (circuit breaker) now that we have price data
+    # 5. Circuit Breaker / Price Deviation Check
     if order_type in ['LIMIT', 'STOP_LIMIT'] and data.get('price'):
         limit_price = float(data.get('price'))
-        # only apply if we have a valid current price
         if current_ltp > 0:
             price_deviation = abs((limit_price - float(current_ltp)) / float(current_ltp)) * 100
             if price_deviation > 20:
@@ -147,7 +156,7 @@ def _validate_and_process_trade_request(action: str, data: dict) -> tuple[dict, 
     if estimated_value > Decimal(str(MAX_ORDER_VALUE)):
         return {"success": False, "message": f"Order value exceeds limit of \u20b9{MAX_ORDER_VALUE:,}."}, 400
 
-    # 6. Determine Status & Price
+    # 6. Determine Status & Execution Price
     execution_price = None
     status = "PENDING"
     
@@ -229,16 +238,15 @@ def buy():
 
     trade_data = result['data']
     idempotency_key = _resolve_idempotency_key(data)
-    
-    # Pre-check funds for immediate feedback (Executor does atomic check, but this saves a DB hit)
     user = current_user
+    
+    # Pre-check funds for immediate feedback
     if trade_data['status'] == 'EXECUTED':
-        # Check against available balance (balance - reserved balance)
         available = Decimal(str(user.balance)) - Decimal(str(user.reserved_balance))
         if available < trade_data['total_amount']:
             return jsonify({"success": False, "message": "Insufficient funds."}), 402
             
-        # DELEGATE TO EXECUTOR
+        # Delegate to atomic executor
         response = TradeExecutor.execute_buy(
             user_id=user.id,
             symbol=trade_data['symbol'],
@@ -249,7 +257,7 @@ def buy():
             idempotency_key=idempotency_key
         )
     else:
-        # PENDING ORDER
+        # Pending Order
         available = Decimal(str(user.balance)) - Decimal(str(user.reserved_balance))
         if available < trade_data['total_amount']:
             return jsonify({"success": False, "message": "Insufficient available funds (some funds are reserved)."}), 402
@@ -293,7 +301,7 @@ def sell():
     trade_data = result['data']
     idempotency_key = _resolve_idempotency_key(data)
     
-    # Determine Short Selling
+    # Determine Short Selling Context
     user_requested_short = bool(data.get('allow_short'))
     allow_short = (
         trade_data['product_type'] == 'MIS'
@@ -302,7 +310,6 @@ def sell():
     )
 
     if trade_data['status'] == 'EXECUTED':
-        # DELEGATE TO EXECUTOR
         response = TradeExecutor.execute_sell(
             user_id=current_user.id,
             symbol=trade_data['symbol'],
@@ -314,7 +321,7 @@ def sell():
             allow_short=allow_short
         )
     else:
-        # PENDING ORDER
+        # Pending Order
         response = TradeExecutor.create_pending_order(
             user_id=current_user.id,
             symbol=trade_data['symbol'],
@@ -362,7 +369,6 @@ def modify_order(order_id):
         return _reset_in_progress_response()
 
     data = request.get_json() or {}
-
     quantity = data.get('quantity')
     price = data.get('price')
 
@@ -455,23 +461,20 @@ def update_exit_plan():
     if not holding or holding.quantity <= 0:
         return jsonify({"success": False, "message": f"No active holding found for {symbol}."}), 404
 
-    # --- Cancellation Logic for Existing Orders ---
-    # Since modifying OCO is complex (sharing reservation), the safest way is to
-    # CANCEL existing plans and create new ones with the remaining available quantity.
-    
+    # Cancellation Logic: Cancel existing plans to free up the reserved quantity
     if stop_order_id:
         TradeExecutor.cancel_order(current_user.id, stop_order_id)
     if target_order_id:
         TradeExecutor.cancel_order(current_user.id, target_order_id)
     
-    # Reload holding to get fresh available quantity after cancellations
+    # Reload holding to get fresh available quantity
     holding.reload()
     available_qty = holding.quantity - holding.reserved_quantity
     
     if available_qty <= 0:
         return jsonify({"success": False, "message": "No available shares to protect (all reserved)."}), 400
 
-    # --- Create New Plan via Executor ---
+    # Create New Plan via Executor
     response = TradeExecutor.modify_exit_plan(
         user_id=current_user.id,
         symbol=symbol,

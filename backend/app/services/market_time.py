@@ -4,7 +4,7 @@ Handles market timing, holidays, circuit breakers, and session types.
 """
 
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
@@ -22,11 +22,6 @@ POST_MARKET_END = time(23, 59, 59)
 
 # Auto square-off time for MIS orders (5 minutes before market close)
 MIS_AUTO_SQUAREOFF_TIME = time(15, 25, 0)
-
-# Market holidays are configurable via AppConfig.MARKET_HOLIDAYS (see app.config).
-# Default: empty list if not set.
-from app.config import AppConfig
-MARKET_HOLIDAYS = getattr(AppConfig, 'MARKET_HOLIDAYS', [])
 
 # Circuit breaker limits for indices
 CIRCUIT_BREAKER_LIMITS = {
@@ -65,7 +60,8 @@ def is_market_holiday(date=None):
     # Normalize to IST timezone
     try:
         if date.tzinfo is None:
-            date = date.replace(tzinfo=IST)
+            # Assume naive datetimes are in UTC standard, then convert to IST
+            date = date.replace(tzinfo=timezone.utc).astimezone(IST)
         else:
             date = date.astimezone(IST)
     except Exception:
@@ -76,9 +72,13 @@ def is_market_holiday(date=None):
     if date.weekday() in (5, 6):
         return True
 
+    # Dynamically fetch holidays at call time to prevent import-order empty lists
+    from app.config import AppConfig
+    market_holidays = getattr(AppConfig, 'MARKET_HOLIDAYS', [])
+
     # Check against holiday calendar
     date_str = date.strftime("%Y-%m-%d")
-    return date_str in MARKET_HOLIDAYS
+    return date_str in market_holidays
 
 
 def get_market_session(dt=None):

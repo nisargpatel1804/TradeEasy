@@ -2,7 +2,7 @@ import logging
 import secrets
 import time
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timezone
 from mongoengine import Q
 from pymongo import UpdateOne, ASCENDING
 from app.models import Transaction, Holding, Lot, User, ShortPosition
@@ -12,15 +12,21 @@ from app.services.reset_guard import is_user_reset_in_progress
 
 logger = logging.getLogger(__name__)
 
-# Simple in-memory counters for basic observability (replace with real metrics in production)
+# Simple in-memory counters for basic observability
 _metrics = {
     "holding_update_retries": 0,
     "short_upsert_retries": 0
 }
 
+
+def _utcnow() -> datetime:
+    """Returns timezone-aware UTC datetime standard for Python 3.12+."""
+    return datetime.now(timezone.utc)
+
+
 class TradeExecutor:
     """
-    Centralized service for executing trades with atomic database operations.
+    Centralized service for executing paper trades with atomic database operations.
     Handles both immediate Market orders and triggered Pending orders.
     Implements optimistic locking and atomic increments to prevent race conditions.
     """
@@ -31,7 +37,7 @@ class TradeExecutor:
     def execute_buy(cls, user_id, symbol, quantity, price, product_type, order_type, 
                    transaction_id=None, idempotency_key=None, is_pending_execution=False, reserved_amount=0.0):
         """
-        Executes a Buy order.
+        Executes a Buy order atomically.
         
         Args:
             user_id: User ID.
@@ -46,7 +52,7 @@ class TradeExecutor:
             reserved_amount: The amount originally reserved for this order (to release).
         """
         try:
-            # 1. Fetch User
+            # 1. Fetch User & Check Reset Guard
             user = User.objects(id=user_id).first()
             if not user:
                 return {"success": False, "message": "User not found"}
@@ -56,15 +62,15 @@ class TradeExecutor:
             exec_price = Decimal(str(price))
             total_cost = exec_price * Decimal(quantity)
             reserved_amt = Decimal(str(reserved_amount)) if is_pending_execution else Decimal('0')
+            now_dt = _utcnow()
 
-            # 2. Handle Transaction Record (Atomic Lock)
+            # 2. Handle Transaction Record (Atomic Transition to PROCESSING)
             transaction = None
             if transaction_id:
-                # Atomically transition PENDING -> PROCESSING
                 updated = Transaction.objects(
                     id=transaction_id, 
                     status='PENDING'
-                ).update_one(set__is_processing=True, set__execution_date=datetime.utcnow())
+                ).update_one(set__is_processing=True, set__execution_date=now_dt)
                 
                 if updated == 0:
                     logger.warning(f"Order {transaction_id} is already being processed or executed.")
@@ -90,12 +96,12 @@ class TradeExecutor:
                     action='BUY',
                     quantity=quantity,
                     price=float(price),
-                    status='PENDING', # Temporary status while we process funds
+                    status='PENDING',  # Temporary status while processing funds
                     is_processing=True,
                     order_type=order_type,
                     product_type=product_type,
                     idempotency_key=idempotency_key or secrets.token_urlsafe(32),
-                    execution_date=datetime.utcnow()
+                    execution_date=now_dt
                 )
                 transaction.save()
 
@@ -103,12 +109,10 @@ class TradeExecutor:
             fund_update_success = False
             
             if is_pending_execution:
-                # For triggered orders: Release reserved amount AND deduct actual cost.
-                # Ensure (available balance + reserved amount) covers total_cost.
+                # Triggered pending order: Release reserved amount AND deduct actual cost.
                 needed_balance = total_cost - reserved_amt
                 try:
                     if needed_balance <= 0:
-                        # Reserved covers cost entirely; allow update without balance check
                         res = User.objects(
                             id=user.id,
                             reserved_balance__gte=float(reserved_amt)
@@ -117,7 +121,6 @@ class TradeExecutor:
                             inc__reserved_balance=-float(reserved_amt)
                         )
                     else:
-                        # Use raw PyMongo update to support $expr
                         collection = User._get_collection()
                         filter_cond = {
                             "_id": user.id,
@@ -143,14 +146,13 @@ class TradeExecutor:
 
                 if res > 0:
                     fund_update_success = True
-                    # Sanity cleanup to prevent floating point drift
-                    User.objects(id=user.id, reserved_balance__lt=0).update_one(set__reserved_balance=0)
+                    # Precision Drift Guard
+                    User.objects(id=user.id, reserved_balance__lt=0.01).update_one(set__reserved_balance=0.0)
                 else:
                     logger.error(f"Fund deduction failed for pending order {transaction.id}")
                     
             else:
                 # Market Order: Atomic deduction from available balance (balance - reserved).
-                # Use raw PyMongo update to support $expr
                 collection = User._get_collection()
                 filter_cond = {
                     "_id": user.id,
@@ -210,14 +212,14 @@ class TradeExecutor:
             if shares_to_hold > 0:
                 cls._add_shares_to_holding(user, symbol, shares_to_hold, float(exec_price), product_type)
                 
-                # Create Lot for FIFO
+                # Create Lot for FIFO tracking
                 Lot(
                     user=user,
                     symbol=symbol,
                     quantity=shares_to_hold,
                     original_quantity=shares_to_hold,
                     purchase_price=float(exec_price),
-                    purchase_date=datetime.utcnow(),
+                    purchase_date=now_dt,
                     purchase_transaction=transaction,
                     product_type=product_type,
                     is_active=True
@@ -265,8 +267,8 @@ class TradeExecutor:
     def execute_sell(cls, user_id, symbol, quantity, price, product_type, order_type,
                     transaction_id=None, idempotency_key=None, is_pending_execution=False, allow_short=False):
         """
-        Executes a Sell order.
-        Handles checking holdings (or reserved holdings), atomic deduction, and balance crediting.
+        Executes a Sell order atomically.
+        Handles holdings deduction, short position upserting, FIFO lot matching, and balance crediting.
         """
         try:
             user = User.objects(id=user_id).first()
@@ -277,6 +279,7 @@ class TradeExecutor:
 
             exec_price = Decimal(str(price))
             total_proceeds = exec_price * Decimal(quantity)
+            now_dt = _utcnow()
 
             # 1. Handle Transaction Record
             transaction = None
@@ -284,7 +287,7 @@ class TradeExecutor:
                 updated = Transaction.objects(
                     id=transaction_id, 
                     status='PENDING'
-                ).update_one(set__is_processing=True, set__execution_date=datetime.utcnow())
+                ).update_one(set__is_processing=True, set__execution_date=now_dt)
                 
                 if updated == 0:
                     return {"success": False, "message": "Order already processed"}
@@ -306,25 +309,23 @@ class TradeExecutor:
                     order_type=order_type,
                     product_type=product_type,
                     idempotency_key=idempotency_key or secrets.token_urlsafe(32),
-                    execution_date=datetime.utcnow()
+                    execution_date=now_dt
                 )
                 transaction.save()
 
-            # 2. ATOMIC ASSET DEDUCTION
+            # 2. ATOMIC ASSET DEDUCTION (Optimistic Locking Loop)
             shares_sold_from_holding = 0
             short_sold_qty = 0
             deduction_success = False
             holding = None
             
-            # --- RACE CONDITION FIX: Optimistic Locking Loop ---
             for _ in range(cls.MAX_RETRIES):
                 holding = Holding.objects(user=user, symbol=symbol, product_type=product_type).first()
                 if not holding:
                     break
 
                 if is_pending_execution:
-                    # Pending Sell: Simple Atomic update is safe here because we are only touching reserved
-                    # which was locked previously by this exact order.
+                    # Pending Sell: Atomic update safely releases reserved shares previously locked
                     res = Holding.objects(
                         id=holding.id,
                         reserved_quantity__gte=quantity
@@ -335,46 +336,41 @@ class TradeExecutor:
                     if res > 0:
                         shares_sold_from_holding = quantity
                         deduction_success = True
-                    break # No need to retry pending execution failures (if it fails, shares aren't there)
+                        # Precision Drift Guard
+                        Holding.objects(id=holding.id, reserved_quantity__lt=1).update_one(set__reserved_quantity=0)
+                    break
                 else:
-                    # Market Sell: Must ensure we don't sell reserved shares.
-                    # We check available quantity, then try to update while ensuring reserved_qty hasn't changed.
+                    # Market Sell: Ensure available quantity >= quantity
                     available = int(holding.quantity) - int(holding.reserved_quantity or 0)
                     if available >= quantity:
                         res = Holding.objects(
                             id=holding.id,
                             quantity__gte=quantity,
-                            # OPTIMISTIC LOCK: Fail update if reserved_quantity changed since read
-                            reserved_quantity=holding.reserved_quantity 
+                            reserved_quantity=holding.reserved_quantity  # Optimistic lock check
                         ).update_one(
                             inc__quantity=-quantity
                         )
                         if res > 0:
                             shares_sold_from_holding = quantity
                             deduction_success = True
-                            break # Success
+                            break
                         else:
-                            # Update failed (reserved qty changed by another thread?), retry loop
                             continue
                     else:
-                        break # Not enough shares
+                        break
             
-            # 3. Handle Short Selling
+            # 3. Handle Short Selling (MIS Only)
             if not deduction_success:
-                # Only allow pure short when no sellable holding is available.
-                # This prevents conflicting long+short states if a long-sell update races.
                 available_after_check = 0
                 if holding:
                     holding.reload()
                     available_after_check = max(int(holding.quantity) - int(holding.reserved_quantity or 0), 0)
 
                 if product_type == 'MIS' and allow_short and not is_pending_execution and available_after_check <= 0:
-                    # Short sell logic
                     short_sold_qty = quantity
                     cls._upsert_short_position(user, symbol, quantity, float(exec_price))
                     deduction_success = True
                 else:
-                    # Failed
                     msg = "Insufficient shares to sell" if not is_pending_execution else "Reserved shares synchronization error"
                     transaction.status = 'CANCELLED'
                     transaction.is_processing = False
@@ -386,7 +382,7 @@ class TradeExecutor:
             # 4. CREDIT BALANCE
             User.objects(id=user.id).update_one(inc__balance=float(total_proceeds))
 
-            # 5. MATCH LOTS
+            # 5. MATCH LOTS (FIFO)
             realized_pnl_delta = Decimal('0')
             if shares_sold_from_holding > 0:
                 fifo_result = cls._process_fifo_lots(
@@ -417,12 +413,11 @@ class TradeExecutor:
             transaction.is_processing = False
             transaction.save()
 
-            # Persist realized P&L sync metadata on every SELL so /portfolio can
-            # reliably determine whether persisted values are current.
+            # Persist realized P&L sync metadata
             try:
                 executed_sell_count = Transaction.objects(user=user, status='EXECUTED', action='SELL').count()
                 updates = {
-                    'set__realized_pnl_synced_at': datetime.utcnow(),
+                    'set__realized_pnl_synced_at': now_dt,
                     'set__realized_pnl_sell_count': int(executed_sell_count),
                 }
                 if realized_pnl_delta != Decimal('0'):
@@ -486,7 +481,6 @@ class TradeExecutor:
 
             # 1. RESERVE RESOURCES
             if action == 'BUY':
-                # Use raw PyMongo update to support $expr
                 collection = User._get_collection()
                 filter_cond = {
                     "_id": user.id,
@@ -515,7 +509,6 @@ class TradeExecutor:
                         return {"success": False, "message": "MIS short-sell requires immediate MARKET execution."}
                     return {"success": False, "message": "No holdings to sell"}
 
-                # Use raw PyMongo update to support $expr
                 collection = Holding._get_collection()
                 filter_cond = {
                     "_id": holding.id,
@@ -570,29 +563,28 @@ class TradeExecutor:
         """
         try:
             user = User.objects(id=user_id).first()
-            if not user: return {"success": False, "message": "User not found"}
+            if not user:
+                return {"success": False, "message": "User not found"}
             if is_user_reset_in_progress(user.id):
                 return {"success": False, "message": "Portfolio reset in progress."}
             
             # 1. Reserve Shares (Atomic)
-            # We reserve the full available quantity once. 
-            # Both Stop and Target will point to this same reservation logically.
             if available_qty > 0:
                 holding = Holding.objects(user=user, symbol=symbol, product_type=product_type).first()
-                if not holding: return {"success": False, "message": "Holding not found"}
+                if not holding:
+                    return {"success": False, "message": "Holding not found"}
                 
-                # Verify and Reserve
                 curr_avail = holding.quantity - holding.reserved_quantity
                 if curr_avail < available_qty:
                     return {"success": False, "message": "Insufficient available shares"}
                 
                 res = Holding.objects(id=holding.id).update_one(inc__reserved_quantity=available_qty)
-                if res == 0: return {"success": False, "message": "Failed to reserve shares"}
+                if res == 0:
+                    return {"success": False, "message": "Failed to reserve shares"}
             
-            # 2. Create/Update Orders
+            # 2. Create Orders
             response = {}
-            # Use a shared parent ID to identify them as siblings for cancellation logic
-            parent_id = f"EXITPLAN:{user_id}:{int(datetime.utcnow().timestamp())}"
+            parent_id = f"EXITPLAN:{user_id}:{int(_utcnow().timestamp())}"
             
             # STOP LOSS LEG
             if stop_price:
@@ -650,21 +642,15 @@ class TradeExecutor:
             if txn.action == 'BUY':
                 total_val = Decimal(str(txn.price)) * Decimal(txn.quantity)
                 User.objects(id=user_id).update_one(inc__reserved_balance=-float(total_val))
-                User.objects(id=user_id, reserved_balance__lt=0).update_one(set__reserved_balance=0)
+                User.objects(id=user_id, reserved_balance__lt=0.01).update_one(set__reserved_balance=0.0)
                 
             elif txn.action == 'SELL':
                 holding = Holding.objects(user=user_id, symbol=txn.symbol, product_type=txn.product_type).first()
                 if holding:
-                    # Release shares
                     Holding.objects(id=holding.id).update_one(inc__reserved_quantity=-txn.quantity)
-                    Holding.objects(id=holding.id, reserved_quantity__lt=0).update_one(set__reserved_quantity=0)
+                    Holding.objects(id=holding.id, reserved_quantity__lt=1).update_one(set__reserved_quantity=0)
 
             # 3. Cancel Sibling Legs (OCO / Exit Plan)
-            # If this order is part of an Exit Plan, cancelling one implies cancelling the other.
-            # CRITICAL: Since `modify_exit_plan` reserved shares ONCE for the PAIR, 
-            # and we just released them above, we must simply mark the sibling as CANCELLED 
-            # without triggering `cancel_order` on it (which would try to release shares again).
-            
             if txn.parent_order_id and txn.bracket_order_type in ['STOP_LOSS', 'TARGET']:
                 siblings = Transaction.objects(
                     parent_order_id=txn.parent_order_id, 
@@ -672,7 +658,6 @@ class TradeExecutor:
                     id__ne=txn.id
                 )
                 for sib in siblings:
-                    # Mark sibling cancelled but DO NOT call cancel_order (avoid double release)
                     Transaction.objects(id=sib.id).update_one(set__status='CANCELLED')
                     logger.info(f"Auto-cancelled sibling order {sib.id} for OCO consistency.")
             
@@ -728,11 +713,10 @@ class TradeExecutor:
             if res > 0:
                 return
             else:
-                    # Backoff briefly before retrying
-                    wait = 0.02 * (2 ** attempt)
-                    _metrics["holding_update_retries"] += 1
-                    logger.debug("Optimistic lock contention for holding %s (attempt %s/%s), backing off %.3fs", symbol, attempt+1, cls.MAX_RETRIES, wait)
-                    time.sleep(wait)
+                wait = 0.02 * (2 ** attempt)
+                _metrics["holding_update_retries"] += 1
+                logger.debug("Optimistic lock contention for holding %s (attempt %s/%s), backing off %.3fs", symbol, attempt+1, cls.MAX_RETRIES, wait)
+                time.sleep(wait)
         logger.warning(f"Failed to update average price for {symbol} after retries. Updating quantity only.")
         Holding.objects(user=user, symbol=symbol, product_type=product_type).update_one(inc__quantity=quantity)
 
@@ -776,7 +760,9 @@ class TradeExecutor:
 
     @classmethod
     def _process_fifo_lots(cls, user, symbol, qty_to_sell, product_type, sell_price):
-        """Updates Lots based on FIFO logic with atomic, race-safe deductions.
+        """
+        Updates Lots based on FIFO logic with atomic, race-safe deductions.
+        Audits matched quantities and logs a warning if a lot discrepancy occurs.
 
         Returns:
             dict: {
@@ -810,7 +796,6 @@ class TradeExecutor:
             ).update_one(inc__quantity=-deduct)
 
             if updated == 0:
-                # Contention: retry with latest lot snapshot.
                 continue
 
             lot_price = Decimal(str(getattr(lot, 'purchase_price', 0) or 0))
@@ -819,6 +804,15 @@ class TradeExecutor:
 
             Lot.objects(id=lot.id, quantity__lte=0).update_one(set__quantity=0, set__is_active=False)
             remaining -= deduct
+
+        if remaining > 0:
+            logger.warning(
+                "⚠️ FIFO lot imbalance detected for user=%s symbol=%s: expected to sell %s, but only matched %s from active lots.",
+                user.id,
+                symbol,
+                qty_to_sell,
+                matched_qty
+            )
 
         return {
             'complete': remaining == 0,
@@ -836,7 +830,6 @@ class TradeExecutor:
         
         # Manual OCO Logic for SELL legs (Exit Long Position)
         if exit_action == 'SELL':
-            # Reserve Qty ONCE for both potential sell orders
             res = Holding.objects(user=user, symbol=symbol, product_type=product_type).update_one(inc__reserved_quantity=quantity)
             if res == 0:
                 logger.error("Failed to reserve shares for Bracket Legs")

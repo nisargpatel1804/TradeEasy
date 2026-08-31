@@ -4,8 +4,9 @@ import json
 from flask import Blueprint, request, jsonify
 from flask_login import login_required
 from pymongo.errors import OperationFailure
-from app.models import AQScrip
 from mongoengine.queryset.visitor import Q
+
+from app.models import AQScrip
 from app import limiter
 
 logger = logging.getLogger(__name__)
@@ -16,8 +17,22 @@ MAX_RESULT_LIMIT = 50
 MAX_QUERY_LENGTH = 64
 SEARCH_INDEX_HINT = "idx_search_prefix_sort"
 
+
+@search_bp.errorhandler(429)
+def ratelimit_handler(e):
+    """
+    Ensures that rate limit errors return a JSON payload 
+    instead of Flask's default HTML error page, preventing frontend parsing crashes.
+    """
+    return jsonify({
+        "success": False,
+        "message": f"Search rate limit exceeded. {e.description}"
+    }), 429
+
+
 def _normalize_query(value: str) -> str:
     return " ".join(str(value or "").split()).strip()
+
 
 def _format_scrip_result(scrip):
     company_name = scrip.scripfullname.split('-')[0].strip() if scrip.scripfullname and '-' in scrip.scripfullname else (scrip.scripname or scrip.scripshortname)
@@ -138,10 +153,7 @@ def _perform_search(query: str, max_results: int = SEARCH_RESULT_LIMIT, page_tok
     next_page_token = None
     if has_next and cursor_rows:
         last_short, last_code = cursor_rows[-1]
-        next_page_token = _encode_page_token(
-            last_short,
-            last_code
-        )
+        next_page_token = _encode_page_token(last_short, last_code)
 
     return {
         "results": results,
@@ -172,7 +184,10 @@ def search_stocks():
         query = query[:MAX_QUERY_LENGTH]
 
     if not query or len(query) < 2:
-        return jsonify({"success": False, "message": "Query parameter 'q' is required and must be at least 2 characters."}), 400
+        return jsonify({
+            "success": False, 
+            "message": "Query parameter 'q' is required and must be at least 2 characters."
+        }), 400
 
     try:
         payload = _perform_search(query, max_results=limit, page_token=page_token)
@@ -190,10 +205,12 @@ def search_stocks():
             "success": True,
             **payload,
         }), 200
+        
     except ValueError as err:
         return jsonify({"success": False, "message": str(err)}), 400
     except Exception:
         logger.exception("Error during stock search for query '%s'", query)
-        return jsonify({"success": False, "message": "An internal server error occurred. Please try again later."}), 500
-
-
+        return jsonify({
+            "success": False, 
+            "message": "An internal server error occurred. Please try again later."
+        }), 500

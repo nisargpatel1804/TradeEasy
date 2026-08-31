@@ -8,7 +8,7 @@ from flask_mongoengine import MongoEngine
 from flask_cors import CORS
 from flask_login import LoginManager, current_user
 from flask_bcrypt import Bcrypt
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
@@ -201,10 +201,11 @@ def create_app():
 
     # --- Register Blueprints for API Routes ---
     # Grouping blueprint imports and registrations for better organization
-    from .routes import auth, markets, orders, portfolio, profile, search, stock, trade, watchlist
+    from .routes import auth, charts, markets, orders, portfolio, profile, search, stock, trade, watchlist
     from .db_scrips_populate import data_management_bp
     
     app.register_blueprint(auth.auth_bp, url_prefix='/api')
+    app.register_blueprint(charts.charts_bp, url_prefix='/api')
     app.register_blueprint(markets.markets_bp, url_prefix='/api')
     app.register_blueprint(orders.orders_bp, url_prefix='/api')
     app.register_blueprint(portfolio.portfolio_bp, url_prefix='/api')
@@ -254,8 +255,6 @@ def create_app():
     @app.route('/')
     def health_check():
         return jsonify({"status": "healthy", "message": "TradeEasy API is running"}), 200
-
-
 
     # --- Configure Flask-Login Handlers ---
     login_manager.login_view = 'auth.login' # Points to the login function in the auth blueprint
@@ -413,6 +412,21 @@ def create_app():
             logger.info(f"Client disconnected: {request.sid}")
         except Exception as e:
             logger.error(f"Error in disconnect handler: {e}", exc_info=True)
+
+    # --- CRITICAL FIX: Room Isolation Handlers ---
+    @socketio.on('join_room')
+    def handle_join_room(data):
+        room = data.get('room')
+        if room:
+            join_room(room)
+            logger.debug(f"Client {request.sid} joined room: {room}")
+
+    @socketio.on('leave_room')
+    def handle_leave_room(data):
+        room = data.get('room')
+        if room:
+            leave_room(room)
+            logger.debug(f"Client {request.sid} left room: {room}")
 
     logger.info("Flask application created and configured successfully.")
     return app

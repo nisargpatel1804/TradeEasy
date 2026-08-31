@@ -4,11 +4,8 @@ import * as api from '../services/api.js';
 import priceUpdateService from '../services/priceUpdateService.js';
 
 const DataContext = createContext(null);
+const DATA_CACHE_TTL_MS = 20000;
 
-/**
- * Custom hook to easily access the DataContext from any component.
- * @returns {object} The data context value.
- */
 export const useData = () => {
   const context = useContext(DataContext);
   if (!context) {
@@ -19,13 +16,8 @@ export const useData = () => {
 
 export const useDataContext = useData;
 
-/**
- * The DataProvider component fetches, caches, and provides application-wide
- * data to all its children. It is dependent on the AuthContext.
- */
 export const DataProvider = ({ children }) => {
   const { isAuthenticated } = useAuth();
-  const DATA_CACHE_TTL_MS = 20000;
 
   const [profileData, setProfileData] = useState(null);
   const [watchlistsData, setWatchlistsData] = useState(null);
@@ -38,30 +30,40 @@ export const DataProvider = ({ children }) => {
   const dataCacheRef = useRef(new Map());
   const inflightDataRequestsRef = useRef(new Map());
 
+  // FIXED: Helper to extract symbols to watch
+  const extractWatchlistSymbols = (watchlists) => {
+    const symbols = [];
+    if (Array.isArray(watchlists)) {
+      watchlists.forEach(wl => wl.stocks?.forEach(s => s.symbol && symbols.push(s.symbol)));
+    }
+    return symbols;
+  };
+
   const updateProfileData = useCallback((data) => {
     profileRef.current = data;
     setProfileData(data);
   }, []);
 
-  // A reference used to dedupe parallel profile fetches. When a request is
-  // in flight we store its promise here and return it to any additional
-  // callers.  Once the request settles the ref is cleared.
   const inflightProfileRequest = useRef(null);
 
+  // FIXED: Instructs Socket.io to join rooms whenever watchlists are updated
   const updateWatchlistsData = useCallback((data) => {
     watchlistsRef.current = data;
     setWatchlistsData(data);
+    if (data?.watchlists) {
+      priceUpdateService.watchSymbols(extractWatchlistSymbols(data.watchlists));
+    }
   }, []);
 
-  // Applies an in-place patch function to the current watchlists state without
-  // triggering a full network refetch.  Updates the ref synchronously so that
-  // any in-flight getWatchlists(force=false) call sees the latest data.
+  // FIXED: Instructs Socket.io to join rooms whenever watchlists are patched locally
   const patchWatchlistsData = useCallback((patchFn) => {
     const current = watchlistsRef.current;
     if (!current) return;
-    const next = { ...current, watchlists: patchFn(current.watchlists ?? []) };
+    const nextWatchlists = patchFn(current.watchlists ?? []);
+    const next = { ...current, watchlists: nextWatchlists };
     watchlistsRef.current = next;
     setWatchlistsData(next);
+    priceUpdateService.watchSymbols(extractWatchlistSymbols(nextWatchlists));
   }, []);
 
   const updateIndicesData = useCallback((data) => {
@@ -113,7 +115,7 @@ export const DataProvider = ({ children }) => {
     const cacheAgeMs = Math.max(0, Date.now() - (entry.timestamp || 0));
     const isStale = cacheAgeMs > DATA_CACHE_TTL_MS;
     return { data: entry.data, isCold: false, isStale, cacheAgeMs };
-  }, [DATA_CACHE_TTL_MS]);
+  }, []);
 
   const writeDataCache = useCallback((key, data) => {
     dataCacheRef.current.set(key, { data, timestamp: Date.now() });
@@ -190,8 +192,6 @@ export const DataProvider = ({ children }) => {
         return profileRef.current;
       }
 
-      // If there is already an in-flight request and we're not forcing a
-      // fresh fetch, return the existing promise so callers are de-duped.
       if (!force && inflightProfileRequest.current) {
         return inflightProfileRequest.current;
       }
@@ -359,10 +359,6 @@ export const DataProvider = ({ children }) => {
     [isAuthenticated, updateIndicesData]
   );
 
-  /**
-   * Fetches all essential application data from the backend.
-   * This is typically called once after the user logs in.
-   */
   const fetchInitialData = useCallback(async () => {
     if (!isAuthenticated) {
       resetState();
@@ -375,7 +371,6 @@ export const DataProvider = ({ children }) => {
     try {
       const profilePromise = (async () => {
         if (window.__initialProfile) {
-          // consume the cached blob and avoid a network request
           const initialProfile = window.__initialProfile;
           updateProfileData(initialProfile);
           try { window.__initialProfile = null; } catch {}
@@ -393,7 +388,6 @@ export const DataProvider = ({ children }) => {
     }
   }, [getProfile, getWatchlists, isAuthenticated, resetState]);
 
-  // Effect to trigger the initial data fetch when the user's authentication state changes.
   useEffect(() => {
     fetchInitialData();
   }, [fetchInitialData]);
@@ -472,7 +466,6 @@ export const DataProvider = ({ children }) => {
     getPortfolio,
     getOrders,
     getExecutedOrders,
-    // Backwards compatibility conveniences
     profile: profileData,
     watchlists: watchlistsData?.watchlists ?? [],
   };
@@ -483,4 +476,3 @@ export const DataProvider = ({ children }) => {
     </DataContext.Provider>
   );
 };
-

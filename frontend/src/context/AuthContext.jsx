@@ -1,7 +1,7 @@
 import React, { createContext, useState, useEffect, useContext, useCallback, useRef } from 'react';
-import * as authService from '../services/auth.js'; // Using the dedicated auth service with .js extension
 import { useNavigate } from 'react-router-dom';
-import { useToast } from '../assets/ui/use-toast.js';
+import { useToast } from '../components/ui/use-toast.js';
+import * as api from '../services/api.js';
 
 const AuthContext = createContext(null);
 
@@ -72,7 +72,7 @@ export const AuthProvider = ({ children }) => {
 
     try {
       try {
-        await authService.logout();
+        await api.logout();
       } catch (error) {
         // If session is already expired, backend may return 401.
         // Treat it as success so UI can still log out cleanly.
@@ -94,7 +94,7 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     const verifyUserSession = async () => {
       try {
-        const data = await authService.checkAuth();
+        const data = await api.checkAuth();
         if (data.isAuthenticated) {
           setUser(data.user);
           setIsAuthenticated(true);
@@ -150,7 +150,7 @@ export const AuthProvider = ({ children }) => {
   const { toast } = useToast();
 
   const login = async (credentials) => {
-    const data = await authService.login(credentials);
+    const data = await api.login(credentials);
     if (data.success) {
       setUser(data.user);
       setIsAuthenticated(true);
@@ -187,4 +187,3 @@ export const AuthProvider = ({ children }) => {
     </AuthContext.Provider>
   );
 };
-

@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.models import User
 
@@ -11,13 +11,19 @@ RESET_LOCK_TIMEOUT_SECONDS = int(os.getenv("RESET_LOCK_TIMEOUT_SECONDS", "120"))
 
 
 def _utcnow() -> datetime:
-    return datetime.utcnow()
+    """Returns timezone-aware UTC current time standard for Python 3.12+."""
+    return datetime.now(timezone.utc)
 
 
 def _is_stale_reset_lock(reset_started_at: datetime | None, now: datetime | None = None) -> bool:
     if not reset_started_at:
         return True
     now = now or _utcnow()
+
+    # Normalize naive datetimes loaded from database to UTC aware for accurate comparison
+    if reset_started_at.tzinfo is None and now.tzinfo is not None:
+        reset_started_at = reset_started_at.replace(tzinfo=timezone.utc)
+
     return reset_started_at <= (now - timedelta(seconds=RESET_LOCK_TIMEOUT_SECONDS))
 
 
