@@ -40,3 +40,6 @@ eventlet>=0.33
 
 # Time zone database for ZoneInfo on Windows
 tzdata>=2024.1
+
+yfinance>=0.2.40
+pandas>=2.0.0
